@@ -168,11 +168,85 @@ class CloudWebSocketClient:
 class PrintJobHandler:
     """打印任务处理器"""
     
-    def __init__(self, printer_manager, api_client, websocket_client=None):
+    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None):
         self.printer_manager = printer_manager
         self.api_client = api_client
         self.websocket_client = websocket_client
+        self.auth_client = auth_client
+        self.node_id = node_id
     
+    def handle_preview_file(self, message: Dict[str, Any]):
+        """处理文件预览请求"""
+        try:
+            data = message.get("data", {})
+            file_url = data.get("file_url")
+            file_name = data.get("file_name")
+            task_token = data.get("task_token")
+            file_id = data.get("file_id")
+
+            print(f"👀 [DEBUG] 收到文件预览请求:")
+            print(f"  文件名: {file_name}")
+            print(f"  文件URL: {file_url}")
+            print(f"  TaskToken: {task_token}")
+
+            if not all([file_url, task_token, file_id]):
+                print("❌ [DEBUG] 预览请求参数不完整")
+                return
+
+            # 暂时仅打印URL，不下载
+            print(f"🔗 [PREVIEW LINK] {file_url}")
+            
+            # 自动触发提交打印参数（模拟用户点击打印）
+            # 在实际UI中，这里应该等待用户操作
+            # 为了测试流程，这里使用定时器延时触发
+            threading.Timer(2.0, self._auto_submit_print_params, args=[file_id, task_token]).start()
+
+        except Exception as e:
+            print(f"❌ [DEBUG] 处理文件预览请求异常: {e}")
+
+    def _auto_submit_print_params(self, file_id: str, task_token: str):
+        """自动提交打印参数（测试用）"""
+        try:
+            print(f"🤖 [DEBUG] 自动提交打印参数 (FileID: {file_id})")
+            
+            # 获取默认打印机
+            printers = self.printer_manager.get_printers()
+            default_printer_id = None
+            if printers:
+                # 优先使用 printer_id (注册时生成的)，如果没有则 fallback 到 name (虽然不太可能)
+                default_printer_id = printers[0].get('id', printers[0].get('name'))
+            
+            if not default_printer_id:
+                print("❌ [DEBUG] 未找到可用打印机，无法提交打印参数")
+                return
+
+            print(f"🖨️ [DEBUG] 选择打印机ID: {default_printer_id}")
+
+            payload = {
+                "type": "submit_print_params",
+                "node_id": self.node_id, # 补充 node_id
+                "data": {
+                    "task_token": task_token,
+                    "file_id": file_id,
+                    "printer_id": default_printer_id, 
+                    "options": {
+                        "copies": 1,
+                        "color_mode": "color",
+                        "paper_size": "A4"
+                    }
+                }
+            }
+            
+            # 需要通过WebSocket发送
+            if self.websocket_client:
+                self.websocket_client.send_message_sync(payload)
+                print(f"✅ [DEBUG] 打印参数已提交")
+            else:
+                print("❌ [DEBUG] WebSocket客户端未连接，无法提交参数")
+
+        except Exception as e:
+            print(f"❌ [DEBUG] 自动提交打印参数异常: {e}")
+
     def handle_print_job(self, message: Dict[str, Any]):
         """处理打印任务消息"""
         try:
@@ -232,6 +306,12 @@ class PrintJobHandler:
             import tempfile
             import os
             
+            # 如果是相对路径，拼接完整URL
+            if file_url and not file_url.startswith(('http://', 'https://')):
+                if self.api_client and self.api_client.base_url:
+                    file_url = f"{self.api_client.base_url.rstrip('/')}/{file_url.lstrip('/')}"
+                    print(f"🔗 [DEBUG] 拼接完整文件URL: {file_url}")
+
             print(f"📥 [DEBUG] 下载打印文件: {file_url}")
             
             # S3签名URL不能带认证头，检查是否为签名URL

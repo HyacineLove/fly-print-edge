@@ -96,6 +96,7 @@ class CloudAPIClient:
             
             success_count = 0
             failed_printers = []
+            registered_printers = {}  # 记录注册成功的打印机ID映射: name -> id
             
             # 逐个注册打印机
             for i, printer in enumerate(printers):
@@ -106,6 +107,14 @@ class CloudAPIClient:
                 if response.status_code in [200, 201]:
                     success_count += 1
                     print(f"✅ [DEBUG] 打印机 {printer['name']} 注册成功")
+                    try:
+                        resp_data = response.json()
+                        if 'data' in resp_data and 'id' in resp_data['data']:
+                            printer_id = resp_data['data']['id']
+                            registered_printers[printer['name']] = printer_id
+                            print(f"🆔 [DEBUG] 获取到云端打印机ID: {printer_id}")
+                    except Exception as e:
+                        print(f"⚠️ [DEBUG] 解析响应ID失败: {e}")
                 else:
                     failed_printers.append({
                         "name": printer['name'],
@@ -113,24 +122,13 @@ class CloudAPIClient:
                     })
                     print(f"❌ [DEBUG] 打印机 {printer['name']} 注册失败: {response.status_code} - {response.text}")
             
-            if success_count == len(printers):
-                print(f"✅ [DEBUG] 所有打印机注册成功，数量: {success_count}")
-                return {"success": True, "registered_count": success_count}
-            elif success_count > 0:
-                print(f"⚠️ [DEBUG] 部分打印机注册成功: {success_count}/{len(printers)}")
-                return {
-                    "success": True, 
-                    "registered_count": success_count,
-                    "failed_count": len(failed_printers),
-                    "failed_printers": failed_printers
-                }
-            else:
-                print(f"❌ [DEBUG] 所有打印机注册失败")
-                return {
-                    "success": False, 
-                    "error": "所有打印机注册失败",
-                    "failed_printers": failed_printers
-                }
+            return {
+                "success": True, 
+                "success_count": success_count, 
+                "failed_count": len(failed_printers),
+                "failed_printers": failed_printers,
+                "registered_printers": registered_printers
+            }
                 
         except Exception as e:
             print(f"❌ [DEBUG] 打印机注册异常: {e}")

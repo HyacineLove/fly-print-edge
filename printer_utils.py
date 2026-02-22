@@ -148,6 +148,10 @@ class PrinterManager:
             self.platform_printer = LinuxPrinter()
         print("🎯 [DEBUG] PrinterManager初始化完成")
     
+    def get_printers(self) -> List[Dict]:
+        """获取管理的打印机列表"""
+        return self.config.get_managed_printers()
+
     def get_discovered_printers_df(self) -> pd.DataFrame:
         """获取发现的打印机DataFrame"""
         local_printers = self.discovery.discover_local_printers()

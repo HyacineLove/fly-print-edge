@@ -4,6 +4,7 @@
 """
 
 import json
+import uuid
 from datetime import datetime
 from typing import List, Dict
 
@@ -52,7 +53,7 @@ class PrinterConfig:
     def add_printer(self, printer_info: Dict):
         """添加打印机到管理列表"""
         printer_info["added_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        printer_info["id"] = f"printer_{len(self.config['managed_printers'])}"
+        printer_info["id"] = str(uuid.uuid4())
         print(f"➕ [DEBUG] 添加打印机到配置: {printer_info['name']} (ID: {printer_info['id']})")
         self.config["managed_printers"].append(printer_info)
         self.save_config()
@@ -69,6 +70,21 @@ class PrinterConfig:
         print(f"📊 [DEBUG] 移除结果: {original_count} -> {new_count}")
         self.save_config()
     
+    def update_printer_id(self, printer_name: str, new_id: str):
+        """更新打印机ID（用于同步云端ID）"""
+        updated = False
+        for printer in self.config["managed_printers"]:
+            if printer.get("name") == printer_name and printer.get("id") != new_id:
+                print(f"🔄 [DEBUG] 更新打印机ID: {printer_name} ({printer.get('id')} -> {new_id})")
+                printer["id"] = new_id
+                updated = True
+                break
+        
+        if updated:
+            self.save_config()
+            return True
+        return False
+
     def get_managed_printers(self) -> List[Dict]:
         """获取管理的打印机列表"""
         return self.config["managed_printers"]

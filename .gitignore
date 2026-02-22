@@ -1,4 +1,5 @@
 .venv
+venv
 .images
 __pycache__
 config.json

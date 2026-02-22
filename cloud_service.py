@@ -66,7 +66,9 @@ class CloudService:
                 self.print_job_handler = PrintJobHandler(
                     printer_manager=self.printer_manager,
                     api_client=self.api_client,
-                    websocket_client=self.websocket_client
+                    websocket_client=self.websocket_client,
+                    auth_client=self.auth_client,
+                    node_id=self.node_id
                 )
             
             print("✅ [DEBUG] 云端服务组件初始化完成")
@@ -142,6 +144,11 @@ class CloudService:
             if result["success"]:
                 self.registered = True
                 self.node_id = result["node_id"]
+                
+                # 更新PrintJobHandler的node_id
+                if self.print_job_handler:
+                    self.print_job_handler.node_id = self.node_id
+                    
                 print(f"✅ [DEBUG] 边缘节点注册成功: {self.node_id}")
                 return {"success": True, "node_id": self.node_id}
             else:
@@ -205,6 +212,18 @@ class CloudService:
             
             if result["success"]:
                 print(f"✅ [DEBUG] 打印机注册成功，数量: {len(printer_data)}")
+                
+                # 更新本地打印机ID
+                registered_printers = result.get("registered_printers", {})
+                if registered_printers and self.printer_manager:
+                    print(f"🔄 [DEBUG] 同步云端打印机ID到本地配置...")
+                    update_count = 0
+                    for name, cloud_id in registered_printers.items():
+                        if self.printer_manager.config.update_printer_id(name, cloud_id):
+                            update_count += 1
+                    
+                    if update_count > 0:
+                        print(f"✅ [DEBUG] 已更新 {update_count} 个打印机的云端ID")
             else:
                 print(f"❌ [DEBUG] 打印机注册失败: {result.get('error')}")
                 
@@ -233,6 +252,10 @@ class CloudService:
             if self.print_job_handler:
                 self.print_job_handler.websocket_client = self.websocket_client
                 self.websocket_client.add_message_handler("print_job", self.print_job_handler.handle_print_job)
+            
+            # 添加预览文件消息处理器
+            if self.print_job_handler:
+                self.websocket_client.add_message_handler("preview_file", self.print_job_handler.handle_preview_file)
             
             # 启动WebSocket客户端
             self.websocket_client.start()
