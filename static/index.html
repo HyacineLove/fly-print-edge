@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>飞印自助打印</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 状态1: 扫码上传 -->
+        <div id="scan-section" class="section active">
+            <h1>👋 欢迎使用飞印自助打印</h1>
+            <p class="subtitle">请扫描下方二维码上传文件</p>
+            <div class="qr-container">
+                <img id="qr-code" src="" alt="加载中..." />
+            </div>
+            <div class="status-text" id="scan-status">正在生成二维码...</div>
+            <div id="connection-status" class="status-text" style="font-size: 12px; color: #666; margin-top: 5px;">连接中...</div>
+            <div id="debug-url" class="debug-info"></div>
+        </div>
+
+        <!-- 状态2: 预览与设置 -->
+        <div id="preview-section" class="section">
+            <h1>📄 打印预览与设置</h1>
+            
+            <div class="file-info-card">
+                <h3>文件信息</h3>
+                <div class="info-row">
+                    <span class="label">文件名:</span>
+                    <span class="value" id="file-name">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">大小:</span>
+                    <span class="value" id="file-size">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">类型:</span>
+                    <span class="value" id="file-type">-</span>
+                </div>
+            </div>
+
+            <div class="settings-form">
+                <div class="form-group">
+                    <label>打印份数</label>
+                    <div class="counter">
+                        <button onclick="updateCopies(-1)">-</button>
+                        <input type="number" id="copies" value="1" min="1" readonly>
+                        <button onclick="updateCopies(1)">+</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>色彩模式</label>
+                    <select id="color-mode">
+                        <option value="Grayscale">黑白 (Grayscale)</option>
+                        <option value="Color">彩色 (Color)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>纸张大小</label>
+                    <select id="paper-size">
+                        <option value="A4">A4</option>
+                        <option value="Letter">Letter</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>双面打印</label>
+                    <select id="duplex">
+                        <option value="None">单面 (None)</option>
+                        <option value="LongEdge">长边翻转 (LongEdge)</option>
+                        <option value="ShortEdge">短边翻转 (ShortEdge)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="btn btn-secondary" onclick="resetState()">取消</button>
+                <button class="btn btn-primary" onclick="submitPrint()">✅ 确认打印</button>
+            </div>
+        </div>
+
+        <!-- 状态3: 打印中/完成 -->
+        <div id="printing-section" class="section">
+            <h1 id="printing-title">🖨️ 正在打印...</h1>
+            <p class="subtitle" id="printing-message">系统正在处理您的文档，请勿离开...</p>
+            <div class="progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+            <button id="return-btn" class="btn btn-secondary hidden" onclick="resetState()">返回首页</button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

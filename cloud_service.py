@@ -106,7 +106,8 @@ class CloudService:
                 self.status_reporter = PrinterStatusReporter(
                     self.websocket_client, self.printer_manager, self.node_id
                 )
-                self.status_reporter.start()
+                # self.status_reporter.start()
+                print("⚠️ [DEBUG] 由于Sandbox限制，暂时禁用打印机状态上报服务")
             
             print("✅ [DEBUG] 云端服务启动成功")
             return {"success": True, "message": "云端服务启动成功", "node_id": self.node_id}
@@ -260,11 +261,37 @@ class CloudService:
             # 启动WebSocket客户端
             self.websocket_client.start()
             
+            # 应用待处理的监听器
+            if hasattr(self, 'pending_listeners'):
+                for msg_type, handler in self.pending_listeners:
+                    self.websocket_client.add_message_handler(msg_type, handler)
+                self.pending_listeners = []
+            
             print("✅ [DEBUG] WebSocket客户端启动成功")
             
         except Exception as e:
             print(f"❌ [DEBUG] WebSocket客户端启动失败: {e}")
     
+    def add_message_listener(self, message_type: str, handler):
+        """添加消息监听器"""
+        print(f"➕ [DEBUG] CloudService添加消息监听器: {message_type}")
+        if self.websocket_client:
+            print(f"  ↳ 直接添加到WebSocket客户端")
+            self.websocket_client.add_message_handler(message_type, handler)
+        else:
+            # 如果WebSocket未初始化，先保存
+            print(f"  ↳ WebSocket未就绪，加入待处理列表")
+            if not hasattr(self, 'pending_listeners'):
+                self.pending_listeners = []
+            self.pending_listeners.append((message_type, handler))
+
+    def submit_print_params(self, task_token: str, options: Dict[str, Any]):
+        """提交打印参数"""
+        if self.websocket_client:
+            self.websocket_client.submit_print_params(task_token, options)
+        else:
+            print("⚠️ [DEBUG] WebSocket未连接，无法提交打印参数")
+
     def get_status(self) -> Dict[str, Any]:
         """获取云端服务状态"""
         status = {
