@@ -198,7 +198,16 @@ class CloudWebSocketClient:
             
         try:
             # 使用 run_coroutine_threadsafe
-            asyncio.run_coroutine_threadsafe(self._send_message(data), self.loop)
+            future = asyncio.run_coroutine_threadsafe(self._send_message(data), self.loop)
+            
+            # 等待结果，确保消息发送成功
+            try:
+                future.result(timeout=5)  # 等待5秒
+            except asyncio.TimeoutError:
+                print(f"❌ [ERROR] 同步发送WebSocket消息超时: {data.get('type')}")
+            except Exception as e:
+                print(f"❌ [ERROR] 同步发送WebSocket消息执行失败: {e}")
+                
         except Exception as e:
             print(f"❌ [ERROR] 同步发送WebSocket消息失败: {e}")
 
@@ -285,7 +294,7 @@ class PrintJobHandler:
                 return
             
             # 下载文件
-            file_path = self._download_print_file(file_url, job_id)
+            file_path = self._download_print_file(file_url, job_id, job_name)
             if not file_path:
                 self._report_job_failure(job_id, "文件下载失败")
                 return
@@ -309,7 +318,7 @@ class PrintJobHandler:
             # 统一方法已经处理了异常清理
             self._report_job_failure(data.get("job_id"), str(e))
     
-    def _download_print_file(self, file_url: str, job_id: str) -> Optional[str]:
+    def _download_print_file(self, file_url: str, job_id: str, expected_filename: str = None) -> Optional[str]:
         """下载打印文件"""
         try:
             import requests
@@ -342,14 +351,31 @@ class PrintJobHandler:
             if response.status_code == 200:
                 # 保存到临时文件
                 temp_dir = tempfile.gettempdir()
-                # 从URL路径中提取原始文件名，忽略查询参数
-                from urllib.parse import urlparse
-                parsed_url = urlparse(file_url)
-                original_filename = os.path.basename(parsed_url.path)
-                # 如果无法提取文件名，使用job_id作为备用
-                if not original_filename or '.' not in original_filename:
-                    original_filename = f"cloud_job_{job_id}.pdf"
-                temp_file_path = os.path.join(temp_dir, original_filename)
+                
+                # 确定文件名
+                final_filename = None
+                
+                # 1. 优先使用传入的期望文件名
+                if expected_filename and '.' in expected_filename:
+                    final_filename = expected_filename
+                    # 确保文件名安全
+                    final_filename = "".join([c for c in final_filename if c.isalpha() or c.isdigit() or c in '._- ']).strip()
+                
+                # 2. 尝试从URL提取
+                if not final_filename:
+                    # 从URL路径中提取原始文件名，忽略查询参数
+                    from urllib.parse import urlparse
+                    parsed_url = urlparse(file_url)
+                    url_filename = os.path.basename(parsed_url.path)
+                    if url_filename and '.' in url_filename:
+                        final_filename = url_filename
+                
+                # 3. 兜底策略：使用job_id作为文件名，默认为pdf (这可能是之前的bug来源)
+                # 只有在真的无法确定类型时才这样做
+                if not final_filename:
+                    final_filename = f"cloud_job_{job_id}.pdf"
+                
+                temp_file_path = os.path.join(temp_dir, final_filename)
                 
                 with open(temp_file_path, 'wb') as f:
                     f.write(response.content)
@@ -400,7 +426,11 @@ class PrintJobHandler:
                         self._report_job_success(cloud_job_id)
                         return
                     else:
-                        print(f"🔍 [DEBUG] 云端任务 {cloud_job_id} 仍在处理中，状态: {job_status.get('status', 'unknown')}")
+                        current_status = job_status.get('status', 'unknown')
+                        print(f"🔍 [DEBUG] 云端任务 {cloud_job_id} 仍在处理中，状态: {current_status}")
+                        # 上报中间状态 (如 printing)
+                        if current_status in ["printing", "正在打印", "正在后台处理"]:
+                             self._report_job_status(cloud_job_id, "printing", 50, f"正在打印: {current_status}")
                 
                 # 超时后报告成功（假设长时间运行的任务已完成）
                 print(f"⏰ [WARNING] 云端任务监控超时，假设已完成: {cloud_job_id}")
@@ -415,6 +445,34 @@ class PrintJobHandler:
         monitor_thread = threading.Thread(target=monitor, daemon=True)
         monitor_thread.start()
     
+    def _report_job_status(self, job_id: str, status: str, progress: int, message_text: str):
+        """通过WebSocket报告任务状态"""
+        if job_id:
+            try:
+                from datetime import datetime, timezone
+                
+                job_data = {
+                    "job_id": job_id,
+                    "status": status,
+                    "progress": progress,
+                    "error_message": None,
+                    "message": message_text
+                }
+                
+                message = {
+                    "type": "job_update",
+                    "node_id": self.api_client.node_id if self.api_client else "unknown",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "data": job_data
+                }
+                
+                if self.websocket_client:
+                    self.websocket_client.send_message_sync(message)
+                    print(f"✅ [INFO] 任务状态({status})已通过WebSocket上报: {job_id}")
+                
+            except Exception as e:
+                print(f"❌ [ERROR] 报告任务状态异常: {e}")
+
     def _report_job_success(self, job_id: str):
         """通过WebSocket报告任务成功"""
         if job_id:
@@ -427,7 +485,7 @@ class PrintJobHandler:
                     "status": "completed",
                     "progress": 100,
                     "error_message": None,
-                    "message": "打印完成" # 前端可能需要这个字段
+                    "message": "打印任务已完成" # 前端可能需要这个字段
                 }
                 
                 message = {

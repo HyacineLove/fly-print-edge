@@ -228,6 +228,12 @@ class WindowsEnterprisePrinter:
             if file_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff']:
                 # 图片文件使用GDI打印
                 return self._print_image_file(printer_name, file_path, job_name, print_options)
+            elif file_ext == '.pdf':
+                # PDF文件尝试调用系统打印
+                return self._print_pdf_file(printer_name, file_path, job_name, print_options)
+            elif file_ext in ['.doc', '.docx']:
+                # Word文档先转PDF再打印
+                return self._print_word_file(printer_name, file_path, job_name, print_options)
             else:
                 # 文本文件使用RAW打印
                 return self._print_raw_file(printer_name, file_path, job_name, print_options)
@@ -235,6 +241,216 @@ class WindowsEnterprisePrinter:
         except Exception as e:
             print(f"提交打印任务失败: {e}")
             return {"success": False, "message": f"提交打印任务失败: {e}"}
+
+    def _print_word_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
+        """将Word文档转换为PDF后打印"""
+        import tempfile
+        import os
+        import pythoncom
+        from win32com import client
+        
+        pdf_path = None
+        try:
+            # 初始化COM库（多线程环境下必需）
+            pythoncom.CoInitialize()
+            
+            # 创建临时PDF文件路径
+            temp_dir = tempfile.gettempdir()
+            pdf_filename = f"{os.path.splitext(os.path.basename(file_path))[0]}.pdf"
+            pdf_path = os.path.join(temp_dir, pdf_filename)
+            
+            # 如果临时PDF已存在，先删除
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except:
+                    pass
+            
+            print(f"📄 [INFO] 正在将Word文档转换为PDF: {file_path} -> {pdf_path}")
+            
+            # 调用Word/WPS进行转换
+            word = None
+            app_name = "Word.Application"
+            
+            try:
+                # 优先尝试调用 WPS
+                # WPS文字的ProgID通常是 Kwps.Application 或 WPS.Application
+                # 这里尝试几种常见的ProgID
+                wps_prog_ids = ["Kwps.Application", "WPS.Application"]
+                for prog_id in wps_prog_ids:
+                    try:
+                        word = client.Dispatch(prog_id)
+                        app_name = prog_id
+                        print(f"✅ [INFO] 成功连接到 WPS ({prog_id})")
+                        break
+                    except Exception:
+                        continue
+                
+                # 如果WPS不可用，回退到Microsoft Word
+                if not word:
+                    # 再次尝试 Kwps.Application (有时候第一遍可能失败)
+                    try:
+                         word = client.Dispatch("Kwps.Application")
+                         app_name = "Kwps.Application"
+                         print(f"✅ [INFO] 成功连接到 WPS (Kwps.Application)")
+                    except:
+                        print("⚠️ [WARNING] 未找到 WPS，尝试调用 Microsoft Word")
+                        try:
+                            word = client.Dispatch("Word.Application")
+                            app_name = "Word.Application"
+                        except:
+                            # 最后尝试 wps.application (小写)
+                            try:
+                                word = client.Dispatch("wps.application")
+                                app_name = "wps.application"
+                            except:
+                                pass
+            
+            except Exception as e:
+                print(f"❌ [ERROR] 无法启动文档处理程序 (WPS/Word): {e}")
+                raise e
+
+            word.Visible = False
+            # WPS可能不支持DisplayAlerts属性，加个try-except
+            try:
+                word.DisplayAlerts = False
+            except:
+                pass
+            
+            try:
+                # 兼容路径格式
+                abs_file_path = os.path.abspath(file_path)
+                doc = word.Documents.Open(abs_file_path)
+                
+                # wdFormatPDF = 17
+                doc.SaveAs(pdf_path, FileFormat=17)
+                doc.Close()
+                print(f"✅ [INFO] 文档转PDF成功 (使用 {app_name})")
+            except Exception as e:
+                print(f"❌ [ERROR] 文档转PDF失败: {e}")
+                # 尝试关闭文档
+                try:
+                    doc.Close()
+                except:
+                    pass
+                raise e
+            finally:
+                try:
+                    word.Quit()
+                except:
+                    pass
+                
+            # 转换成功后，调用PDF打印逻辑
+            return self._print_pdf_file(printer_name, pdf_path, job_name, print_options)
+            
+        except Exception as e:
+            print(f"❌ [ERROR] 处理Word文档失败: {e}")
+            return {"success": False, "message": f"Word文档处理失败: {str(e)}"}
+        finally:
+            # 清理COM库
+            pythoncom.CoUninitialize()
+
+    def _print_pdf_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
+        """打印PDF文件 (使用ShellExecute调用默认PDF阅读器打印)"""
+        import win32api
+        import win32print
+        import time
+        
+        try:
+            print(f"🖨️ [INFO] 正在调用系统命令打印PDF: {file_path} -> {printer_name}")
+            
+            # 使用 ShellExecute 的 "printto" 动词
+            # 参数: hwnd, operation, file, parameters, directory, showCmd
+            # printto 参数通常是: "printer_name"
+            # 注意：某些PDF阅读器可能不支持 printto，或者参数格式不同
+            # 标准做法是: printto "filename" "printer_name" "driver_name" "port_name"
+            # 但 win32api.ShellExecute 的参数 passing 比较特殊
+            
+            # 尝试方法1: 使用 printto
+            # 这种方式依赖于系统默认PDF阅读器支持 printto 命令
+            # 大多数阅读器(Acrobat, SumatraPDF)支持
+            # Edge 浏览器可能不支持静默打印
+            
+            # 为了更稳健，我们可以尝试使用 Ghostscript (如果安装了) 或 SumatraPDF
+            # 但这里我们先尝试系统默认机制
+            
+            # 获取默认打印机，以便恢复（虽然printto指定了打印机，但某些程序会更改默认打印机）
+            default_printer = win32print.GetDefaultPrinter()
+            
+            # 执行打印命令
+            # 注意: file_path 必须是绝对路径
+            abs_path = os.path.abspath(file_path)
+            
+            # 核心调用
+            # win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
+            
+            # 由于 ShellExecute 是异步的且不返回 JobID，我们需要一种机制来猜测 JobID
+            # 或者我们先暂停一下，让任务进入队列
+            
+            # 使用 print 动词（使用默认打印机）可能比 printto 更可靠，但我们需要先设置默认打印机
+            current_default = win32print.GetDefaultPrinter()
+            if current_default != printer_name:
+                print(f"🔄 [INFO] 临时切换默认打印机: {current_default} -> {printer_name}")
+                win32print.SetDefaultPrinter(printer_name)
+                
+            try:
+                # 使用 "print" 动词而不是 "printto"
+                # "print" 动词更通用，它只是告诉系统"打印这个文件"，系统会调用关联程序的默认打印命令
+                # 使用 ShellExecute 的 hwnd 参数设为 0 表示没有父窗口
+                # showCmd 设为 0 (SW_HIDE) 尝试隐藏窗口
+                
+                # 特别注意：对于 Edge 浏览器作为 PDF 阅读器的情况，print 动词可能无效或弹出对话框
+                # 推荐安装 SumatraPDF 并将其设为默认，或者关联 PDF 文件
+                
+                print(f"🖨️ [INFO] 尝试使用 'print' 动词打印: {abs_path}")
+                res = win32api.ShellExecute(0, "print", abs_path, None, ".", 0)
+                
+                if res <= 32:
+                    # 如果 print 失败，尝试 printto 作为备选
+                    print(f"⚠️ [WARNING] 'print' 命令失败 (code {res})，尝试 'printto'...")
+                    res = win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
+            finally:
+                # 恢复默认打印机
+                if current_default != printer_name:
+                    print(f"🔄 [INFO] 恢复默认打印机: {current_default}")
+                    win32print.SetDefaultPrinter(current_default)
+            
+            if res <= 32:
+                # 错误码 31 = SE_ERR_NOASSOC (没有关联的程序)
+                if res == 31:
+                    return {"success": False, "message": "系统未关联PDF阅读器，请安装 Adobe Reader 或 SumatraPDF"}
+                return {"success": False, "message": f"ShellExecute调用失败, 错误码: {res}"}
+            
+            # 等待一小段时间让任务进入Spooler
+            time.sleep(2)
+            
+            # 尝试查找最近的任务作为 JobID
+            job_id = 0
+            try:
+                printer_handle = win32print.OpenPrinter(printer_name)
+                # 获取所有任务
+                jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
+                win32print.ClosePrinter(printer_handle)
+                
+                if jobs:
+                    # 假设ID最大的就是最新的任务
+                    latest_job = max(jobs, key=lambda x: x['JobId'])
+                    job_id = latest_job['JobId']
+                    print(f"✅ [INFO] 获取到打印任务ID: {job_id}")
+            except Exception as e:
+                print(f"⚠️ [WARNING] 获取打印任务ID失败: {e}")
+            
+            return {
+                "success": True, 
+                "job_id": job_id, 
+                "printer_name": printer_name,
+                "file_path": file_path,
+                "message": "PDF打印命令已发送"
+            }
+            
+        except Exception as e:
+            print(f"❌ [ERROR] PDF打印失败: {e}")
+            return {"success": False, "message": f"PDF打印失败: {str(e)}"}
     
     def _print_raw_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
         """使用RAW方式打印文件"""
