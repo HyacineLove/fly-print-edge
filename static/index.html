@@ -24,19 +24,14 @@
         <div id="preview-section" class="section">
             <h1>📄 打印预览与设置</h1>
             
-            <div class="file-info-card">
-                <h3>文件信息</h3>
-                <div class="info-row">
-                    <span class="label">文件名:</span>
-                    <span class="value" id="file-name">-</span>
+            <div class="preview-card">
+                <div class="preview-body">
+                    <img id="preview-image" src="" alt="预览加载中" />
                 </div>
-                <div class="info-row">
-                    <span class="label">大小:</span>
-                    <span class="value" id="file-size">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="label">类型:</span>
-                    <span class="value" id="file-type">-</span>
+                <div class="preview-pager">
+                    <button id="preview-prev" class="pager-btn" onclick="changePreviewPage(-1)">←</button>
+                    <span id="page-indicator">1/1</span>
+                    <button id="preview-next" class="pager-btn" onclick="changePreviewPage(1)">→</button>
                 </div>
             </div>
 
@@ -44,35 +39,20 @@
                 <div class="form-group">
                     <label>打印份数</label>
                     <div class="counter">
-                        <button onclick="updateCopies(-1)">-</button>
+                        <button class="counter-btn" onclick="updateCopies(-1)">−</button>
                         <input type="number" id="copies" value="1" min="1" readonly>
-                        <button onclick="updateCopies(1)">+</button>
+                        <button class="counter-btn" onclick="updateCopies(1)">+</button>
                     </div>
                 </div>
 
                 <div class="form-group">
                     <label>色彩模式</label>
-                    <select id="color-mode">
-                        <option value="Grayscale">黑白 (Grayscale)</option>
-                        <option value="Color">彩色 (Color)</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label>纸张大小</label>
-                    <select id="paper-size">
-                        <option value="A4">A4</option>
-                        <option value="Letter">Letter</option>
-                    </select>
+                    <div id="color-options" class="option-group"></div>
                 </div>
 
                 <div class="form-group">
                     <label>双面打印</label>
-                    <select id="duplex">
-                        <option value="None">单面 (None)</option>
-                        <option value="LongEdge">长边翻转 (LongEdge)</option>
-                        <option value="ShortEdge">短边翻转 (ShortEdge)</option>
-                    </select>
+                    <div id="duplex-options" class="option-group"></div>
                 </div>
             </div>
 
@@ -90,6 +70,12 @@
                 <div class="progress-fill"></div>
             </div>
             <button id="return-btn" class="btn btn-secondary hidden" onclick="resetState()">返回首页</button>
+        </div>
+
+        <div id="disabled-section" class="section">
+            <h1 id="disabled-title">🚫 服务暂不可用</h1>
+            <p class="subtitle" id="disabled-message">该设备当前已暂停服务。如需使用，请联系现场工作人员处理。</p>
+            <button class="btn btn-secondary" onclick="resetState()">返回首页</button>
         </div>
     </div>
 

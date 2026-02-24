@@ -133,6 +133,22 @@ class CloudAPIClient:
         except Exception as e:
             print(f"❌ [DEBUG] 打印机注册异常: {e}")
             return {"success": False, "error": str(e)}
+
+    def delete_printer(self, printer_id: str) -> Dict[str, Any]:
+        if not self.node_id:
+            return {"success": False, "error": "节点未注册"}
+        if not printer_id:
+            return {"success": False, "error": "printer_id 不能为空"}
+        try:
+            url = f"{self.base_url}/api/v1/edge/{self.node_id}/printers/{printer_id}"
+            headers = self.auth_client.get_auth_headers()
+            response = requests.delete(url, headers=headers, timeout=10)
+            if response.status_code in [200, 204]:
+                return {"success": True}
+            return {"success": False, "error": response.text}
+        except Exception as e:
+            print(f"❌ [DEBUG] 删除打印机异常: {e}")
+            return {"success": False, "error": str(e)}
     
     def get_websocket_url(self) -> str:
         """获取WebSocket连接URL"""

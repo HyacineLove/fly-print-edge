@@ -5,6 +5,8 @@ Windows打印机实现
 
 import platform
 import os
+import json
+import shutil
 from typing import List, Dict, Any
 
 # Windows特定导入
@@ -48,6 +50,55 @@ class WindowsEnterprisePrinter:
         except Exception as e:
             print(f"执行命令失败: {e}")
             return None
+
+    def _load_settings(self) -> Dict[str, Any]:
+        candidates = [
+            os.path.join(os.getcwd(), "config.json"),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
+        ]
+        for config_path in candidates:
+            if not os.path.exists(config_path):
+                continue
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                return config.get("settings", {})
+            except Exception:
+                return {}
+        return {}
+
+    def _get_setting(self, key: str, default=None):
+        settings = self._load_settings()
+        return settings.get(key, default)
+
+    def _resolve_path(self, path_value: str):
+        if not path_value:
+            return None
+        if os.path.isabs(path_value):
+            abs_path = path_value
+        else:
+            abs_path = os.path.abspath(path_value)
+        return abs_path if os.path.exists(abs_path) else None
+
+    def _find_libreoffice_path(self):
+        configured = self._resolve_path(self._get_setting("libreoffice_path"))
+        if configured:
+            return configured
+        in_path = shutil.which("soffice") or shutil.which("soffice.exe")
+        if in_path and os.path.exists(in_path):
+            return in_path
+        program_files = os.environ.get("ProgramFiles", "")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+        candidates = [
+            os.path.join(program_files, "LibreOffice", "program", "soffice.exe"),
+            os.path.join(program_files_x86, "LibreOffice", "program", "soffice.exe"),
+            os.path.join(program_files, "LibreOffice", "program", "soffice.com"),
+            os.path.join(program_files_x86, "LibreOffice", "program", "soffice.com")
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return None
     
     def enable_printer(self, printer_name: str) -> str:
         """启用打印机"""
@@ -139,6 +190,9 @@ class WindowsEnterprisePrinter:
             
             # 然后根据状态值判断
             status_text = self._get_printer_status_text(status)
+            wmi_status_text = self._get_wmi_printer_status(printer_name)
+            if wmi_status_text:
+                return wmi_status_text
             return status_text
                 
         except Exception as e:
@@ -248,6 +302,7 @@ class WindowsEnterprisePrinter:
         import os
         import pythoncom
         from win32com import client
+        import subprocess
         
         pdf_path = None
         try:
@@ -267,81 +322,61 @@ class WindowsEnterprisePrinter:
                     pass
             
             print(f"📄 [INFO] 正在将Word文档转换为PDF: {file_path} -> {pdf_path}")
-            
-            # 调用Word/WPS进行转换
-            word = None
-            app_name = "Word.Application"
-            
-            try:
-                # 优先尝试调用 WPS
-                # WPS文字的ProgID通常是 Kwps.Application 或 WPS.Application
-                # 这里尝试几种常见的ProgID
-                wps_prog_ids = ["Kwps.Application", "WPS.Application"]
-                for prog_id in wps_prog_ids:
-                    try:
-                        word = client.Dispatch(prog_id)
-                        app_name = prog_id
-                        print(f"✅ [INFO] 成功连接到 WPS ({prog_id})")
-                        break
-                    except Exception:
-                        continue
-                
-                # 如果WPS不可用，回退到Microsoft Word
-                if not word:
-                    # 再次尝试 Kwps.Application (有时候第一遍可能失败)
-                    try:
-                         word = client.Dispatch("Kwps.Application")
-                         app_name = "Kwps.Application"
-                         print(f"✅ [INFO] 成功连接到 WPS (Kwps.Application)")
-                    except:
-                        print("⚠️ [WARNING] 未找到 WPS，尝试调用 Microsoft Word")
-                        try:
-                            word = client.Dispatch("Word.Application")
-                            app_name = "Word.Application"
-                        except:
-                            # 最后尝试 wps.application (小写)
-                            try:
-                                word = client.Dispatch("wps.application")
-                                app_name = "wps.application"
-                            except:
-                                pass
-            
-            except Exception as e:
-                print(f"❌ [ERROR] 无法启动文档处理程序 (WPS/Word): {e}")
-                raise e
 
-            word.Visible = False
-            # WPS可能不支持DisplayAlerts属性，加个try-except
-            try:
-                word.DisplayAlerts = False
-            except:
-                pass
-            
-            try:
-                # 兼容路径格式
-                abs_file_path = os.path.abspath(file_path)
-                doc = word.Documents.Open(abs_file_path)
-                
-                # wdFormatPDF = 17
-                doc.SaveAs(pdf_path, FileFormat=17)
-                doc.Close()
-                print(f"✅ [INFO] 文档转PDF成功 (使用 {app_name})")
-            except Exception as e:
-                print(f"❌ [ERROR] 文档转PDF失败: {e}")
-                # 尝试关闭文档
+            abs_file_path = os.path.abspath(file_path)
+
+            def convert_with_com(prog_id: str) -> bool:
+                word = None
+                doc = None
                 try:
+                    word = client.Dispatch(prog_id)
+                    word.Visible = False
+                    try:
+                        word.DisplayAlerts = False
+                    except:
+                        pass
+                    doc = word.Documents.Open(abs_file_path)
+                    doc.SaveAs(pdf_path, FileFormat=17)
                     doc.Close()
-                except:
-                    pass
-                raise e
-            finally:
+                    print(f"✅ [INFO] 文档转PDF成功 (使用 {prog_id})")
+                    return True
+                except Exception as e:
+                    print(f"⚠️ [WARNING] 文档转PDF失败 ({prog_id}): {e}")
+                    try:
+                        if doc:
+                            doc.Close()
+                    except:
+                        pass
+                    return False
+                finally:
+                    try:
+                        if word:
+                            word.Quit()
+                    except:
+                        pass
+
+            wps_prog_ids = ["Kwps.Application", "WPS.Application", "wps.application"]
+            for prog_id in wps_prog_ids:
+                if convert_with_com(prog_id):
+                    return self._print_pdf_file(printer_name, pdf_path, job_name, print_options)
+
+            soffice = self._find_libreoffice_path()
+            if soffice:
                 try:
-                    word.Quit()
-                except:
-                    pass
-                
-            # 转换成功后，调用PDF打印逻辑
-            return self._print_pdf_file(printer_name, pdf_path, job_name, print_options)
+                    result = subprocess.run(
+                        [soffice, "--headless", "--convert-to", "pdf", "--outdir", temp_dir, abs_file_path],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if result.returncode == 0 and os.path.exists(pdf_path):
+                        print("✅ [INFO] 文档转PDF成功 (使用 LibreOffice)")
+                        return self._print_pdf_file(printer_name, pdf_path, job_name, print_options)
+                except Exception as e:
+                    print(f"⚠️ [WARNING] 文档转PDF失败 (LibreOffice): {e}")
+
+            if convert_with_com("Word.Application"):
+                return self._print_pdf_file(printer_name, pdf_path, job_name, print_options)
+
+            return {"success": False, "message": "文档转PDF失败，未找到可用的文档处理程序"}
             
         except Exception as e:
             print(f"❌ [ERROR] 处理Word文档失败: {e}")
@@ -355,6 +390,7 @@ class WindowsEnterprisePrinter:
         import win32api
         import win32print
         import time
+        import subprocess
         
         try:
             print(f"🖨️ [INFO] 正在调用系统命令打印PDF: {file_path} -> {printer_name}")
@@ -377,9 +413,23 @@ class WindowsEnterprisePrinter:
             # 获取默认打印机，以便恢复（虽然printto指定了打印机，但某些程序会更改默认打印机）
             default_printer = win32print.GetDefaultPrinter()
             
-            # 执行打印命令
-            # 注意: file_path 必须是绝对路径
             abs_path = os.path.abspath(file_path)
+
+            sumatra_path = self._resolve_path(self._get_setting("pdf_printer_path"))
+            if sumatra_path:
+                try:
+                    result = subprocess.run(
+                        [sumatra_path, "-print-to", printer_name, "-silent", "-exit-when-done", abs_path],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if result.returncode != 0:
+                        return {"success": False, "message": f"SumatraPDF打印失败: {result.stderr.strip() or result.stdout.strip()}"}
+                except Exception as e:
+                    return {"success": False, "message": f"SumatraPDF打印失败: {str(e)}"}
+            else:
+                # 执行打印命令
+                # 注意: file_path 必须是绝对路径
+                abs_path = os.path.abspath(file_path)
             
             # 核心调用
             # win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
@@ -388,38 +438,29 @@ class WindowsEnterprisePrinter:
             # 或者我们先暂停一下，让任务进入队列
             
             # 使用 print 动词（使用默认打印机）可能比 printto 更可靠，但我们需要先设置默认打印机
-            current_default = win32print.GetDefaultPrinter()
-            if current_default != printer_name:
-                print(f"🔄 [INFO] 临时切换默认打印机: {current_default} -> {printer_name}")
-                win32print.SetDefaultPrinter(printer_name)
-                
-            try:
-                # 使用 "print" 动词而不是 "printto"
-                # "print" 动词更通用，它只是告诉系统"打印这个文件"，系统会调用关联程序的默认打印命令
-                # 使用 ShellExecute 的 hwnd 参数设为 0 表示没有父窗口
-                # showCmd 设为 0 (SW_HIDE) 尝试隐藏窗口
-                
-                # 特别注意：对于 Edge 浏览器作为 PDF 阅读器的情况，print 动词可能无效或弹出对话框
-                # 推荐安装 SumatraPDF 并将其设为默认，或者关联 PDF 文件
-                
-                print(f"🖨️ [INFO] 尝试使用 'print' 动词打印: {abs_path}")
-                res = win32api.ShellExecute(0, "print", abs_path, None, ".", 0)
+            res = 33
+            if not sumatra_path:
+                current_default = win32print.GetDefaultPrinter()
+                if current_default != printer_name:
+                    print(f"🔄 [INFO] 临时切换默认打印机: {current_default} -> {printer_name}")
+                    win32print.SetDefaultPrinter(printer_name)
+                    
+                try:
+                    print(f"🖨️ [INFO] 尝试使用 'print' 动词打印: {abs_path}")
+                    res = win32api.ShellExecute(0, "print", abs_path, None, ".", 0)
+                    
+                    if res <= 32:
+                        print(f"⚠️ [WARNING] 'print' 命令失败 (code {res})，尝试 'printto'...")
+                        res = win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
+                finally:
+                    if current_default != printer_name:
+                        print(f"🔄 [INFO] 恢复默认打印机: {current_default}")
+                        win32print.SetDefaultPrinter(current_default)
                 
                 if res <= 32:
-                    # 如果 print 失败，尝试 printto 作为备选
-                    print(f"⚠️ [WARNING] 'print' 命令失败 (code {res})，尝试 'printto'...")
-                    res = win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
-            finally:
-                # 恢复默认打印机
-                if current_default != printer_name:
-                    print(f"🔄 [INFO] 恢复默认打印机: {current_default}")
-                    win32print.SetDefaultPrinter(current_default)
-            
-            if res <= 32:
-                # 错误码 31 = SE_ERR_NOASSOC (没有关联的程序)
-                if res == 31:
-                    return {"success": False, "message": "系统未关联PDF阅读器，请安装 Adobe Reader 或 SumatraPDF"}
-                return {"success": False, "message": f"ShellExecute调用失败, 错误码: {res}"}
+                    if res == 31:
+                        return {"success": False, "message": "系统未关联PDF阅读器，请安装 Adobe Reader 或 SumatraPDF"}
+                    return {"success": False, "message": f"ShellExecute调用失败, 错误码: {res}"}
             
             # 等待一小段时间让任务进入Spooler
             time.sleep(2)
@@ -567,6 +608,14 @@ class WindowsEnterprisePrinter:
                             if print_options['duplex'] in duplex_map:
                                 devmode.Duplex = duplex_map[print_options['duplex']]
                                 devmode.Fields |= win32con.DM_DUPLEX
+
+                        if 'orientation' in print_options and print_options['orientation'] != '默认':
+                            orientation_value = str(print_options['orientation']).lower()
+                            if "landscape" in orientation_value or "横" in orientation_value:
+                                devmode.Orientation = win32con.DMORIENT_LANDSCAPE
+                            else:
+                                devmode.Orientation = win32con.DMORIENT_PORTRAIT
+                            devmode.Fields |= win32con.DM_ORIENTATION
                         
                         if 'color_model' in print_options and print_options['color_model'] != '默认':
                             if print_options['color_model'] == 'Gray':
@@ -843,6 +892,46 @@ class WindowsEnterprisePrinter:
             if status & flag:
                 return text
         return "未知状态"
+
+    def _get_wmi_printer_status(self, printer_name: str):
+        import subprocess
+        try:
+            safe_name = printer_name.replace("'", "''")
+            result = subprocess.run(
+                ["wmic", "printer", "where", f"Name='{safe_name}'", "get", "WorkOffline,PrinterStatus,ExtendedPrinterStatus,DetectedErrorState,Availability", "/format:list"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                return None
+            work_offline = None
+            printer_status = None
+            extended_status = None
+            detected_error_state = None
+            availability = None
+            for line in result.stdout.splitlines():
+                if line.startswith("WorkOffline="):
+                    work_offline = line.split("=", 1)[1].strip()
+                elif line.startswith("PrinterStatus="):
+                    printer_status = line.split("=", 1)[1].strip()
+                elif line.startswith("ExtendedPrinterStatus="):
+                    extended_status = line.split("=", 1)[1].strip()
+                elif line.startswith("DetectedErrorState="):
+                    detected_error_state = line.split("=", 1)[1].strip()
+                elif line.startswith("Availability="):
+                    availability = line.split("=", 1)[1].strip()
+            if work_offline and work_offline.lower() in ("true", "1", "yes"):
+                return "离线"
+            if printer_status == "7" or extended_status == "7" or detected_error_state == "9" or availability == "8":
+                return "离线"
+            if printer_status == "4" or extended_status == "4":
+                return "正在打印"
+            if printer_status in ("3", "5") or extended_status in ("3", "5"):
+                return "就绪"
+            if detected_error_state and detected_error_state not in ("0", "2"):
+                return "错误"
+            return None
+        except Exception:
+            return None
     
     def _identify_paper_size(self, width_inch: float, height_inch: float) -> str:
         """根据尺寸识别纸张类型"""

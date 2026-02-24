@@ -156,21 +156,24 @@ class CloudWebSocketClient:
         except Exception as e:
             print(f"❌ [ERROR] 处理WebSocket消息异常: {e}")
     
-    async def _send_message(self, data: Dict[str, Any]):
+    async def _send_message(self, data: Dict[str, Any]) -> bool:
         """发送消息到WebSocket"""
-        if self.websocket:
-            try:
-                message = json.dumps(data)
-                await self.websocket.send(message)
-                print(f"📤 [DEBUG] 发送WebSocket消息: {data.get('type', 'unknown')}")
-            except Exception as e:
-                print(f"❌ [ERROR] 发送WebSocket消息失败: {e}")
+        if not self.websocket:
+            return False
+        try:
+            message = json.dumps(data)
+            await self.websocket.send(message)
+            print(f"📤 [DEBUG] 发送WebSocket消息: {data.get('type', 'unknown')}")
+            return True
+        except Exception as e:
+            print(f"❌ [ERROR] 发送WebSocket消息失败: {e}")
+            return False
 
-    async def send_message(self, data: Dict[str, Any]):
+    async def send_message(self, data: Dict[str, Any]) -> bool:
         """异步发送消息 (可从任何循环调用)"""
         if not self.loop or not self.loop.is_running():
             print("⚠️ [WARNING] WebSocket事件循环未运行，无法发送消息")
-            return
+            return False
             
         try:
             # 检查是否在同一个循环中
@@ -181,20 +184,21 @@ class CloudWebSocketClient:
                 
             if current_loop == self.loop:
                 # 同一个循环，直接调用
-                await self._send_message(data)
+                return await self._send_message(data)
             else:
                 # 不同循环，使用 run_coroutine_threadsafe
                 future = asyncio.run_coroutine_threadsafe(self._send_message(data), self.loop)
                 # 等待结果（这里需要包装成 awaitable）
-                await asyncio.wrap_future(future)
+                return await asyncio.wrap_future(future)
         except Exception as e:
             print(f"❌ [ERROR] 异步发送消息异常: {e}")
+            return False
 
-    def send_message_sync(self, data: Dict[str, Any]):
+    def send_message_sync(self, data: Dict[str, Any]) -> bool:
         """同步发送消息（在其他线程中调用）"""
         if not self.loop or not self.loop.is_running():
             print("⚠️ [WARNING] WebSocket事件循环未运行，无法发送消息")
-            return
+            return False
             
         try:
             # 使用 run_coroutine_threadsafe
@@ -202,14 +206,17 @@ class CloudWebSocketClient:
             
             # 等待结果，确保消息发送成功
             try:
-                future.result(timeout=5)  # 等待5秒
+                return bool(future.result(timeout=5))
             except asyncio.TimeoutError:
                 print(f"❌ [ERROR] 同步发送WebSocket消息超时: {data.get('type')}")
+                return False
             except Exception as e:
                 print(f"❌ [ERROR] 同步发送WebSocket消息执行失败: {e}")
+                return False
                 
         except Exception as e:
             print(f"❌ [ERROR] 同步发送WebSocket消息失败: {e}")
+            return False
 
     def submit_print_params(self, task_token: str, file_id: str, printer_id: str, options: Dict[str, Any]):
         """提交打印参数"""
@@ -224,7 +231,7 @@ class CloudWebSocketClient:
         }
         self.send_message_sync(message)
 
-    def send_printer_status(self, node_id: str, printer_id: str, status: str, queue_length: int, error_code: Optional[str] = None):
+    def send_printer_status(self, node_id: str, printer_id: str, status: str, queue_length: int, error_code: Optional[str] = None) -> bool:
         """发送打印机状态消息"""
         from datetime import datetime, timezone
         message = {
@@ -239,7 +246,7 @@ class CloudWebSocketClient:
                 "supplies": {}
             }
         }
-        self.send_message_sync(message)
+        return self.send_message_sync(message)
 
 
 class PrintJobHandler:
@@ -283,6 +290,7 @@ class PrintJobHandler:
             
             job_id = data.get("job_id")
             printer_name = data.get("printer_name")
+            printer_id = data.get("printer_id")
             file_url = data.get("file_url")
             job_name = data.get("name", f"CloudJob_{job_id}")  # 使用name字段作为任务名
             print_options = data.get("print_options", {})
@@ -291,6 +299,13 @@ class PrintJobHandler:
             
             if not all([job_id, printer_name, file_url]):
                 print("❌ [WARNING] 打印任务参数不完整")
+                return
+
+            if not self.printer_manager.is_node_enabled():
+                self._report_job_failure(job_id, "节点已禁用")
+                return
+            if not self.printer_manager.is_printer_enabled(printer_id=printer_id, printer_name=printer_name):
+                self._report_job_failure(job_id, "打印机已禁用")
                 return
             
             # 下载文件
@@ -301,7 +316,7 @@ class PrintJobHandler:
             
             # 使用统一的打印任务提交方法（自动处理清理）
             result = self.printer_manager.submit_print_job_with_cleanup(
-                printer_name, file_path, job_name, print_options, "云端WebSocket"
+                printer_name, file_path, job_name, print_options, "云端WebSocket", printer_id
             )
             
             if result.get("success"):
