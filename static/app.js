@@ -215,6 +215,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             showSection('printing');
             document.getElementById('printing-title').innerText = "🖨️ 正在提交...";
+            document.getElementById('printing-message').innerText = "系统正在处理您的文档，请勿离开...";
+            document.querySelector('.progress-fill').style.width = "0%";
             
             const res = await fetch('/api/print', {
                 method: 'POST',
@@ -225,6 +227,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await res.json();
             if (result.success) {
                 document.getElementById('printing-title').innerText = "🖨️ 正在打印...";
+                document.getElementById('printing-message').innerText = "系统正在处理您的文档，请勿离开...";
+                document.querySelector('.progress-fill').style.width = "0%";
                 // 等待 WebSocket 的 job_status 更新
             } else {
                 const message = result.message || "提交失败";
@@ -255,14 +259,15 @@ document.addEventListener('DOMContentLoaded', () => {
             
             setTimeout(() => {
                 resetState();
-            }, 5000);
+            }, 2000);
         } else if (statusData.status === 'failed') {
             titleElem.innerText = "❌ 打印失败";
             msgElem.innerText = statusData.message || "请联系管理员";
             document.getElementById('return-btn').classList.remove('hidden');
         } else {
-            // progress update
-            msgElem.innerText = `状态: ${statusData.status}`;
+            titleElem.innerText = "🖨️ 正在打印...";
+            msgElem.innerText = "系统正在处理您的文档，请勿离开...";
+            document.querySelector('.progress-fill').style.width = "0%";
         }
     }
 

@@ -33,8 +33,10 @@ cloud_service: Optional[CloudService] = None
 sse_clients: list[asyncio.Queue] = []
 node_id: Optional[str] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
-preview_cache: Dict[str, str] = {}
+preview_cache: Dict[str, Dict[str, Any]] = {}
 preview_files: Dict[str, Dict[str, str]] = {}
+preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
+preview_page_meta: Dict[str, Dict[str, int]] = {}
 
 # CORS设置
 app.add_middleware(
@@ -415,7 +417,7 @@ def _convert_word_to_pdf(file_path: str):
     finally:
         pythoncom.CoUninitialize()
 
-def _generate_preview_image(file_path: str, file_name: Optional[str], file_type: Optional[str], options: Dict[str, Any], page_index: int):
+def _resolve_preview_ext(file_name: Optional[str], file_type: Optional[str]):
     ext = os.path.splitext(file_name or "")[1].lower()
     if not ext and file_type:
         lowered = file_type.lower()
@@ -425,6 +427,25 @@ def _generate_preview_image(file_path: str, file_name: Optional[str], file_type:
             ext = ".png"
         elif "word" in lowered:
             ext = ".docx"
+    return ext
+
+def _get_cached_pdf_page(file_id: str, pdf_path: str, page_index: int):
+    if file_id:
+        file_cache = preview_page_cache.get(file_id)
+        if file_cache and page_index in file_cache:
+            meta = preview_page_meta.get(file_id, {})
+            page_count = meta.get("page_count", 1)
+            return file_cache[page_index], page_count, page_index, None
+    image, page_count, resolved_page_index, error = _render_pdf_to_image(pdf_path, page_index)
+    if image is None:
+        return None, page_count, resolved_page_index, error
+    if file_id:
+        preview_page_cache.setdefault(file_id, {})[resolved_page_index] = image
+        preview_page_meta[file_id] = {"page_count": page_count}
+    return image, page_count, resolved_page_index, None
+
+def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[str], file_type: Optional[str], options: Dict[str, Any], page_index: int):
+    ext = _resolve_preview_ext(file_name, file_type)
     image = None
     page_count = 1
     resolved_page_index = page_index
@@ -434,18 +455,26 @@ def _generate_preview_image(file_path: str, file_name: Optional[str], file_type:
             img = Image.open(file_path)
             image = img.convert("RGB")
             img.close()
+            resolved_page_index = 0
+            page_count = 1
+            if file_id:
+                preview_page_cache.setdefault(file_id, {})[resolved_page_index] = image
+                preview_page_meta[file_id] = {"page_count": page_count}
         except Exception as e:
             error = str(e)
     elif ext == ".pdf":
-        image, page_count, resolved_page_index, error = _render_pdf_to_image(file_path, page_index)
+        image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, file_path, page_index)
     elif ext in [".doc", ".docx"]:
-        pdf_path, error = _convert_word_to_pdf(file_path)
+        pdf_path = None
+        if file_id:
+            cached = preview_files.get(file_id, {})
+            pdf_path = cached.get("pdf_path")
+        if not pdf_path or not os.path.exists(pdf_path):
+            pdf_path, error = _convert_word_to_pdf(file_path)
+            if pdf_path and file_id:
+                preview_files.setdefault(file_id, {})["pdf_path"] = pdf_path
         if pdf_path:
-            image, page_count, resolved_page_index, error = _render_pdf_to_image(pdf_path, page_index)
-            try:
-                os.remove(pdf_path)
-            except Exception:
-                pass
+            image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, pdf_path, page_index)
     else:
         error = "暂不支持该文件类型预览"
     if image is None:
@@ -617,10 +646,18 @@ async def preview(request: Request):
                     os.remove(old_path)
                 except Exception:
                     pass
+            old_pdf = cached.get("pdf_path")
+            if old_pdf and os.path.exists(old_pdf):
+                try:
+                    os.remove(old_pdf)
+                except Exception:
+                    pass
             preview_files.pop(file_id, None)
             keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
             for k in keys:
                 preview_cache.pop(k, None)
+            preview_page_cache.pop(file_id, None)
+            preview_page_meta.pop(file_id, None)
 
         try:
             page_index = int(options.get("page_index") or 0)
@@ -640,9 +677,12 @@ async def preview(request: Request):
             file_path, err = _download_preview_file(file_url, file_name)
             if not file_path:
                 return JSONResponse(status_code=500, content={"success": False, "message": err or "下载文件失败"})
+            cached_pdf = preview_files.get(file_id, {}).get("pdf_path")
             preview_files[file_id] = {"path": file_path, "file_url": file_url}
+            if cached_pdf and os.path.exists(cached_pdf):
+                preview_files[file_id]["pdf_path"] = cached_pdf
 
-        image, page_count, resolved_page_index, err = _generate_preview_image(file_path, file_name, file_type, options, page_index)
+        image, page_count, resolved_page_index, err = _generate_preview_image(file_id, file_path, file_name, file_type, options, page_index)
         if not image:
             return JSONResponse(status_code=500, content={"success": False, "message": err or "预览生成失败"})
 
@@ -667,6 +707,8 @@ async def submit_print(request: Request):
         
         if not task_token or not options or not file_id:
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: task_token, options, file_id 均必需"})
+        if not isinstance(options, dict):
+            return JSONResponse(status_code=400, content={"success": False, "message": "参数错误: options 必须为对象"})
         if not printer_manager:
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
         if not printer_manager.is_node_enabled():
@@ -682,6 +724,13 @@ async def submit_print(request: Request):
 
             # 发送参数到云端
             # 构造消息
+            duplex_value = options.get("duplex")
+            if duplex_value:
+                duplex_value_str = str(duplex_value).lower()
+                if duplex_value_str in ["none", "simplex", "单面"]:
+                    options["duplex_mode"] = "single"
+                elif duplex_value_str in ["longedge", "shortedge", "duplexnotumble", "duplextumble", "双面"]:
+                    options["duplex_mode"] = "duplex"
             msg = {
                 "type": "submit_print_params",
                 "data": {

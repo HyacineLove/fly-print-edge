@@ -418,8 +418,21 @@ class WindowsEnterprisePrinter:
             sumatra_path = self._resolve_path(self._get_setting("pdf_printer_path"))
             if sumatra_path:
                 try:
+                    cmd = [sumatra_path, "-print-to", printer_name, "-silent", "-exit-when-done"]
+                    duplex_setting = None
+                    if print_options:
+                        duplex_value = print_options.get("duplex")
+                        if duplex_value in ["DuplexNoTumble", "LongEdge", "long", "long_edge"]:
+                            duplex_setting = "duplexlong"
+                        elif duplex_value in ["DuplexTumble", "ShortEdge", "short", "short_edge"]:
+                            duplex_setting = "duplexshort"
+                        elif duplex_value in ["None", "none", "simplex"]:
+                            duplex_setting = "simplex"
+                    if duplex_setting:
+                        cmd.extend(["-print-settings", duplex_setting])
+                    cmd.append(abs_path)
                     result = subprocess.run(
-                        [sumatra_path, "-print-to", printer_name, "-silent", "-exit-when-done", abs_path],
+                        cmd,
                         capture_output=True, text=True, timeout=60
                     )
                     if result.returncode != 0:

@@ -294,6 +294,14 @@ class PrintJobHandler:
             file_url = data.get("file_url")
             job_name = data.get("name", f"CloudJob_{job_id}")  # 使用name字段作为任务名
             print_options = data.get("print_options", {})
+            if not isinstance(print_options, dict):
+                print_options = {}
+            duplex_mode = data.get("duplex_mode")
+            if duplex_mode and "duplex" not in print_options:
+                if str(duplex_mode).lower() == "duplex":
+                    print_options["duplex"] = "DuplexNoTumble"
+                else:
+                    print_options["duplex"] = "None"
             
             print(f"🖨️ [INFO] 处理云端打印任务: {job_name} (ID: {job_id})")
             
@@ -314,6 +322,13 @@ class PrintJobHandler:
                 self._report_job_failure(job_id, "文件下载失败")
                 return
             
+            if isinstance(print_options, dict):
+                duplex_value = print_options.get("duplex")
+                if duplex_value in ["LongEdge", "long", "long_edge", "short", "ShortEdge", "short_edge"]:
+                    if duplex_value in ["ShortEdge", "short", "short_edge"]:
+                        print_options["duplex"] = "DuplexTumble"
+                    else:
+                        print_options["duplex"] = "DuplexNoTumble"
             # 使用统一的打印任务提交方法（自动处理清理）
             result = self.printer_manager.submit_print_job_with_cleanup(
                 printer_name, file_path, job_name, print_options, "云端WebSocket", printer_id
