@@ -14,10 +14,14 @@
             <p class="subtitle">请扫描下方二维码上传文件</p>
             <div class="qr-container">
                 <img id="qr-code" src="" alt="加载中..." />
+                <div id="qr-loading" class="qr-loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>正在刷新二维码...</p>
+                </div>
             </div>
-            <div class="status-text" id="scan-status">正在生成二维码...</div>
+            <div id="qr-expiry" class="status-text" style="font-size: 12px; color: #999; margin-top: 10px;"></div>
+            <button id="refresh-qr-btn" class="btn btn-secondary" onclick="refreshQRCode()" style="margin-top: 10px; display: none;">🔄 刷新二维码</button>
             <div id="connection-status" class="status-text" style="font-size: 12px; color: #666; margin-top: 5px;">连接中...</div>
-            <div id="debug-url" class="debug-info"></div>
         </div>
 
         <!-- 状态2: 预览与设置 -->
@@ -69,14 +73,11 @@
             <div class="progress-bar">
                 <div class="progress-fill"></div>
             </div>
+            <div id="printing-countdown" class="status-text" style="font-size: 14px; color: #666; margin-top: 10px; display: none;"></div>
             <button id="return-btn" class="btn btn-secondary hidden" onclick="resetState()">返回首页</button>
         </div>
 
-        <div id="disabled-section" class="section">
-            <h1 id="disabled-title">🚫 服务暂不可用</h1>
-            <p class="subtitle" id="disabled-message">该设备当前已暂停服务。如需使用，请联系现场工作人员处理。</p>
-            <button class="btn btn-secondary" onclick="resetState()">返回首页</button>
-        </div>
+
     </div>
 
     <script src="/static/app.js"></script>

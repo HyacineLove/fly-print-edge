@@ -41,7 +41,7 @@ class EdgeNodeInfo:
             if interface:
                 result = subprocess.run(
                     ['cat', f'/sys/class/net/{interface}/address'],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
                 )
                 if result.returncode == 0:
                     return result.stdout.strip()
@@ -51,7 +51,7 @@ class EdgeNodeInfo:
                 try:
                     result = subprocess.run(
                         ['cat', f'/sys/class/net/{iface}/address'],
-                        capture_output=True, text=True, timeout=5
+                        capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
                     )
                     if result.returncode == 0:
                         mac = result.stdout.strip()
@@ -63,7 +63,7 @@ class EdgeNodeInfo:
             # 使用ip命令作为备选
             result = subprocess.run(
                 ['ip', 'link', 'show'],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
             )
             if result.returncode == 0:
                 lines = result.stdout.split('\n')
@@ -83,7 +83,7 @@ class EdgeNodeInfo:
         try:
             result = subprocess.run(
                 ['getmac', '/fo', 'csv', '/nh'],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
             )
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
@@ -109,7 +109,7 @@ class EdgeNodeInfo:
                     try:
                         result = subprocess.run(
                             ['cat', f'/sys/class/net/{iface}/operstate'],
-                            capture_output=True, text=True, timeout=2
+                            capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=2
                         )
                         if result.returncode == 0 and result.stdout.strip() == 'up':
                             return iface
@@ -165,7 +165,7 @@ class EdgeNodeInfo:
                 # Windows使用wmic命令
                 result = subprocess.run(
                     ['wmic', 'cpu', 'get', 'name', '/value'],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
                 )
                 if result.returncode == 0:
                     lines = result.stdout.split('\n')

@@ -30,8 +30,9 @@ class CloudService:
         self.status_reporter = None
         
         # 状态跟踪
-        self.registered = False
-        self.node_id = None
+        # 如果配置中已经缓存了 node_id，则认为节点已经注册过，避免重复注册
+        self.node_id = config.get("node_id")
+        self.registered = bool(self.node_id)
         
         if self.enabled:
             self._initialize_components()
@@ -53,13 +54,12 @@ class CloudService:
                 base_url=self.config["base_url"],
                 auth_client=self.auth_client
             )
+            # 如果本地已缓存 node_id，则同步到 API 客户端，避免重复注册
+            if self.node_id:
+                self.api_client.node_id = self.node_id
             
-            # 初始化心跳服务
-            heartbeat_interval = self.config.get("heartbeat_interval", 30)
-            self.heartbeat_service = HeartbeatService(
-                api_client=self.api_client,
-                interval=heartbeat_interval
-            )
+            # 心跳服务稍后初始化（需要等待WebSocket和node_id）
+            self.heartbeat_interval = self.config.get("heartbeat_interval", 30)
             
             # 初始化打印任务处理器
             if self.printer_manager:
@@ -85,28 +85,39 @@ class CloudService:
         try:
             print("🚀 [DEBUG] 启动云端服务...")
             
-            # 1. 如果启用自动注册，先注册边缘节点
-            if self.config.get("auto_register", True):
+            # 1. 如果启用自动注册，且本地尚未有 node_id，则注册边缘节点
+            if self.config.get("auto_register", True) and not self.registered:
                 register_result = self._register_node()
                 if not register_result["success"]:
                     return register_result
             
-            # 2. 启动心跳服务
-            self.heartbeat_service.start()
-            
-            # 3. 如果启用自动注册打印机，注册当前管理的打印机
-            if self.config.get("auto_register_printers", True) and self.printer_manager:
-                self._register_current_printers()
-            
-            # 4. 启动WebSocket客户端
+            # 2. 启动WebSocket客户端（心跳服务需要它）
             self._start_websocket()
+            
+            # 3. 初始化并启动心跳服务（需要WebSocket和node_id）
+            if self.websocket_client and self.node_id:
+                self.heartbeat_service = HeartbeatService(
+                    websocket_client=self.websocket_client,
+                    node_id=self.node_id,
+                    interval=self.heartbeat_interval,
+                    base_url=self.config.get("base_url")
+                )
+                self.heartbeat_service.start()
+                print("💓 [DEBUG] 心跳服务已启动 (WebSocket模式)")
+            else:
+                print("⚠️ [WARNING] WebSocket未就绪，跳过心跳服务启动")
+            
+            # 4. 启动时不再自动注册打印机，注册逻辑由管理端显式触发
             
             # 5. 启动状态上报服务
             if self.websocket_client and self.node_id:
                 self.status_reporter = PrinterStatusReporter(
-                    self.websocket_client, self.printer_manager, self.node_id
+                    self.websocket_client, self.printer_manager, self.node_id, self.api_client
                 )
                 self.status_reporter.start()
+                # 将status_reporter传递给PrintJobHandler
+                if self.print_job_handler:
+                    self.print_job_handler.status_reporter = self.status_reporter
                 print("✅ [DEBUG] 打印机状态上报服务已启动")
             
             print("✅ [DEBUG] 云端服务启动成功")
@@ -146,9 +157,23 @@ class CloudService:
                 self.registered = True
                 self.node_id = result["node_id"]
                 
+                # 将 node_id 缓存到配置，避免重复注册
+                try:
+                    self.config["node_id"] = self.node_id
+                    if self.printer_manager and hasattr(self.printer_manager, "config"):
+                        cloud_cfg = self.printer_manager.config.config.get("cloud", {})
+                        cloud_cfg["node_id"] = self.node_id
+                        self.printer_manager.config.save_config()
+                except Exception as e:
+                    print(f"⚠️ [DEBUG] 缓存 node_id 到配置失败: {e}")
+                
                 # 更新PrintJobHandler的node_id
                 if self.print_job_handler:
                     self.print_job_handler.node_id = self.node_id
+                
+                # 同步到 API 客户端
+                if self.api_client:
+                    self.api_client.node_id = self.node_id
                     
                 print(f"✅ [DEBUG] 边缘节点注册成功: {self.node_id}")
                 return {"success": True, "node_id": self.node_id}
@@ -175,38 +200,49 @@ class CloudService:
                 print("📝 [DEBUG] 没有管理的打印机需要注册")
                 return
             
-            # 获取打印机详细信息
+            # 获取打印机详细信息，仅为未在云端注册的打印机构造注册数据
             printer_data = []
             for printer in managed_printers:
                 printer_name = printer.get("name")
-                if printer_name:
-                    # 获取打印机状态、能力和端口信息
-                    status = self.printer_manager.get_printer_status(printer_name)
-                    capabilities = self.printer_manager.get_printer_capabilities(printer_name)
-                    port_info = self.printer_manager.get_printer_port_info(printer_name)
-                    
-                    # 转换capabilities为云端格式
-                    raw_capabilities = capabilities
-                    cloud_capabilities = {
-                        "paper_sizes": raw_capabilities.get("page_size", ["A4"])[:10],  # 限制数量
-                        "color_support": "RGB" in str(raw_capabilities.get("color_model", [])) or "Color" in str(raw_capabilities.get("color_model", [])),
-                        "duplex_support": any(d != "None" for d in raw_capabilities.get("duplex", ["None"])),
-                        "resolution": self._get_resolution_string(raw_capabilities.get("resolution", ["600dpi"])),
-                        "print_speed": "unknown",
-                        "media_types": raw_capabilities.get("media_type", ["Plain"])[:8]  # 限制数量
-                    }
-                    
-                    printer_info = {
-                        "name": printer_name,
-                        "model": printer.get("make_model", ""),
-                        "serial_number": "",
-                        "firmware_version": "",
-                        "port_info": port_info,
-                        "ip_address": None,
-                        "mac_address": "",
-                        "capabilities": cloud_capabilities
-                    }
-                    printer_data.append(printer_info)
+                if not printer_name:
+                    continue
+                
+                # 如果本地标记已经注册到云端，则跳过
+                if printer.get("cloud_registered"):
+                    print(f"🔁 [DEBUG] 打印机 {printer_name} 已标记为云端注册，跳过")
+                    continue
+                
+                # 获取打印机状态、能力和端口信息
+                status = self.printer_manager.get_printer_status(printer_name)
+                capabilities = self.printer_manager.get_printer_capabilities(printer_name)
+                port_info = self.printer_manager.get_printer_port_info(printer_name)
+                
+                # 转换capabilities为云端格式
+                raw_capabilities = capabilities
+                cloud_capabilities = {
+                    "paper_sizes": raw_capabilities.get("page_size", ["A4"])[:10],  # 限制数量
+                    "color_support": "RGB" in str(raw_capabilities.get("color_model", [])) or "Color" in str(raw_capabilities.get("color_model", [])),
+                    "duplex_support": any(d != "None" for d in raw_capabilities.get("duplex", ["None"])),
+                    "resolution": self._get_resolution_string(raw_capabilities.get("resolution", ["600dpi"])),
+                    "print_speed": "unknown",
+                    "media_types": raw_capabilities.get("media_type", ["Plain"])[:8]  # 限制数量
+                }
+                
+                printer_info = {
+                    "name": printer_name,
+                    "model": printer.get("make_model", ""),
+                    "serial_number": "",
+                    "firmware_version": "",
+                    "port_info": port_info,
+                    "ip_address": None,
+                    "mac_address": "",
+                    "capabilities": cloud_capabilities
+                }
+                printer_data.append(printer_info)
+            
+            if not printer_data:
+                print("📝 [DEBUG] 没有需要新注册的打印机，全部已在云端")
+                return
             
             # 注册到云端
             result = self.api_client.register_printers(printer_data)
@@ -249,14 +285,22 @@ class CloudService:
             # 初始化WebSocket客户端
             self.websocket_client = CloudWebSocketClient(ws_url, self.auth_client)
             
-            # 更新PrintJobHandler的WebSocket客户端引用
+            # 注册核心业务处理器（由 PrintJobHandler 处理云端下行指令）
             if self.print_job_handler:
                 self.print_job_handler.websocket_client = self.websocket_client
                 self.websocket_client.add_message_handler("print_job", self.print_job_handler.handle_print_job)
             
-            # 添加预览文件消息处理器
+            # 添加预览文件业务处理器
             if self.print_job_handler:
                 self.websocket_client.add_message_handler("preview_file", self.print_job_handler.handle_preview_file)
+            
+            # 添加错误消息业务处理器
+            if self.print_job_handler:
+                self.websocket_client.add_message_handler("error", self.print_job_handler.handle_error_message)
+            
+            # 添加上传凭证响应处理器
+            if self.print_job_handler:
+                self.websocket_client.add_message_handler("upload_token", self.print_job_handler.handle_upload_token)
             
             # 启动WebSocket客户端
             self.websocket_client.start()
@@ -285,12 +329,18 @@ class CloudService:
                 self.pending_listeners = []
             self.pending_listeners.append((message_type, handler))
 
-    def submit_print_params(self, task_token: str, options: Dict[str, Any]):
-        """提交打印参数"""
-        if self.websocket_client:
-            self.websocket_client.submit_print_params(task_token, options)
+    def submit_print_params(self, file_id: str, printer_id: str, options: Dict[str, Any]):
+        """提交打印参数
+        
+        Args:
+            file_id: 已上传的文件ID
+            printer_id: 目标打印机ID
+            options: 打印参数
+        """
+        if self.websocket_client and self.node_id:
+            self.websocket_client.submit_print_params(self.node_id, file_id, printer_id, options)
         else:
-            print("⚠️ [DEBUG] WebSocket未连接，无法提交打印参数")
+            print("⚠️ [DEBUG] WebSocket未连接或节点未注册，无法提交打印参数")
 
     def get_status(self) -> Dict[str, Any]:
         """获取云端服务状态"""
@@ -308,6 +358,7 @@ class CloudService:
         if self.websocket_client:
             status["websocket"] = {
                 "running": self.websocket_client.running,
+                "connected": self.websocket_client.connected,  # 使用真实连接状态
                 "url": self.websocket_client.websocket_url
             }
         
@@ -376,12 +427,43 @@ class CloudService:
                 "capabilities": cloud_capabilities
             }
             result = self.api_client.register_printers([printer_info])
+            
+            # 检查批量注册结果
             if result.get("success"):
+                # 即使 success=True，也要检查是否有失败的打印机
+                failed_printers = result.get("failed_printers", [])
+                if failed_printers:
+                    # 找到当前打印机的错误信息
+                    error_info = None
+                    for failed in failed_printers:
+                        if failed.get("name") == printer_name:
+                            error_info = failed.get("error", "")
+                            break
+                    
+                    if error_info:
+                        # 尝试解析 JSON 错误信息
+                        try:
+                            import json
+                            error_json = json.loads(error_info)
+                            error_message = error_json.get("message") or error_json.get("error") or error_info
+                        except:
+                            error_message = error_info
+                        
+                        return {"success": False, "message": error_message, "error": error_message}
+                
+                # 注册成功，更新本地 ID
                 registered_printers = result.get("registered_printers", {})
                 cloud_id = registered_printers.get(printer_name)
                 if cloud_id:
                     self.printer_manager.config.update_printer_id(printer_name, cloud_id)
-            return result
+                    return {"success": True, "cloud_id": cloud_id}
+                else:
+                    # 没有获取到 cloud_id，表示注册失败
+                    return {"success": False, "message": "未获取到云端打印机ID"}
+            else:
+                # 批量注册操作本身失败
+                return {"success": False, "message": result.get("error") or "注册失败"}
+            
         except Exception as e:
             print(f"❌ [DEBUG] 注册打印机异常: {e}")
             return {"success": False, "message": str(e)}
@@ -390,23 +472,6 @@ class CloudService:
         if not self.registered or not self.api_client:
             return {"success": False, "message": "服务未就绪"}
         return self.api_client.delete_printer(printer_id)
-    
-    def update_printer_status(self, printer_name: str) -> Dict[str, Any]:
-        """更新打印机状态到云端"""
-        if not self.registered or not self.printer_manager:
-            return {"success": False, "message": "服务未就绪"}
-        
-        try:
-            # 获取打印机状态和队列信息
-            status = self.printer_manager.get_printer_status(printer_name)
-            queue = self.printer_manager.get_print_queue(printer_name)
-            job_count = len(queue) if queue else 0
-            
-            return self.api_client.update_printer_status(printer_name, status, job_count)
-            
-        except Exception as e:
-            print(f"❌ [DEBUG] 更新打印机状态异常: {e}")
-            return {"success": False, "message": str(e)}
     
     def _get_resolution_string(self, resolution_list):
         """从分辨率列表中提取标准格式的分辨率字符串"""
@@ -424,12 +489,13 @@ class CloudService:
 
 
 class PrinterStatusReporter:
-    """打印机状态上报器"""
+    """打印机状态上报器 - 使用批量HTTP接口上报"""
     
-    def __init__(self, websocket_client, printer_manager, node_id):
+    def __init__(self, websocket_client, printer_manager, node_id, api_client=None):
         self.websocket_client = websocket_client
         self.printer_manager = printer_manager
         self.node_id = node_id
+        self.api_client = api_client  # 用于批量HTTP上报
         self.last_status = {}  # 缓存上次状态
         self.running = False
         self.thread = None
@@ -450,6 +516,64 @@ class PrinterStatusReporter:
         self.running = False
         print("🛑 [DEBUG] 打印机状态上报服务已停止")
     
+    def force_report_printer(self, printer_id: str = None, printer_name: str = None):
+        """立即上报指定打印机的状态（用于打印任务开始/结束时）
+        
+        Args:
+            printer_id: 打印机ID（优先使用）
+            printer_name: 打印机名称（作为备选）
+        """
+        if not self.printer_manager or not self.api_client:
+            return
+        
+        try:
+            managed_printers = self.printer_manager.config.get_managed_printers()
+            
+            # 查找目标打印机
+            target_printer = None
+            for printer in managed_printers:
+                if printer_id and printer.get("id") == printer_id:
+                    target_printer = printer
+                    break
+                elif printer_name and printer.get("name") == printer_name:
+                    target_printer = printer
+                    break
+            
+            if not target_printer:
+                print(f"⚠️ [DEBUG] 未找到打印机: id={printer_id}, name={printer_name}")
+                return
+            
+            p_id = target_printer.get("id")
+            p_name = target_printer.get("name")
+            
+            # 获取当前状态
+            current_status = self.printer_manager.get_printer_status(p_name)
+            queue_jobs = self.printer_manager.get_print_queue(p_name)
+            current_queue_length = len(queue_jobs) if queue_jobs else 0
+            cloud_status = self._convert_status_to_cloud_format(current_status)
+            
+            # 立即上报（不检查缓存）
+            printers_to_report = [{
+                "printer_id": p_id,
+                "status": cloud_status,
+                "queue_length": current_queue_length
+            }]
+            
+            result = self.api_client.batch_update_printer_status(printers_to_report)
+            
+            if result.get("success"):
+                # 更新缓存
+                self.last_status[p_id] = {
+                    "status": cloud_status,
+                    "queue_length": current_queue_length
+                }
+                print(f"📊 [DEBUG] 立即上报打印机状态成功: {p_name} ({cloud_status})")
+            else:
+                print(f"⚠️ [WARNING] 立即上报打印机状态失败: {result.get('error')}")
+                
+        except Exception as e:
+            print(f"❌ [DEBUG] 立即上报打印机状态异常: {e}")
+    
     def _monitor_loop(self):
         """状态监控循环"""
         while self.running:
@@ -461,51 +585,56 @@ class PrinterStatusReporter:
                 time.sleep(5)  # 出错后短暂等待
     
     def _check_and_report_status(self):
-        """检查并上报状态变化"""
+        """检查并批量上报状态变化"""
         if not self.printer_manager:
             return
         
         try:
             managed_printers = self.printer_manager.config.get_managed_printers()
             
+            # 收集需要上报的打印机状态
+            printers_to_report = []
+            
             for printer in managed_printers:
                 printer_name = printer.get("name")
                 printer_id = printer.get("id")
-                if not printer_name:
+                if not printer_name or not printer_id:
                     continue
                 
                 # 获取当前状态
                 current_status = self.printer_manager.get_printer_status(printer_name)
                 queue_jobs = self.printer_manager.get_print_queue(printer_name)
                 
-                current_queue_length = len(queue_jobs)
-                error_code = None
+                current_queue_length = len(queue_jobs) if queue_jobs else 0
                 
                 # 转换状态为云端格式
                 cloud_status = self._convert_status_to_cloud_format(current_status)
                 
                 # 检查是否有变化
-                last_status_key = printer_id or printer_name
-                last_info = self.last_status.get(last_status_key, {})
+                last_info = self.last_status.get(printer_id, {})
                 if (last_info.get("status") != cloud_status or 
                     last_info.get("queue_length") != current_queue_length):
                     
-                    # 发送状态更新
-                    sent = self.websocket_client.send_printer_status(
-                        self.node_id, printer_id or printer_name, cloud_status, 
-                        current_queue_length, error_code
-                    )
-                    
-                    if sent:
-                        # 更新缓存
-                        self.last_status[last_status_key] = {
-                            "status": cloud_status,
-                            "queue_length": current_queue_length
+                    printers_to_report.append({
+                        "printer_id": printer_id,
+                        "status": cloud_status,
+                        "queue_length": current_queue_length
+                    })
+            
+            # 批量上报（如果有变化）
+            if printers_to_report and self.api_client:
+                result = self.api_client.batch_update_printer_status(printers_to_report)
+                
+                if result.get("success"):
+                    # 更新缓存
+                    for printer_status in printers_to_report:
+                        self.last_status[printer_status["printer_id"]] = {
+                            "status": printer_status["status"],
+                            "queue_length": printer_status["queue_length"]
                         }
-                        
-                        print(f"📊 [DEBUG] 上报打印机状态: {printer_id or printer_name} -> {cloud_status}, 队列: {current_queue_length}")
-                    else:
-                        print(f"⚠️ [WARNING] 打印机状态发送失败，跳过缓存更新: {printer_id or printer_name}")
+                    print(f"📊 [DEBUG] 批量状态上报成功: {len(printers_to_report)} 个打印机")
+                else:
+                    print(f"⚠️ [WARNING] 批量状态上报失败: {result.get('error')}")
                     
         except Exception as e:
             print(f"❌ [DEBUG] 检查打印机状态异常: {e}")

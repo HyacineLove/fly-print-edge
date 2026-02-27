@@ -1,21 +1,31 @@
 """
 fly-print-cloud 心跳服务
 定期发送心跳到云端，报告边缘节点状态
+通过WebSocket发送心跳消息
 """
 
 import threading
 import time
 import psutil
 from typing import Dict, Any, Optional
-from cloud_api_client import CloudAPIClient
 
 
 class HeartbeatService:
-    """心跳服务"""
+    """心跳服务 - 通过WebSocket发送心跳"""
     
-    def __init__(self, api_client: CloudAPIClient, interval: int = 30):
-        self.api_client = api_client
-        self.interval = interval  # 心跳间隔（秒）
+    def __init__(self, websocket_client, node_id: str, interval: int = 30, base_url: str = None):
+        """初始化心跳服务
+        
+        Args:
+            websocket_client: WebSocket客户端实例
+            node_id: 节点ID
+            interval: 心跳间隔（秒）
+            base_url: 云端服务基础URL（用于测量延迟）
+        """
+        self.websocket_client = websocket_client
+        self.node_id = node_id
+        self.interval = interval
+        self.base_url = base_url
         self.running = False
         self.thread = None
         self.last_heartbeat_time = 0
@@ -68,84 +78,100 @@ class HeartbeatService:
             time.sleep(self.interval)
     
     def _send_heartbeat(self) -> bool:
-        """发送心跳"""
+        """通过WebSocket发送心跳"""
         try:
+            # 检查WebSocket是否可用
+            if not self.websocket_client or not self.websocket_client.running:
+                print("⚠️ [DEBUG] WebSocket未连接，跳过心跳发送")
+                return False
+            
             # 收集系统状态信息
-            status_info = self._collect_status_info()
+            system_info = self._collect_system_info()
             
-            result = self.api_client.send_heartbeat(
-                status=status_info["status"],
-                connection_quality=status_info["connection_quality"],
-                latency=status_info["latency"]
-            )
+            # 通过WebSocket发送心跳
+            result = self.websocket_client.send_heartbeat(self.node_id, system_info)
             
-            return result.get("success", False)
+            if result:
+                print(f"💓 [DEBUG] 心跳发送成功 (WebSocket)")
+            
+            return result
             
         except Exception as e:
             print(f"❌ [DEBUG] 发送心跳异常: {e}")
             return False
     
-    def _collect_status_info(self) -> Dict[str, Any]:
-        """收集系统状态信息"""
+    def _collect_system_info(self) -> Dict[str, Any]:
+        """收集系统信息，符合API文档格式
+        
+        Returns:
+            system_info字典，包含:
+            - cpu_usage: float (%)
+            - memory_usage: float (%)
+            - disk_usage: float (%)
+            - network_quality: str (good/fair/poor)
+            - latency: int (ms)
+        """
         try:
             # 获取CPU使用率
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_usage = psutil.cpu_percent(interval=1)
             
             # 获取内存使用率
             memory = psutil.virtual_memory()
-            memory_percent = memory.percent
+            memory_usage = memory.percent
             
             # 获取磁盘使用率
             disk = psutil.disk_usage('/')
-            disk_percent = disk.percent
+            disk_usage = disk.percent
             
-            # 根据系统负载确定状态
-            if cpu_percent > 90 or memory_percent > 90 or disk_percent > 90:
-                status = "busy"
-            elif cpu_percent > 70 or memory_percent > 70:
-                status = "moderate"
-            else:
-                status = "online"
+            # 评估网络质量
+            network_quality = self._evaluate_network_quality()
             
-            # 简单的连接质量评估（基于最近的心跳成功率）
-            if self.heartbeat_failures == 0:
-                connection_quality = 100
-            elif self.heartbeat_failures == 1:
-                connection_quality = 80
-            elif self.heartbeat_failures == 2:
-                connection_quality = 60
-            else:
-                connection_quality = 40
-            
-            # 模拟延迟（实际项目中可以ping云端服务器测量）
+            # 测量延迟
             latency = self._measure_latency()
             
             return {
-                "status": status,
-                "connection_quality": connection_quality,
-                "latency": latency,
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory_percent,
-                "disk_percent": disk_percent
+                "cpu_usage": round(cpu_usage, 1),
+                "memory_usage": round(memory_usage, 1),
+                "disk_usage": round(disk_usage, 1),
+                "network_quality": network_quality,
+                "latency": latency
             }
             
         except Exception as e:
-            print(f"❌ [DEBUG] 收集状态信息异常: {e}")
+            print(f"❌ [DEBUG] 收集系统信息异常: {e}")
             return {
-                "status": "unknown",
-                "connection_quality": 50,
+                "cpu_usage": 0.0,
+                "memory_usage": 0.0,
+                "disk_usage": 0.0,
+                "network_quality": "poor",
                 "latency": 0
             }
+    
+    def _evaluate_network_quality(self) -> str:
+        """评估网络质量
+        
+        Returns:
+            str: good/fair/poor
+        """
+        # 基于最近的心跳成功率评估
+        if self.heartbeat_failures == 0:
+            return "good"
+        elif self.heartbeat_failures == 1:
+            return "fair"
+        else:
+            return "poor"
     
     def _measure_latency(self) -> int:
         """测量到云端的延迟（毫秒）"""
         try:
+            if not self.base_url:
+                return 0
+                
             import requests
             start_time = time.time()
             
             # 简单的HEAD请求测量延迟
-            base_url = self.api_client.base_url
-            response = requests.head(f"{base_url}/api/v1/health", timeout=3)
+            response = requests.head(f"{self.base_url}/api/v1/health", timeout=3)
             
             end_time = time.time()
             latency_ms = int((end_time - start_time) * 1000)

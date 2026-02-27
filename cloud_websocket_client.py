@@ -24,6 +24,7 @@ class CloudWebSocketClient:
         self.auth_client = auth_client
         self.websocket = None
         self.running = False
+        self.connected = False  # 实际连接状态（握手成功才为True）
         self.thread = None
         self.loop = None  # 存储WebSocket线程的事件循环
         self.message_handlers = {}  # type: Dict[str, List[Callable]]
@@ -37,7 +38,10 @@ class CloudWebSocketClient:
         # 避免重复添加相同的handler
         if handler not in self.message_handlers[message_type]:
             self.message_handlers[message_type].append(handler)
-            print(f"📝 [DEBUG] 添加WebSocket消息处理器: {message_type}")
+            # 标注处理器来源（业务逻辑 or SSE转发）
+            handler_name = handler.__name__ if hasattr(handler, '__name__') else str(handler)
+            layer = "业务处理" if "handle_" in handler_name else "SSE转发"
+            print(f"📝 [DEBUG] 注册WebSocket消息处理器: {message_type} -> {handler_name} ({layer})")
         else:
             print(f"📝 [DEBUG] WebSocket消息处理器已存在，跳过: {message_type}")
     
@@ -94,6 +98,7 @@ class CloudWebSocketClient:
                 token = self.auth_client.get_access_token()
                 if not token:
                     print("❌ [ERROR] 无法获取access token，等待重试")
+                    self.connected = False
                     await asyncio.sleep(self.reconnect_interval)
                     continue
                 
@@ -110,6 +115,7 @@ class CloudWebSocketClient:
                     ping_timeout=10
                 ) as websocket:
                     self.websocket = websocket
+                    self.connected = True  # 握手成功
                     print("✅ [INFO] WebSocket连接成功")
                     
                     # 监听消息
@@ -122,8 +128,10 @@ class CloudWebSocketClient:
                             print(f"❌ [ERROR] 处理WebSocket消息异常: {e}")
                             
             except websockets.exceptions.ConnectionClosed as e:
+                self.connected = False
                 print(f"🔌 [WARNING] WebSocket连接关闭: {e}")
             except Exception as e:
+                self.connected = False
                 print(f"❌ [ERROR] WebSocket连接异常: {e}")
             
             if self.running:
@@ -139,6 +147,29 @@ class CloudWebSocketClient:
             print(f"📨 [INFO] 收到WebSocket消息: {message_type}")
             if message_type == "preview_file":
                 print(f"📄 [DEBUG] 收到预览文件消息: {json.dumps(data, ensure_ascii=False)}")
+            
+            # 处理服务端关闭通知（server_close）
+            if message_type == "server_close":
+                close_data = data.get("data") or {}
+                reason = close_data.get("reason") or "unknown"
+                msg = close_data.get("message") or ""
+                print(f"🔌 [INFO] 收到服务端关闭通知: reason={reason}, message={msg}")
+                
+                # 节点被删除时，按照协议要求：不要自动重连，等待手动重新注册
+                if reason == "node_deleted":
+                    print("🛑 [INFO] 节点已被删除，将停止WebSocket重连，等待手动重新注册")
+                    # 通过本地消息分发，将事件通知到前端（SSE）
+                    local_msg = {
+                        "type": "cloud_error",
+                        "data": {
+                            "code": "node_deleted",
+                            "message": msg or "节点已被管理员删除，请在管理端重新注册节点"
+                        }
+                    }
+                    # 使用本地分发机制触发相关处理器（例如 SSE 转发）
+                    self.dispatch_local_message("cloud_error", local_msg)
+                    self.running = False
+                return
             
             # 调用对应的消息处理器
             if message_type in self.message_handlers:
@@ -218,12 +249,21 @@ class CloudWebSocketClient:
             print(f"❌ [ERROR] 同步发送WebSocket消息失败: {e}")
             return False
 
-    def submit_print_params(self, task_token: str, file_id: str, printer_id: str, options: Dict[str, Any]):
-        """提交打印参数"""
+    def submit_print_params(self, node_id: str, file_id: str, printer_id: str, options: Dict[str, Any]):
+        """提交打印参数
+        
+        Args:
+            node_id: 节点ID
+            file_id: 已上传的文件ID
+            printer_id: 目标打印机ID
+            options: 打印参数，包含 copies, paper_size, color_mode, duplex_mode, page_count
+        """
+        from datetime import datetime, timezone
         message = {
             "type": "submit_print_params",
+            "node_id": node_id,
+            "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "data": {
-                "task_token": task_token,
                 "file_id": file_id,
                 "printer_id": printer_id,
                 "options": options
@@ -231,19 +271,44 @@ class CloudWebSocketClient:
         }
         self.send_message_sync(message)
 
-    def send_printer_status(self, node_id: str, printer_id: str, status: str, queue_length: int, error_code: Optional[str] = None) -> bool:
-        """发送打印机状态消息"""
+    def send_heartbeat(self, node_id: str, system_info: Dict[str, Any]) -> bool:
+        """发送心跳消息到云端
+        
+        Args:
+            node_id: 节点ID
+            system_info: 系统信息，包含 cpu_usage, memory_usage, disk_usage, network_quality, latency
+        
+        Returns:
+            bool: 发送是否成功
+        """
         from datetime import datetime, timezone
         message = {
-            "type": "printer_status",
+            "type": "edge_heartbeat",
             "node_id": node_id,
             "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "data": {
-                "printer_id": printer_id,
-                "status": status,
-                "queue_length": queue_length,
-                "error_code": error_code,
-                "supplies": {}
+                "system_info": system_info
+            }
+        }
+        return self.send_message_sync(message)
+
+    def request_upload_token(self, node_id: str, printer_id: str) -> bool:
+        """请求上传凭证
+        
+        Args:
+            node_id: 节点ID
+            printer_id: 目标打印机ID
+        
+        Returns:
+            bool: 请求是否发送成功
+        """
+        from datetime import datetime, timezone
+        message = {
+            "type": "request_upload_token",
+            "node_id": node_id,
+            "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "data": {
+                "printer_id": printer_id
             }
         }
         return self.send_message_sync(message)
@@ -252,12 +317,109 @@ class CloudWebSocketClient:
 class PrintJobHandler:
     """打印任务处理器"""
     
-    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None):
+    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None, status_reporter=None):
         self.printer_manager = printer_manager
         self.api_client = api_client
         self.websocket_client = websocket_client
         self.auth_client = auth_client
         self.node_id = node_id
+        self.status_reporter = status_reporter  # 打印机状态上报器
+        self.upload_token_callback = None  # 上传凭证成功回调
+        self.upload_token_error_callback = None  # 上传凭证错误回调
+        self.last_upload_token = None  # 缓存最近的上传凭证
+    
+    def handle_error_message(self, message: Dict[str, Any]):
+        """处理云端错误响应
+        
+        错误码说明:
+        - node_not_found: 节点不存在
+        - node_disabled: 节点被禁用
+        - printer_not_found: 打印机不存在
+        - printer_not_belong_to_node: 打印机不属于该节点
+        - printer_disabled: 打印机被禁用
+        - token_generation_failed: 凭证生成失败
+        - invalid_request: 请求格式错误
+        - file_not_found: 文件不存在
+        """
+        try:
+            data = message.get("data", {})
+            error_code = data.get("code", "unknown_error")
+            error_message = data.get("message", "未知错误")
+            printer_id = data.get("printer_id")
+            
+            print(f"❌ [ERROR] 收到云端错误: [{error_code}] {error_message}")
+            if printer_id:
+                print(f"  └─ 相关打印机: {printer_id}")
+            
+            # 检查是否是上传凭证请求的错误响应
+            # 上传凭证相关的错误码：node_disabled, node_not_found, printer_disabled, printer_not_found, printer_not_belong_to_node
+            upload_token_error_codes = [
+                "node_disabled", "node_not_found", 
+                "printer_disabled", "printer_not_found", "printer_not_belong_to_node",
+                "token_generation_failed"
+            ]
+            
+            if error_code in upload_token_error_codes:
+                # 调用上传凭证错误回调
+                if self.upload_token_error_callback and callable(self.upload_token_error_callback):
+                    self.upload_token_error_callback(error_code, error_message)
+                    print(f"  └─ 已触发上传凭证错误回调")
+            
+            # 分发错误消息到本地（SSE通知前端）
+            if self.websocket_client:
+                local_msg = {
+                    "type": "cloud_error",
+                    "data": {
+                        "code": error_code,
+                        "message": error_message,
+                        "printer_id": printer_id
+                    }
+                }
+                self.websocket_client.dispatch_local_message("cloud_error", local_msg)
+            
+            # 根据错误码进行特定处理
+            # 打印机禁用状态已由云端统一管理，不再同步到本地
+                    
+        except Exception as e:
+            print(f"❌ [ERROR] 处理错误消息异常: {e}")
+    
+    def handle_upload_token(self, message: Dict[str, Any]):
+        """处理上传凭证响应
+        
+        响应格式:
+        {
+            "type": "upload_token",
+            "timestamp": "ISO8601",
+            "data": {
+                "token": "Base64编码凭证",
+                "expires_at": "过期时间",
+                "upload_url": "/api/v1/files?token=xxx",  # API上传端点（POST请求）
+                "web_url": "/upload?token=xxx&node_id=xxx&printer_id=xxx"  # Web上传页面（GET请求，用于生成二维码）
+            }
+        }
+        """
+        try:
+            data = message.get("data", {})
+            token = data.get("token")
+            expires_at = data.get("expires_at")
+            upload_url = data.get("upload_url")  # API端点
+            web_url = data.get("web_url")  # Web页面（优先使用）
+            
+            print(f"🔐 [INFO] 收到上传凭证，过期时间: {expires_at}")
+            
+            # 缓存凭证（优先使用 web_url，如果不存在则使用 upload_url）
+            self.last_upload_token = {
+                "token": token,
+                "expires_at": expires_at,
+                "upload_url": web_url if web_url else upload_url  # 优先使用 web_url 生成二维码
+            }
+            
+            # 如果有回调，执行回调
+            if self.upload_token_callback and callable(self.upload_token_callback):
+                self.upload_token_callback(token, expires_at, web_url if web_url else upload_url)
+                
+        except Exception as e:
+            print(f"❌ [ERROR] 处理上传凭证异常: {e}")
     
     def handle_preview_file(self, message: Dict[str, Any]):
         """处理文件预览请求"""
@@ -292,6 +454,7 @@ class PrintJobHandler:
             printer_name = data.get("printer_name")
             printer_id = data.get("printer_id")
             file_url = data.get("file_url")
+            file_access_token = data.get("file_access_token")  # 获取文件下载凭证
             job_name = data.get("name", f"CloudJob_{job_id}")  # 使用name字段作为任务名
             print_options = data.get("print_options", {})
             if not isinstance(print_options, dict):
@@ -308,16 +471,9 @@ class PrintJobHandler:
             if not all([job_id, printer_name, file_url]):
                 print("❌ [WARNING] 打印任务参数不完整")
                 return
-
-            if not self.printer_manager.is_node_enabled():
-                self._report_job_failure(job_id, "节点已禁用")
-                return
-            if not self.printer_manager.is_printer_enabled(printer_id=printer_id, printer_name=printer_name):
-                self._report_job_failure(job_id, "打印机已禁用")
-                return
             
-            # 下载文件
-            file_path = self._download_print_file(file_url, job_id, job_name)
+            # 下载文件（优先使用file_access_token）
+            file_path = self._download_print_file(file_url, job_id, job_name, file_access_token)
             if not file_path:
                 self._report_job_failure(job_id, "文件下载失败")
                 return
@@ -336,8 +492,11 @@ class PrintJobHandler:
             
             if result.get("success"):
                 print(f"✅ [INFO] 云端打印任务提交成功: {job_id}")
+                # 立即上报打印机状态（任务开始）
+                if self.status_reporter:
+                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                 # 启动任务完成监控
-                self._monitor_job_completion(job_id, printer_name, result.get("job_id"))
+                self._monitor_job_completion(job_id, printer_name, result.get("job_id"), printer_id)
             else:
                 error_msg = result.get("message", "未知错误")
                 print(f"❌ [ERROR] 云端打印任务提交失败: {error_msg}")
@@ -348,12 +507,23 @@ class PrintJobHandler:
             # 统一方法已经处理了异常清理
             self._report_job_failure(data.get("job_id"), str(e))
     
-    def _download_print_file(self, file_url: str, job_id: str, expected_filename: str = None) -> Optional[str]:
-        """下载打印文件"""
+    def _download_print_file(self, file_url: str, job_id: str, expected_filename: str = None, file_access_token: str = None) -> Optional[str]:
+        """下载打印文件
+        
+        Args:
+            file_url: 文件URL
+            job_id: 任务ID
+            expected_filename: 期望的文件名
+            file_access_token: 文件下载凭证（来自print_job指令）
+        
+        Returns:
+            下载的临时文件路径，失败返回None
+        """
         try:
             import requests
             import tempfile
             import os
+            from urllib.parse import urlparse, urlencode, urlunparse, parse_qs
             
             # 如果是相对路径，拼接完整URL
             if file_url and not file_url.startswith(('http://', 'https://')):
@@ -361,19 +531,36 @@ class PrintJobHandler:
                     file_url = f"{self.api_client.base_url.rstrip('/')}/{file_url.lstrip('/')}"
                     print(f"🔗 [DEBUG] 拼接完整文件URL: {file_url}")
 
+            # 确定认证方式
+            headers = {}
+            download_url = file_url
+            
+            # S3签名URL不能带认证头
+            if 'X-Amz-Algorithm' in file_url and 'X-Amz-Signature' in file_url:
+                print(f"🔗 [DEBUG] 检测到S3签名URL，直接下载")
+            # 优先使用file_access_token（API文档推荐方式）
+            elif file_access_token:
+                # 将token作为查询参数添加到URL
+                parsed = urlparse(file_url)
+                query_params = parse_qs(parsed.query)
+                query_params['token'] = [file_access_token]
+                new_query = urlencode(query_params, doseq=True)
+                download_url = urlunparse((
+                    parsed.scheme, parsed.netloc, parsed.path,
+                    parsed.params, new_query, parsed.fragment
+                ))
+                print(f"🔐 [DEBUG] 使用file_access_token下载文件")
+            else:
+                # 回退到Bearer Token认证
+                if self.api_client and self.api_client.auth_client:
+                    headers = self.api_client.auth_client.get_auth_headers()
+                    print(f"🔐 [DEBUG] 使用Bearer Token下载文件")
+                else:
+                    print(f"⚠️ [WARNING] 无可用认证方式，尝试直接下载")
+
             print(f"📥 [INFO] 下载打印文件: {file_url}")
             
-            # S3签名URL不能带认证头，检查是否为签名URL
-            headers = {}
-            if 'X-Amz-Algorithm' in file_url and 'X-Amz-Signature' in file_url:
-                # 这是S3签名URL，不需要认证头
-                print(f"🔗 [DEBUG] 检测到S3签名URL，直接下载")
-            else:
-                # 普通URL需要认证头
-                headers = self.api_client.auth_client.get_auth_headers()
-                print(f"🔐 [DEBUG] 使用认证头下载文件")
-            
-            response = requests.get(file_url, headers=headers, timeout=30)
+            response = requests.get(download_url, headers=headers, timeout=30)
             print(f"📊 [DEBUG] 下载响应状态: {response.status_code}")
             if response.status_code != 200:
                 print(f"📊 [ERROR] 响应内容: {response.text[:500]}")  # 打印前500字符的错误信息
@@ -420,24 +607,65 @@ class PrintJobHandler:
             print(f"❌ [ERROR] 下载打印文件异常: {e}")
             return None
     
-    def _monitor_job_completion(self, cloud_job_id: str, printer_name: str, local_job_id: str):
-        """监控打印任务完成状态"""
+    def _monitor_job_completion(self, cloud_job_id: str, printer_name: str, local_job_id: str, printer_id: str = None):
+        """监控打印任务完成状态
+        
+        Windows 平台优先使用 WMI 事件监听，Linux 使用轮询。
+        
+        Args:
+            cloud_job_id: 云端任务ID
+            printer_name: 打印机名称
+            local_job_id: 本地任务ID
+            printer_id: 打印机ID（用于状态上报）
+        """
         import threading
         import time
+        import platform
         
+        # 尝试使用 WMI 事件监听（仅 Windows）
+        if platform.system() == "Windows":
+            try:
+                from printer_windows import WindowsPrintJobMonitor
+                wmi_monitor = WindowsPrintJobMonitor()
+                
+                if wmi_monitor.available and local_job_id:
+                    print(f"🔍 [INFO] 使用 WMI 事件监听监控任务: {cloud_job_id}")
+                    
+                    def on_wmi_complete(job_info):
+                        """WMI 任务完成回调"""
+                        print(f"✅ [INFO] WMI 检测到任务完成: {cloud_job_id}")
+                        self._report_job_success(cloud_job_id)
+                        # 任务完成后立即上报打印机状态
+                        if self.status_reporter and printer_id:
+                            self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
+                    
+                    # 启动 WMI 监听
+                    wmi_monitor.start_job_monitor(
+                        printer_name=printer_name,
+                        job_id=local_job_id,
+                        on_complete=on_wmi_complete
+                    )
+                    return  # 使用 WMI，直接返回
+                    
+            except Exception as e:
+                print(f"⚠️ [WARNING] WMI 监听启动失败，回退到轮询: {e}")
+        
+        # 回退到轮询方式（Linux 或 WMI 不可用）
         def monitor():
             try:
                 if not local_job_id:
-                    # 如果没有本地job_id，延迟后直接报告成功（假设提交成功就是完成）
-                    time.sleep(10)
+                    # 虚拟打印机可能不返回 job_id，直接报告成功
+                    print(f"⚠️ [WARNING] 未获取到job_id，假设打印已完成: {cloud_job_id}")
                     self._report_job_success(cloud_job_id)
+                    if self.status_reporter and printer_id:
+                        self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                     return
                 
                 max_wait_time = 600  # 最大等待10分钟
-                check_interval = 10   # 每10秒检查一次
+                check_interval = 1   # 每1秒检查一次（自助终端场景，轮询开销小）
                 waited_time = 0
                 
-                print(f"🔍 [DEBUG] 开始监控云端任务完成: {cloud_job_id} -> 本地任务: {local_job_id}")
+                print(f"🔍 [DEBUG] 开始轮询监控云端任务完成: {cloud_job_id} -> 本地任务: {local_job_id}")
                 
                 while waited_time < max_wait_time:
                     time.sleep(check_interval)
@@ -450,10 +678,16 @@ class PrintJobHandler:
                     if not job_status.get("exists", True):
                         print(f"✅ [INFO] 云端任务完成: {cloud_job_id}")
                         self._report_job_success(cloud_job_id)
+                        # 任务完成后立即上报打印机状态
+                        if self.status_reporter and printer_id:
+                            self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                         return
                     elif job_status.get("status") in ["completed", "completed_or_failed"]:
                         print(f"✅ [INFO] 云端任务完成: {cloud_job_id}")
                         self._report_job_success(cloud_job_id)
+                        # 任务完成后立即上报打印机状态
+                        if self.status_reporter and printer_id:
+                            self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                         return
                     else:
                         current_status = job_status.get('status', 'unknown')
@@ -465,11 +699,17 @@ class PrintJobHandler:
                 # 超时后报告成功（假设长时间运行的任务已完成）
                 print(f"⏰ [WARNING] 云端任务监控超时，假设已完成: {cloud_job_id}")
                 self._report_job_success(cloud_job_id)
+                # 任务完成后立即上报打印机状态
+                if self.status_reporter and printer_id:
+                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                 
             except Exception as e:
                 print(f"❌ [ERROR] 监控云端任务完成异常: {e}")
                 # 异常时也报告成功，避免任务一直处于分发状态
                 self._report_job_success(cloud_job_id)
+                # 异常后也要上报打印机状态
+                if self.status_reporter and printer_id:
+                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
         
         # 在后台线程中监控
         monitor_thread = threading.Thread(target=monitor, daemon=True)

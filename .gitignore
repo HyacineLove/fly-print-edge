@@ -32,3 +32,8 @@ pip-delete-this-directory.txt
 Thumbs.db
 
 _fly-print-cloud
+
+
+.qoder
+ai_docs/
+test/

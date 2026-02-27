@@ -10,7 +10,11 @@
     <div class="container admin-container">
         <h1>Edge 管理后台</h1>
         <p class="subtitle">管理打印机列表与默认打印机设置</p>
-        <div class="node-status" id="node-status"></div>
+        <div class="node-status-row">
+            <div class="node-status" id="node-status"></div>
+            <button class="btn btn-secondary" id="reregister-node-btn" style="margin-left: 8px; display: none;">重新注册节点</button>
+            <button class="btn btn-outline" id="show-printer-reregister-btn" style="margin-left: 8px;" title="如果打印机云端注册失败，可点击此按钮显示重新注册选项">🛠️ 打印机维护</button>
+        </div>
         <div class="admin-grid">
             <div class="admin-card">
                 <div class="card-header">

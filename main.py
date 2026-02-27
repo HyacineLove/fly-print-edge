@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from printer_utils import PrinterManager
 from cloud_service import CloudService
+from file_manager import init_file_manager, get_file_manager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -60,6 +61,12 @@ async def startup_event():
     # 初始化打印机管理器
     printer_manager = PrinterManager()
     
+    # 初始化文件管理器
+    file_mgr = init_file_manager(cleanup_interval=300, file_ttl=1800)
+    file_mgr.cleanup_old_temp_files(pattern="tmp*", max_age_hours=24)
+    file_mgr.start()
+    logger.info("✅ 文件管理器已启动")
+    
     # 初始化云端服务
     cloud_config = printer_manager.config.config.get("cloud", {})
     if not cloud_config.get("enabled", False):
@@ -73,18 +80,20 @@ async def startup_event():
         node_id = start_result.get("node_id")
         logger.info(f"✅ 云端服务启动成功，Node ID: {node_id}")
         
-        # 注册WebSocket消息处理器
+        # 注册WebSocket消息的SSE转发处理器（将云端消息推送给前端）
+        # 云端实际发送的下行消息：print_job, preview_file, upload_token, error
+        # - print_job/upload_token/error 由 cloud_service.py 中的 PrintJobHandler 处理业务逻辑，不需要转发给前端
+        # - preview_file/error 需要同时转发给前端（用户界面需要显示）
         if cloud_service.websocket_client:
-            # 添加消息处理器，将消息推送到SSE队列
+            # preview_file: 将文件预览消息推送到SSE，前端显示预览界面
             cloud_service.websocket_client.add_message_handler("preview_file", handle_cloud_message)
+            
+            # error: 将云端错误消息推送到SSE，前端显示错误提示
+            cloud_service.websocket_client.add_message_handler("error", handle_cloud_message)
+            # cloud_error: 由本地封装的云端错误（如节点被删除等），同样转发到前端
+            cloud_service.websocket_client.add_message_handler("cloud_error", handle_cloud_message)
+            # job_status: 将打印任务状态更新推送到SSE，前端显示打印进度
             cloud_service.websocket_client.add_message_handler("job_status", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("printer_status", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("printer_deleted", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("printer_deleted", handle_printer_deleted)
-            cloud_service.websocket_client.add_message_handler("node_state", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("node_state", handle_node_state)
-            cloud_service.websocket_client.add_message_handler("printer_state", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("printer_state", handle_printer_state)
     else:
         logger.error(f"❌ 云端服务启动失败: {start_result.get('message')}")
 
@@ -115,56 +124,16 @@ def handle_cloud_message(data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"❌ 推送消息到SSE队列失败: {e}")
 
-def handle_printer_deleted(data: Dict[str, Any]):
-    try:
-        printer_id = data.get("data", {}).get("printer_id")
-        if not printer_id:
-            logger.warning("⚠️ 未提供 printer_id，跳过处理")
-            return
-        result = _remove_managed_printer(printer_id, allow_missing=True)
-        if result.get("success"):
-            logger.info(f"✅ 已同步删除管理打印机: {printer_id}")
-        else:
-            logger.warning(f"⚠️ 同步删除打印机失败: {result.get('message')}")
-    except Exception as e:
-        logger.error(f"❌ 同步删除打印机异常: {e}")
-
-def handle_node_state(data: Dict[str, Any]):
-    try:
-        enabled = data.get("data", {}).get("enabled")
-        if enabled is None:
-            logger.warning("⚠️ 未提供 enabled 字段，跳过处理")
-            return
-        if not printer_manager:
-            logger.warning("⚠️ 设备未就绪，无法更新节点状态")
-            return
-        printer_manager.set_node_enabled(bool(enabled))
-        logger.info(f"✅ 节点状态已更新: enabled={bool(enabled)}")
-    except Exception as e:
-        logger.error(f"❌ 同步节点状态异常: {e}")
-
-def handle_printer_state(data: Dict[str, Any]):
-    try:
-        payload = data.get("data", {})
-        printer_id = payload.get("printer_id")
-        enabled = payload.get("enabled")
-        if not printer_id or enabled is None:
-            logger.warning("⚠️ 缺少 printer_id 或 enabled，跳过处理")
-            return
-        if not printer_manager:
-            logger.warning("⚠️ 设备未就绪，无法更新打印机状态")
-            return
-        result = printer_manager.set_printer_enabled(printer_id, bool(enabled))
-        if result:
-            logger.info(f"✅ 打印机状态已更新: {printer_id} enabled={bool(enabled)}")
-        else:
-            logger.warning(f"⚠️ 未找到打印机，无法更新状态: {printer_id}")
-    except Exception as e:
-        logger.error(f"❌ 同步打印机状态异常: {e}")
-
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("🛑 Edge Server 正在停止...")
+    
+    # 停止文件管理器
+    file_mgr = get_file_manager()
+    if file_mgr:
+        file_mgr.cleanup_all_preview_files()
+        file_mgr.stop()
+    
     if cloud_service:
         cloud_service.stop()
 
@@ -183,8 +152,7 @@ async def get_status():
     return {
         "status": "online",
         "node_id": node_id,
-        "printer_count": len(printer_manager.get_managed_printers()) if printer_manager else 0,
-        "node_enabled": printer_manager.is_node_enabled() if printer_manager else False
+        "printer_count": len(printer_manager.get_managed_printers()) if printer_manager else 0
     }
 
 def get_host_ip():
@@ -403,7 +371,7 @@ def _convert_word_to_pdf(file_path: str):
             try:
                 result = subprocess.run(
                     [soffice, "--headless", "--convert-to", "pdf", "--outdir", temp_dir, abs_file_path],
-                    capture_output=True, text=True, timeout=60
+                    capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
                 )
                 if result.returncode == 0 and os.path.exists(pdf_path):
                     return pdf_path, None
@@ -522,56 +490,121 @@ async def get_qr_code():
         return JSONResponse(status_code=503, content={"success": False, "message": "设备未注册或离线"})
     if not printer_manager:
         return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
-    if not printer_manager.is_node_enabled():
-        return {"success": False, "standby": True, "disabled": True, "disabled_target": "node", "message": "设备已被禁用，暂不提供打印服务"}
     if len(_get_managed_printers()) == 0:
         return {"success": False, "standby": True, "message": "暂无可用打印机"}
     default_printer_id = _ensure_default_printer()
     if not default_printer_id:
         return {"success": False, "standby": True, "message": "暂无可用打印机"}
-    if not printer_manager.is_printer_enabled(printer_id=default_printer_id):
-        return {"success": False, "standby": True, "disabled": True, "disabled_target": "printer", "default_printer_id": default_printer_id, "message": "默认打印机已被禁用，暂不提供打印服务"}
     
-    upload_token = None
+    # 通过 WebSocket 请求上传凭证
+    if not cloud_service or not cloud_service.websocket_client:
+        return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
     
-    # 尝试获取 file:upload 权限的 Token
-    if cloud_service and cloud_service.auth_client:
-        upload_token = cloud_service.auth_client.get_token_with_scope("file:upload")
+    # 创建一个 Future 用于等待上传凭证响应
+    upload_token_future = asyncio.Future()
     
-    # 如果获取失败，尝试使用默认 Token (仅用于开发环境)
-    if not upload_token:
-        logger.warning("⚠️ 无法获取 file:upload Token，尝试使用默认 Token")
-        # 这里可以尝试读取本地缓存或请求其他接口
-        # 为了演示，如果失败，我们可能需要提示用户或返回错误
-        # 但在开发环境中，我们可能需要一个 fallback
-        pass
-
-    if not upload_token:
-        return JSONResponse(status_code=500, content={"success": False, "message": "无法获取上传凭证"})
-
-    # 构建上传 URL
-    # 假设 Cloud API 地址与 Edge 连接的 Base URL 一致
-    base_url = cloud_service.api_client.base_url if cloud_service and cloud_service.api_client else "http://localhost:8080"
-    # 移除 /api/v1 等后缀，获取主机地址
-    # 这里简单处理，假设 base_url 是 http://host:port/api/v1...
-    # 或者直接使用 base_url 的 host
-    # 更稳健的方法是解析 URL
+    def upload_token_callback(token, expires_at, upload_url):
+        """上传凭证成功回调"""
+        if not upload_token_future.done():
+            upload_token_future.set_result({
+                "success": True,
+                "token": token,
+                "expires_at": expires_at,
+                "upload_url": upload_url
+            })
+    
+    def upload_token_error_callback(error_code, error_message):
+        """上传凭证错误回调"""
+        if not upload_token_future.done():
+            upload_token_future.set_result({
+                "success": False,
+                "error_code": error_code,
+                "error_message": error_message
+            })
+    
+    # 设置回调
+    if cloud_service.print_job_handler:
+        cloud_service.print_job_handler.upload_token_callback = upload_token_callback
+        cloud_service.print_job_handler.upload_token_error_callback = upload_token_error_callback
+    
+    # 请求上传凭证
+    success = cloud_service.websocket_client.request_upload_token(node_id, default_printer_id)
+    if not success:
+        return JSONResponse(status_code=500, content={"success": False, "message": "请求上传凭证失败"})
+    
+    # 等待上传凭证响应（最多等待 5 秒）
+    try:
+        token_data = await asyncio.wait_for(upload_token_future, timeout=5.0)
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"success": False, "message": "获取上传凭证超时"})
+    finally:
+        # 清除回调
+        if cloud_service.print_job_handler:
+            cloud_service.print_job_handler.upload_token_callback = None
+            cloud_service.print_job_handler.upload_token_error_callback = None
+    
+    # 检查是否是错误响应
+    if not token_data.get("success"):
+        error_code = token_data.get("error_code", "unknown_error")
+        error_message = token_data.get("error_message", "未知错误")
+        
+        # 根据错误码返回友好提示
+        if error_code == "node_disabled":
+            return JSONResponse(status_code=403, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": "此节点已被管理员禁用，请联系管理员解除禁用后手动点击刷新按钮"
+            })
+        elif error_code == "printer_disabled":
+            return JSONResponse(status_code=403, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": "所选打印机已被管理员禁用，请联系管理员解除禁用后手动点击刷新按钮"
+            })
+        elif error_code == "printer_not_found":
+            return JSONResponse(status_code=404, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": "打印机不存在，请联系管理员检查配置"
+            })
+        elif error_code == "printer_not_belong_to_node":
+            return JSONResponse(status_code=403, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": "打印机不属于此节点，请联系管理员检查配置"
+            })
+        elif error_code == "token_generation_failed":
+            return JSONResponse(status_code=500, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": "凭证生成失败，请稍后重试"
+            })
+        else:
+            # 其他未知错误
+            return JSONResponse(status_code=500, content={
+                "success": False, 
+                "error_code": error_code,
+                "message": error_message or "获取上传凭证失败，请稍后重试"
+            })
+    
+    # 构建完整的上传 URL（指向云端）
     from urllib.parse import urlparse
+    base_url = cloud_service.api_client.base_url if cloud_service and cloud_service.api_client else "http://localhost:8080"
     parsed = urlparse(base_url)
-    host_url = f"{parsed.scheme}://{parsed.netloc}"
+    cloud_host = f"{parsed.scheme}://{parsed.netloc}"
     
     # 获取局域网 IP 并替换 localhost/127.0.0.1
     try:
         lan_ip = get_host_ip()
-        if "localhost" in host_url:
-            host_url = host_url.replace("localhost", lan_ip)
-        elif "127.0.0.1" in host_url:
-            host_url = host_url.replace("127.0.0.1", lan_ip)
+        if "localhost" in cloud_host:
+            cloud_host = cloud_host.replace("localhost", lan_ip)
+        elif "127.0.0.1" in cloud_host:
+            cloud_host = cloud_host.replace("127.0.0.1", lan_ip)
     except Exception as e:
         logger.warning(f"无法获取局域网 IP: {e}")
     
-    # 构造最终 URL
-    upload_url = f"{host_url}/upload?token={upload_token}&node_id={node_id}&printer_id={default_printer_id}"
+    # 使用云端返回的 upload_url（相对路径），拼接完整 URL
+    upload_url = f"{cloud_host}{token_data['upload_url']}"
     
     qr_img_url = build_qr_data_url(upload_url)
 
@@ -585,11 +618,10 @@ async def get_qr_code():
         "qr_url": qr_img_url, 
         "text_url": upload_url,
         "node_id": node_id,
-        "token": upload_token,
+        "token": token_data['token'],
+        "expires_at": token_data['expires_at'],
         "default_printer_id": default_printer_id,
-        "default_printer_capabilities": default_printer_capabilities,
-        "node_enabled": printer_manager.is_node_enabled(),
-        "default_printer_enabled": printer_manager.is_printer_enabled(printer_id=default_printer_id)
+        "default_printer_capabilities": default_printer_capabilities
     }
 
 @app.get("/api/events")
@@ -640,6 +672,7 @@ async def preview(request: Request):
 
         cached = preview_files.get(file_id)
         if cached and cached.get("file_url") != file_url:
+            # URL变化，清理旧文件
             old_path = cached.get("path")
             if old_path and os.path.exists(old_path):
                 try:
@@ -658,6 +691,11 @@ async def preview(request: Request):
                 preview_cache.pop(k, None)
             preview_page_cache.pop(file_id, None)
             preview_page_meta.pop(file_id, None)
+            
+            # 从文件管理器移除
+            file_mgr = get_file_manager()
+            if file_mgr:
+                file_mgr.cleanup_file(file_id, source="url_changed")
 
         try:
             page_index = int(options.get("page_index") or 0)
@@ -681,6 +719,16 @@ async def preview(request: Request):
             preview_files[file_id] = {"path": file_path, "file_url": file_url}
             if cached_pdf and os.path.exists(cached_pdf):
                 preview_files[file_id]["pdf_path"] = cached_pdf
+            
+            # 注册到文件管理器
+            file_mgr = get_file_manager()
+            if file_mgr:
+                file_mgr.register_preview_file(file_id, file_path, cached_pdf)
+        else:
+            # 更新访问时间
+            file_mgr = get_file_manager()
+            if file_mgr:
+                file_mgr.update_file_access(file_id)
 
         image, page_count, resolved_page_index, err = _generate_preview_image(file_id, file_path, file_name, file_type, options, page_index)
         if not image:
@@ -705,22 +753,18 @@ async def submit_print(request: Request):
         options = body.get("options")
         file_id = body.get("file_id")
         
-        if not task_token or not options or not file_id:
-            return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: task_token, options, file_id 均必需"})
+        if not options or not file_id:
+            return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: options, file_id 均必需"})
         if not isinstance(options, dict):
             return JSONResponse(status_code=400, content={"success": False, "message": "参数错误: options 必须为对象"})
         if not printer_manager:
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
-        if not printer_manager.is_node_enabled():
-            return JSONResponse(status_code=403, content={"success": False, "message": "节点已禁用"})
         
         if cloud_service and cloud_service.websocket_client:
             printer_id = _ensure_default_printer()
             
             if not printer_id:
                  return JSONResponse(status_code=500, content={"success": False, "message": "未找到可用打印机"})
-            if not printer_manager.is_printer_enabled(printer_id=printer_id):
-                return JSONResponse(status_code=403, content={"success": False, "message": "默认打印机已禁用"})
 
             # 发送参数到云端
             # 构造消息
@@ -731,10 +775,13 @@ async def submit_print(request: Request):
                     options["duplex_mode"] = "single"
                 elif duplex_value_str in ["longedge", "shortedge", "duplexnotumble", "duplextumble", "双面"]:
                     options["duplex_mode"] = "duplex"
+            
+            from datetime import datetime, timezone
             msg = {
                 "type": "submit_print_params",
+                "node_id": cloud_service.node_id,
+                "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                 "data": {
-                    "task_token": task_token,
                     "file_id": file_id,
                     "printer_id": printer_id,
                     "options": options
@@ -742,6 +789,20 @@ async def submit_print(request: Request):
             }
             # 使用异步发送方法
             await cloud_service.websocket_client.send_message(msg)
+            
+            # 清理预览文件（打印时会重新下载，预览文件不再需要）
+            file_mgr = get_file_manager()
+            if file_mgr:
+                file_mgr.cleanup_file(file_id, source="print")
+            
+            # 清理内存缓存
+            preview_files.pop(file_id, None)
+            keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
+            for k in keys:
+                preview_cache.pop(k, None)
+            preview_page_cache.pop(file_id, None)
+            preview_page_meta.pop(file_id, None)
+            
             return {"success": True, "message": "打印任务已提交"}
         else:
             return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
@@ -749,6 +810,106 @@ async def submit_print(request: Request):
     except Exception as e:
         logger.error(f"提交打印参数失败: {e}")
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+@app.post("/api/cleanup")
+async def cleanup_preview_file(request: Request):
+    """清理预览文件（用户取消时调用）"""
+    try:
+        body = await request.json()
+        file_id = body.get("file_id")
+        
+        if not file_id:
+            return JSONResponse(status_code=400, content={"success": False, "message": "file_id 不能为空"})
+        
+        # 通过文件管理器清理
+        file_mgr = get_file_manager()
+        if file_mgr:
+            file_mgr.cleanup_file(file_id, source="cancel")
+        
+        # 清理内存缓存
+        preview_files.pop(file_id, None)
+        keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
+        for k in keys:
+            preview_cache.pop(k, None)
+        preview_page_cache.pop(file_id, None)
+        preview_page_meta.pop(file_id, None)
+        
+        return {"success": True, "message": "文件已清理"}
+        
+    except Exception as e:
+        logger.error(f"清理文件失败: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+@app.post("/api/admin/node/reregister")
+async def reregister_node():
+    """重新注册云端节点（在节点被删除或配置异常时使用）"""
+    global cloud_service, node_id
+    if not printer_manager:
+        return {"success": False, "message": "设备未就绪"}
+    if not cloud_service:
+        return {"success": False, "message": "云端服务未启用"}
+    try:
+        # 停止当前云端服务
+        cloud_service.stop()
+
+        # 清除本地缓存的 node_id
+        try:
+            if hasattr(printer_manager, "config"):
+                cloud_cfg = printer_manager.config.config.get("cloud", {})
+                cloud_cfg.pop("node_id", None)
+                printer_manager.config.save_config()
+        except Exception as e:
+            logger.warning(f"清除本地 node_id 缓存失败: {e}")
+
+        # 重置 CloudService 状态
+        cloud_service.node_id = None
+        cloud_service.registered = False
+
+        # 重新启动云端服务（会触发自动注册）
+        start_result = cloud_service.start()
+        if not start_result.get("success"):
+            return {"success": False, "message": start_result.get("message") or "节点重新注册失败"}
+
+        node_id = start_result.get("node_id")
+
+        # 重新注册 SSE 消息转发处理器
+        if cloud_service.websocket_client:
+            cloud_service.websocket_client.add_message_handler("preview_file", handle_cloud_message)
+            cloud_service.websocket_client.add_message_handler("error", handle_cloud_message)
+            cloud_service.websocket_client.add_message_handler("cloud_error", handle_cloud_message)
+
+        return {"success": True, "message": "节点重新注册成功", "node_id": node_id}
+    except Exception as e:
+        logger.error(f"重新注册节点失败: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.get("/api/admin/cloud/status")
+async def get_cloud_status():
+    """获取云端服务连接/注册状态"""
+    if not cloud_service:
+        return {
+            "success": True,
+            "enabled": False,
+            "registered": False,
+            "connected": False,
+            "node_id": None,
+            "message": "云端服务未启用"
+        }
+    try:
+        status = cloud_service.get_status()
+        ws = status.get("websocket") or {}
+        connected = bool(ws.get("connected"))  # 使用 connected 而不是 running
+        return {
+            "success": True,
+            "enabled": status.get("enabled", False),
+            "registered": status.get("registered", False),
+            "connected": connected,
+            "node_id": status.get("node_id"),
+            "message": "正常" if connected and status.get("registered") else "未连接"
+        }
+    except Exception as e:
+        logger.error(f"获取云端状态失败: {e}")
+        return {"success": False, "message": str(e)}
 
 @app.get("/api/admin/printers/managed")
 async def get_managed_printers():
@@ -761,8 +922,7 @@ async def get_managed_printers():
     return {
         "success": True,
         "items": printers,
-        "default_printer_id": default_id,
-        "node_enabled": printer_manager.is_node_enabled()
+        "default_printer_id": default_id
     }
 
 @app.get("/api/admin/printers/discovered")
@@ -794,10 +954,26 @@ async def add_managed_printer(request: Request):
     if not default_id and added_printer:
         printer_manager.config.set_default_printer_id(added_printer.get("id"))
         default_id = added_printer.get("id")
-    if cloud_service:
-        if added_printer:
-            cloud_service.register_managed_printer(added_printer)
-    return {"success": True, "message": "打印机添加成功", "default_printer_id": default_id}
+    
+    # 尝试注册到云端，并记录注册状态
+    cloud_registered = False
+    cloud_error = None
+    if cloud_service and added_printer:
+        result = cloud_service.register_managed_printer(added_printer)
+        if result.get("success"):
+            cloud_registered = True
+        else:
+            cloud_error = result.get("message") or result.get("error") or "云端注册失败"
+            logger.warning(f"打印机 {added_printer.get('name')} 云端注册失败: {cloud_error}")
+    
+    return {
+        "success": True, 
+        "message": "打印机添加成功", 
+        "default_printer_id": default_id,
+        "printer_id": added_printer.get("id") if added_printer else None,
+        "cloud_registered": cloud_registered,
+        "cloud_error": cloud_error
+    }
 
 @app.post("/api/admin/printers/default")
 async def set_default_printer(request: Request):
@@ -818,9 +994,58 @@ async def delete_managed_printer(printer_id: str):
     result = _remove_managed_printer(printer_id)
     if not result.get("success"):
         return {"success": False, "message": result.get("message")}
+    
+    # 尝试从云端删除，但不影响本地删除结果
+    cloud_delete_warning = None
     if cloud_service:
-        cloud_service.delete_printer_from_cloud(printer_id)
-    return {"success": True, "default_printer_id": result.get("default_printer_id")}
+        cloud_result = cloud_service.delete_printer_from_cloud(printer_id)
+        if not cloud_result.get("success"):
+            cloud_delete_warning = cloud_result.get("message") or cloud_result.get("error") or "云端删除失败"
+            logger.warning(f"打印机 {printer_id} 云端删除失败: {cloud_delete_warning}")
+    
+    response = {
+        "success": True, 
+        "default_printer_id": result.get("default_printer_id")
+    }
+    
+    # 如果云端删除失败，附带警告信息
+    if cloud_delete_warning:
+        response["warning"] = f"打印机已从本地删除，但云端删除失败: {cloud_delete_warning}"
+    
+    return response
+
+@app.post("/api/admin/printers/{printer_id}/reregister")
+async def reregister_printer(printer_id: str):
+    """重新注册单个打印机到云端（仅在节点已注册时可用）"""
+    if not printer_manager or not cloud_service:
+        return {"success": False, "message": "服务未就绪"}
+    try:
+        # 检查节点是否已注册
+        status = cloud_service.get_status()
+        if not status.get("registered"):
+            return {"success": False, "message": "节点未注册，无法重新注册打印机"}
+        
+        # 查找本地打印机
+        managed = _get_managed_printers()
+        target = None
+        for p in managed:
+            if p.get("id") == printer_id:
+                target = p
+                break
+        if not target:
+            return {"success": False, "message": "打印机不存在"}
+        
+        # 调用云端注册
+        result = cloud_service.register_managed_printer(target)
+        if result.get("success"):
+            return {"success": True, "message": "打印机重新注册成功"}
+        else:
+            # 兼容不同返回格式
+            msg = result.get("message") or result.get("error") or "打印机重新注册失败"
+            return {"success": False, "message": msg}
+    except Exception as e:
+        logger.error(f"重新注册打印机失败: {e}")
+        return {"success": False, "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=False)

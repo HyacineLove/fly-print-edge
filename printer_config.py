@@ -25,12 +25,12 @@ class PrinterConfig:
                 if "default_printer_id" not in config:
                     config["default_printer_id"] = None
                 config_updated = False
-                if "node_enabled" not in config:
-                    config["node_enabled"] = True
-                    config_updated = True
                 for printer in config.get("managed_printers", []):
                     if "enabled" not in printer:
                         printer["enabled"] = True
+                        config_updated = True
+                    if "cloud_registered" not in printer:
+                        printer["cloud_registered"] = False
                         config_updated = True
                 if config_updated:
                     with open(self.config_file, 'w', encoding='utf-8') as wf:
@@ -51,11 +51,9 @@ class PrinterConfig:
                     "node_name": "",
                     "location": "",
                     "heartbeat_interval": 30,
-                    "auto_register": True,
-                    "auto_register_printers": True
+                    "auto_register": True
                 },
-                "default_printer_id": None,
-                "node_enabled": True
+                "default_printer_id": None
             }
     
     def save_config(self):
@@ -71,6 +69,8 @@ class PrinterConfig:
         printer_info["id"] = str(uuid.uuid4())
         if "enabled" not in printer_info:
             printer_info["enabled"] = True
+        if "cloud_registered" not in printer_info:
+            printer_info["cloud_registered"] = False
         print(f"➕ [DEBUG] 添加打印机到配置: {printer_info['name']} (ID: {printer_info['id']})")
         self.config["managed_printers"].append(printer_info)
         self.save_config()
@@ -91,9 +91,13 @@ class PrinterConfig:
         """更新打印机ID（用于同步云端ID）"""
         updated = False
         for printer in self.config["managed_printers"]:
-            if printer.get("name") == printer_name and printer.get("id") != new_id:
-                print(f"🔄 [DEBUG] 更新打印机ID: {printer_name} ({printer.get('id')} -> {new_id})")
-                printer["id"] = new_id
+            if printer.get("name") == printer_name:
+                old_id = printer.get("id")
+                if old_id != new_id:
+                    print(f"🔄 [DEBUG] 更新打印机ID: {printer_name} ({old_id} -> {new_id})")
+                    printer["id"] = new_id
+                # 无论ID是否变化，都标记为已在云端注册，避免重复注册
+                printer["cloud_registered"] = True
                 updated = True
                 break
         
@@ -127,13 +131,6 @@ class PrinterConfig:
         self.config["default_printer_id"] = None
         for printer in self.config["managed_printers"]:
             printer["is_default"] = False
-        self.save_config()
-
-    def get_node_enabled(self):
-        return self.config.get("node_enabled", True)
-
-    def set_node_enabled(self, enabled: bool):
-        self.config["node_enabled"] = enabled
         self.save_config()
 
     def get_printer_by_id(self, printer_id: str):

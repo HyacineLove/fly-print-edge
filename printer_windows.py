@@ -7,7 +7,7 @@ import platform
 import os
 import json
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable, Optional
 
 # Windows特定导入
 if platform.system() == "Windows":
@@ -16,11 +16,20 @@ if platform.system() == "Windows":
         import win32api
         import win32con
         import pywintypes
+        import pythoncom
         WIN32_AVAILABLE = True
     except ImportError:
         WIN32_AVAILABLE = False
+    
+    try:
+        import wmi
+        WMI_AVAILABLE = True
+    except ImportError:
+        WMI_AVAILABLE = False
+        print("⚠️ [WARNING] WMI模块不可用，将使用轮询方式监控打印任务")
 else:
     WIN32_AVAILABLE = False
+    WMI_AVAILABLE = False
 
 
 class WindowsEnterprisePrinter:
@@ -44,6 +53,8 @@ class WindowsEnterprisePrinter:
                 command,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',  # 忽略无法解码的字符
                 timeout=30
             )
             return result
@@ -365,7 +376,7 @@ class WindowsEnterprisePrinter:
                 try:
                     result = subprocess.run(
                         [soffice, "--headless", "--convert-to", "pdf", "--outdir", temp_dir, abs_file_path],
-                        capture_output=True, text=True, timeout=60
+                        capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
                     )
                     if result.returncode == 0 and os.path.exists(pdf_path):
                         print("✅ [INFO] 文档转PDF成功 (使用 LibreOffice)")
@@ -433,7 +444,7 @@ class WindowsEnterprisePrinter:
                     cmd.append(abs_path)
                     result = subprocess.run(
                         cmd,
-                        capture_output=True, text=True, timeout=60
+                        capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
                     )
                     if result.returncode != 0:
                         return {"success": False, "message": f"SumatraPDF打印失败: {result.stderr.strip() or result.stdout.strip()}"}
@@ -475,24 +486,32 @@ class WindowsEnterprisePrinter:
                         return {"success": False, "message": "系统未关联PDF阅读器，请安装 Adobe Reader 或 SumatraPDF"}
                     return {"success": False, "message": f"ShellExecute调用失败, 错误码: {res}"}
             
-            # 等待一小段时间让任务进入Spooler
-            time.sleep(2)
+            # 轮询获取打印任务ID - 从任务提交后立即开始检查
+            job_id = None
+            max_attempts = 5  # 最多尝试5次（0秒、1秒、2秒、3秒、4秒）
             
-            # 尝试查找最近的任务作为 JobID
-            job_id = 0
-            try:
-                printer_handle = win32print.OpenPrinter(printer_name)
-                # 获取所有任务
-                jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
-                win32print.ClosePrinter(printer_handle)
-                
-                if jobs:
-                    # 假设ID最大的就是最新的任务
-                    latest_job = max(jobs, key=lambda x: x['JobId'])
-                    job_id = latest_job['JobId']
-                    print(f"✅ [INFO] 获取到打印任务ID: {job_id}")
-            except Exception as e:
-                print(f"⚠️ [WARNING] 获取打印任务ID失败: {e}")
+            for attempt in range(max_attempts):
+                try:
+                    printer_handle = win32print.OpenPrinter(printer_name)
+                    jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
+                    win32print.ClosePrinter(printer_handle)
+                    
+                    if jobs:
+                        # 找到ID最大的任务（最新的）
+                        latest_job = max(jobs, key=lambda x: x['JobId'])
+                        job_id = latest_job['JobId']
+                        print(f"✅ [INFO] 获取到打印任务ID: {job_id} (第{attempt+1}次尝试)")
+                        break
+                    elif attempt < max_attempts - 1:
+                        # 还有重试机会，等待1秒后继续
+                        time.sleep(1)
+                except Exception as e:
+                    print(f"⚠️ [WARNING] 第{attempt+1}次获取打印任务ID失败: {e}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(1)
+            
+            if not job_id:
+                print(f"⚠️ [WARNING] {max_attempts}次尝试后仍未获取到job_id，虚拟打印机可能不经过后台程序")
             
             return {
                 "success": True, 
@@ -912,7 +931,7 @@ class WindowsEnterprisePrinter:
             safe_name = printer_name.replace("'", "''")
             result = subprocess.run(
                 ["wmic", "printer", "where", f"Name='{safe_name}'", "get", "WorkOffline,PrinterStatus,ExtendedPrinterStatus,DetectedErrorState,Availability", "/format:list"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=10
             )
             if result.returncode != 0:
                 return None
@@ -976,3 +995,157 @@ class WindowsEnterprisePrinter:
         
         # 如果没有匹配的标准尺寸，返回实际尺寸
         return f"{width_inch:.1f}x{height_inch:.1f}英寸"
+
+
+class WindowsPrintJobMonitor:
+    """Windows 打印任务 WMI 事件监听器
+    
+    使用 WMI 事件通知机制实时监控打印任务状态变化，
+    相比轮询方式具有更低延迟和更准确的状态判断。
+    """
+    
+    def __init__(self):
+        self.available = WMI_AVAILABLE and WIN32_AVAILABLE
+        self.monitors = {}  # {monitor_key: monitor_thread}
+        self.running = False
+        
+        if not self.available:
+            print("⚠️ [WARNING] WMI 打印任务监听器不可用")
+    
+    def start_job_monitor(self, printer_name: str, job_id: int, 
+                         on_status_change: Optional[Callable[[Dict[str, Any]], None]] = None,
+                         on_complete: Optional[Callable[[Dict[str, Any]], None]] = None):
+        """启动打印任务事件监听
+        
+        Args:
+            printer_name: 打印机名称
+            job_id: 打印任务ID
+            on_status_change: 状态变化回调函数（可选）
+            on_complete: 任务完成回调函数（必须）
+        
+        Returns:
+            监听器键值（用于停止监听）
+        """
+        if not self.available:
+            print("⚠️ [WARNING] WMI不可用，无法启动事件监听")
+            return None
+        
+        if not on_complete:
+            print("⚠️ [WARNING] 必须提供 on_complete 回调函数")
+            return None
+        
+        import threading
+        
+        monitor_key = f"{printer_name}:{job_id}"
+        
+        def monitor_thread():
+            """WMI 事件监听线程"""
+            try:
+                # COM 初始化（每个线程必须独立初始化）
+                pythoncom.CoInitialize()
+                
+                print(f"🔍 [INFO] 启动 WMI 事件监听: {monitor_key}")
+                
+                # 连接 WMI
+                c = wmi.WMI()
+                
+                # 构造 WQL 查询：监听特定打印任务的删除事件
+                # Win32_PrintJob 的 Name 格式为 "printer_name:job_id"
+                wql_delete = f"""
+                    SELECT * FROM __InstanceDeletionEvent WITHIN 2
+                    WHERE TargetInstance ISA 'Win32_PrintJob'
+                    AND TargetInstance.Name = '{monitor_key}'
+                """
+                
+                # 如果需要监听状态变化（可选）
+                if on_status_change:
+                    wql_modify = f"""
+                        SELECT * FROM __InstanceModificationEvent WITHIN 2
+                        WHERE TargetInstance ISA 'Win32_PrintJob'
+                        AND TargetInstance.Name = '{monitor_key}'
+                    """
+                    
+                    # 创建修改事件监听器（非阻塞）
+                    modify_watcher = c.watch_for(
+                        raw_wql=wql_modify,
+                        notification_type="Modification",
+                        wmi_class="Win32_PrintJob"
+                    )
+                
+                # 创建删除事件监听器（阻塞等待）
+                delete_watcher = c.watch_for(
+                    raw_wql=wql_delete,
+                    notification_type="Deletion",
+                    wmi_class="Win32_PrintJob"
+                )
+                
+                print(f"✅ [INFO] WMI 监听器已就绪: {monitor_key}")
+                
+                # 阻塞等待删除事件（任务完成/取消/失败都会触发删除）
+                deleted_event = delete_watcher()
+                
+                # 提取任务信息
+                target_instance = deleted_event.TargetInstance
+                
+                job_info = {
+                    "job_id": job_id,
+                    "printer_name": printer_name,
+                    "document": getattr(target_instance, 'Document', 'Unknown'),
+                    "status": "completed",  # WMI 删除事件无法区分成功/失败，默认为完成
+                    "pages_printed": getattr(target_instance, 'PagesPrinted', 0),
+                    "total_pages": getattr(target_instance, 'TotalPages', 0),
+                    "time_submitted": getattr(target_instance, 'TimeSubmitted', None)
+                }
+                
+                print(f"✅ [INFO] WMI 检测到任务完成: {monitor_key}")
+                print(f"   └─ 文档: {job_info['document']}")
+                print(f"   └─ 页数: {job_info['pages_printed']}/{job_info['total_pages']}")
+                
+                # 调用完成回调
+                if on_complete:
+                    on_complete(job_info)
+                
+            except Exception as e:
+                print(f"❌ [ERROR] WMI 监听异常: {monitor_key} - {e}")
+                # 异常时也调用回调，避免任务卡住
+                if on_complete:
+                    on_complete({
+                        "job_id": job_id,
+                        "printer_name": printer_name,
+                        "status": "error",
+                        "error": str(e)
+                    })
+            finally:
+                # COM 清理
+                pythoncom.CoUninitialize()
+                # 移除监听器记录
+                if monitor_key in self.monitors:
+                    del self.monitors[monitor_key]
+                print(f"🛑 [INFO] WMI 监听器已停止: {monitor_key}")
+        
+        # 启动监听线程
+        thread = threading.Thread(target=monitor_thread, daemon=True, name=f"WMI-Monitor-{monitor_key}")
+        thread.start()
+        
+        # 记录监听器
+        self.monitors[monitor_key] = thread
+        
+        return monitor_key
+    
+    def stop_job_monitor(self, monitor_key: str):
+        """停止指定的任务监听（注意：WMI 监听是阻塞的，只能等待其自然结束）"""
+        if monitor_key in self.monitors:
+            print(f"⏸️ [INFO] 请求停止 WMI 监听: {monitor_key}")
+            # WMI 的 watch_for 是阻塞的，无法主动中断
+            # 只能等待事件触发或线程自然结束
+            del self.monitors[monitor_key]
+    
+    def get_active_monitors(self) -> List[str]:
+        """获取当前活跃的监听器列表"""
+        return list(self.monitors.keys())
+    
+    def stop_all(self):
+        """停止所有监听器"""
+        print(f"🛑 [INFO] 停止所有 WMI 监听器（共 {len(self.monitors)} 个）")
+        self.monitors.clear()
+

@@ -80,32 +80,3 @@ class CloudAuthClient:
             }
         return {'Content-Type': 'application/json'}
 
-    def get_token_with_scope(self, scope: str) -> Optional[str]:
-        """获取指定scope的token (不缓存)"""
-        try:
-            print(f"🔑 [DEBUG] 请求OAuth2 token (scope: {scope}): {self.auth_url}")
-            
-            data = {
-                'grant_type': 'client_credentials',
-                'client_id': self.client_id,
-                'client_secret': self.client_secret,
-                'scope': scope
-            }
-            
-            response = requests.post(
-                self.auth_url,
-                data=data,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                token_data = response.json()
-                return token_data.get('access_token')
-            else:
-                print(f"❌ [DEBUG] OAuth2 token获取失败: {response.status_code} - {response.text}")
-                return None
-                
-        except Exception as e:
-            print(f"❌ [DEBUG] OAuth2认证异常: {e}")
-            return None

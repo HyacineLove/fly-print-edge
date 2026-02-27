@@ -14,7 +14,8 @@ def run_command_with_debug(cmd, timeout=10):
             capture_output=True,
             text=True,
             timeout=timeout,
-            encoding='utf-8'
+            encoding='utf-8',
+            errors='ignore'
         )
         return result
     except subprocess.TimeoutExpired:

@@ -50,38 +50,6 @@ class CloudAPIClient:
             print(f"❌ [DEBUG] 边缘节点注册异常: {e}")
             return {"success": False, "error": str(e)}
     
-    def send_heartbeat(self, status: str = "online", connection_quality: int = 100, latency: int = 0) -> Dict[str, Any]:
-        """发送心跳"""
-        if not self.node_id:
-            return {"success": False, "error": "节点未注册"}
-        
-        try:
-            url = f"{self.base_url}/api/v1/edge/heartbeat"
-            headers = self.auth_client.get_auth_headers()
-            
-            data = {
-                "node_id": self.node_id,
-                "status": status,
-                "connection_quality": connection_quality,
-                "latency": latency,
-                "timestamp": int(time.time())
-            }
-            
-            print(f"💓 [DEBUG] 发送心跳: {url}")
-            
-            response = requests.post(url, json=data, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                print(f"✅ [DEBUG] 心跳发送成功")
-                return {"success": True, "data": response.json()}
-            else:
-                print(f"❌ [DEBUG] 心跳发送失败: {response.status_code} - {response.text}")
-                return {"success": False, "error": response.text}
-                
-        except Exception as e:
-            print(f"❌ [DEBUG] 心跳发送异常: {e}")
-            return {"success": False, "error": str(e)}
-    
     def register_printers(self, printers: List[Dict[str, Any]]) -> Dict[str, Any]:
         """注册打印机到云端（逐个注册）"""
         if not self.node_id:
@@ -149,6 +117,52 @@ class CloudAPIClient:
         except Exception as e:
             print(f"❌ [DEBUG] 删除打印机异常: {e}")
             return {"success": False, "error": str(e)}
+
+    def batch_update_printer_status(self, printers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """批量更新打印机状态
+        
+        Args:
+            printers: 打印机状态列表，每个元素包含:
+                - printer_id: 打印机ID
+                - status: 状态 (ready/printing/error/offline)
+                - queue_length: 队列长度
+        
+        Returns:
+            包含 updated, failed, errors 的响应
+        """
+        if not self.node_id:
+            return {"success": False, "error": "节点未注册"}
+        
+        if not printers:
+            return {"success": True, "updated": 0, "failed": 0, "errors": []}
+        
+        try:
+            url = f"{self.base_url}/api/v1/edge/{self.node_id}/printers/status"
+            headers = self.auth_client.get_auth_headers()
+            
+            data = {"printers": printers}
+            
+            print(f"📊 [DEBUG] 批量状态上报: {url}, 打印机数量: {len(printers)}")
+            
+            response = requests.post(url, json=data, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()
+                data = result.get("data", {})
+                print(f"✅ [DEBUG] 批量状态上报成功: 更新 {data.get('updated', 0)}, 失败 {data.get('failed', 0)}")
+                return {
+                    "success": True,
+                    "updated": data.get("updated", 0),
+                    "failed": data.get("failed", 0),
+                    "errors": data.get("errors", [])
+                }
+            else:
+                print(f"❌ [DEBUG] 批量状态上报失败: {response.status_code} - {response.text}")
+                return {"success": False, "error": response.text}
+                
+        except Exception as e:
+            print(f"❌ [DEBUG] 批量状态上报异常: {e}")
+            return {"success": False, "error": str(e)}
     
     def get_websocket_url(self) -> str:
         """获取WebSocket连接URL"""
@@ -158,32 +172,4 @@ class CloudAPIClient:
         # 将HTTP(S)协议转换为WS(S)协议
         ws_base = self.base_url.replace('http://', 'ws://').replace('https://', 'wss://')
         return f"{ws_base}/api/v1/edge/ws?node_id={self.node_id}"
-    
-    def update_printer_status(self, printer_name: str, status: str, job_count: int = 0) -> Dict[str, Any]:
-        """更新打印机状态"""
-        if not self.node_id:
-            return {"success": False, "error": "节点未注册"}
-        
-        try:
-            url = f"{self.base_url}/api/v1/edge/{self.node_id}/printers/{printer_name}/status"
-            headers = self.auth_client.get_auth_headers()
-            
-            data = {
-                "status": status,
-                "job_count": job_count,
-                "timestamp": int(time.time())
-            }
-            
-            response = requests.put(url, json=data, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            else:
-                print(f"❌ [DEBUG] 更新打印机状态失败: {response.status_code} - {response.text}")
-                return {"success": False, "error": response.text}
-                
-        except Exception as e:
-            print(f"❌ [DEBUG] 更新打印机状态异常: {e}")
-            return {"success": False, "error": str(e)}
-    
-    # 注意：打印任务状态上报现在通过WebSocket的job_update消息处理，不再使用HTTP API
+

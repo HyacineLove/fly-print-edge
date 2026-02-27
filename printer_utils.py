@@ -141,7 +141,6 @@ class PrinterManager:
         self.config = PrinterConfig()
         self.discovery = PrinterDiscovery()
         self.parser_manager = PrinterParameterParserManager()  # 解析器管理器
-        self.node_enabled = self.config.get_node_enabled()
         # 初始化平台特定的打印机实现
         if platform.system() == "Windows":
             self.platform_printer = WindowsEnterprisePrinter()
@@ -152,13 +151,6 @@ class PrinterManager:
     def get_printers(self) -> List[Dict]:
         """获取管理的打印机列表"""
         return self.config.get_managed_printers()
-
-    def set_node_enabled(self, enabled: bool):
-        self.node_enabled = enabled
-        self.config.set_node_enabled(enabled)
-
-    def is_node_enabled(self) -> bool:
-        return self.node_enabled
 
     def set_printer_enabled(self, printer_id: str, enabled: bool) -> bool:
         return self.config.set_printer_enabled(printer_id, enabled)
@@ -388,11 +380,6 @@ class PrinterManager:
         import os
         
         try:
-            if not self.is_node_enabled():
-                return {"success": False, "message": "节点已禁用"}
-            if not self.is_printer_enabled(printer_id=printer_id, printer_name=printer_name):
-                return {"success": False, "message": "打印机已禁用"}
-
             print(f"🖨️ [{cleanup_source}] 提交打印任务: {job_name}")
             print(f"  打印机: {printer_name}")
             print(f"  文件: {file_path}")
