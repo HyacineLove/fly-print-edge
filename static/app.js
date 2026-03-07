@@ -45,8 +45,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showSection(name) {
-        Object.values(sections).forEach(s => s.style.display = 'none');
-        sections[name].style.display = 'flex';
+        Object.values(sections).forEach(s => s.classList.remove('active'));
+        sections[name].classList.add('active');
         state.current = name;
         
         // 只在扫码页面保持刷新定时器
@@ -62,9 +62,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             // 显示加载遮罩
             if (qrLoadingElem) qrLoadingElem.style.display = 'flex';
+            // 保持刷新按钮可见，避免布局抖动
+            // if (refreshBtn) refreshBtn.style.display = "none";
                 
             if (qrExpiryElem) qrExpiryElem.innerText = "";
-            if (refreshBtn) refreshBtn.style.display = "none";
                 
             const response = await fetch('/api/qr_code');
             const data = await response.json();
@@ -293,6 +294,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function handleMessage(msg) {
         console.log("收到消息:", msg);
+        
+        // 处理本地打印机变更事件（由Admin触发）
+        if (msg.type === 'printer_deleted' || msg.type === 'node_status_changed') {
+            console.warn('收到设备状态变更，重置界面');
+            resetState();
+            return;
+        }
+        
         if (msg.type === 'preview_file') {
             state.file = msg.data;
             showPreview(msg.data);
@@ -357,19 +366,33 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.resetState = () => {
-        // 清理预览文件（如果有）
+        // 立即切换页面
+        showSection('scan');
+        
+        // 立即获取二维码（服务端有10秒超时，足够等待WebSocket重连）
+        fetchQRCode();
+        
+        // 异步清理预览文件（不阻塞UI）
         if (state.file && state.file.file_id) {
-            fetch('/api/cleanup', {
+            const fileId = state.file.file_id;
+            state.file = null;
+            clearAutoReturnTimer();
+            
+            // 后台清理，添加超时保护
+            const cleanupPromise = fetch('/api/cleanup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file_id: state.file.file_id })
-            }).catch(e => console.error('清理文件失败:', e));
+                body: JSON.stringify({ file_id: fileId })
+            });
+            
+            Promise.race([
+                cleanupPromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('cleanup timeout')), 3000))
+            ]).catch(e => console.error('清理文件失败:', e));
+        } else {
+            state.file = null;
+            clearAutoReturnTimer();
         }
-        
-        state.file = null;
-        clearAutoReturnTimer();  // 清除自动返回定时器
-        showSection('scan');
-        fetchQRCode(); // 刷新Token
     };
 
     window.submitPrint = async () => {
@@ -454,7 +477,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (statusData.status === 'completed') {
             titleElem.innerText = "✅ 打印完成";
             msgElem.innerText = "请取走您的文件，感谢使用！";
-            document.querySelector('.progress-fill').style.width = "100%";
+            const progressFill = document.querySelector('.progress-fill');
+            progressFill.style.animation = 'none';
+            progressFill.style.width = "100%";
             
             // 显示返回按钮并启动5秒自动返回
             returnBtn.classList.remove('hidden');
@@ -462,6 +487,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (statusData.status === 'failed') {
             titleElem.innerText = "❌ 打印失败";
             msgElem.innerText = statusData.message || "打印过程中发生错误，请联系管理员";
+            const progressFill = document.querySelector('.progress-fill');
+            progressFill.style.animation = 'none';
+            progressFill.style.width = "0%";
             
             // 显示返回按钮并启动5秒自动返回
             returnBtn.classList.remove('hidden');
@@ -469,7 +497,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             titleElem.innerText = "🖨️ 正在打印...";
             msgElem.innerText = "系统正在处理您的文档，请勿离开...";
-            document.querySelector('.progress-fill').style.width = "0%";
+            const progressFill = document.querySelector('.progress-fill');
+            progressFill.style.animation = '';
+            progressFill.style.width = '';
         }
     }
     
@@ -609,7 +639,7 @@ document.addEventListener('DOMContentLoaded', () => {
         options.forEach(option => {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'option-button';
+            button.className = 'option-btn';
             button.innerText = option.label;
             if (option.disabled) {
                 button.classList.add('disabled');
@@ -654,6 +684,14 @@ document.addEventListener('DOMContentLoaded', () => {
     async function requestPreview() {
         if (!state.file) return;
         const imageElem = document.getElementById('preview-image');
+        const errorElem = document.getElementById('preview-error');
+        const errorMsgElem = document.getElementById('preview-error-msg');
+        const previewBody = document.querySelector('.preview-body');
+
+        // 重置错误状态
+        if (errorElem) errorElem.style.display = 'none';
+        if (previewBody) previewBody.classList.remove('has-error');
+        
         try {
             const res = await fetch('/api/preview', {
                 method: 'POST',
@@ -685,16 +723,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 updatePageIndicator();
             } else {
+                // 显式错误处理
                 state.previewPageIndex = 0;
                 state.previewPageCount = 1;
                 updatePageIndicator();
                 if (imageElem) imageElem.src = "";
+                
+                // 显示错误提示
+                if (errorElem) {
+                    errorElem.style.display = 'flex';
+                    if (errorMsgElem) errorMsgElem.innerText = result.message || "预览生成失败，请重试";
+                }
+                if (previewBody) previewBody.classList.add('has-error');
             }
         } catch (e) {
             state.previewPageIndex = 0;
             state.previewPageCount = 1;
             updatePageIndicator();
             if (imageElem) imageElem.src = "";
+            
+            // 显示网络错误
+            if (errorElem) {
+                errorElem.style.display = 'flex';
+                if (errorMsgElem) errorMsgElem.innerText = "网络连接错误，无法生成预览";
+            }
+            if (previewBody) previewBody.classList.add('has-error');
         }
     }
 });

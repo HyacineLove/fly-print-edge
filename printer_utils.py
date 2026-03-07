@@ -1,4 +1,4 @@
-"""
+﻿"""
 打印机核心管理功能
 包含打印机发现、状态查询、队列管理和打印任务提交
 """
@@ -47,15 +47,64 @@ class PrinterDiscovery:
         try:
             return self.platform_printer.discover_local_printers()
         except Exception as e:
-            print(f"❌ 发现本地打印机时出错: {e}")
+            print(f" 发现本地打印机时出错: {e}")
             return []
     
     def discover_network_printers(self) -> List[Dict]:
         """发现网络打印机"""
         printers = []
         
+        # 检查是否配置为静态模式
         try:
-            print("🔍 开始网络打印机发现...")
+            from printer_config import PrinterConfig
+            config = PrinterConfig().config
+            discovery_mode = config.get("printers", {}).get("discovery_mode", "auto")
+            
+            if discovery_mode == "static":
+                print(" 使用静态打印机配置，跳过网络发现")
+                static_list = config.get("printers", {}).get("static_list", [])
+                for p in static_list:
+                    ip = p.get("ip")
+                    name = p.get("name")
+                    protocol = p.get("protocol", "ipp")
+                    port = p.get("port")
+                    
+                    # 根据协议设置默认端口
+                    if not port:
+                        if protocol in ["hp_jetdirect", "raw", "socket"]:
+                            port = 9100  # HP JetDirect默认端口
+                        elif protocol == "ipp":
+                            port = 631  # IPP默认端口
+                        else:
+                            port = 9100  # 默认使用9100
+                    
+                    if ip and name:
+                        # 构建URI（根据协议类型）
+                        if protocol in ["hp_jetdirect", "raw", "socket"]:
+                            uri = f"socket://{ip}:{port}"
+                            make_model = "HP Smart Printing"
+                        else:
+                            uri = f"{protocol}://{ip}:{port}/ipp/print"
+                            make_model = "Static Printer"
+                        
+                        printers.append({
+                            "name": name,
+                            "type": "network",
+                            "location": f"{ip}:{port}",
+                            "make_model": make_model,
+                            "uri": uri,
+                            "protocol": protocol,
+                            "ip": ip,
+                            "port": port,
+                            "enabled": False
+                        })
+                print(f" 加载了 {len(printers)} 个静态打印机")
+                return printers
+        except Exception as e:
+            print(f" 读取静态打印机配置出错: {e}")
+
+        try:
+            print(" 开始网络打印机发现...")
             zeroconf = Zeroconf()
             listener = NetworkPrinterListener()
             
@@ -65,7 +114,7 @@ class PrinterDiscovery:
             
             # 从监听器获取发现的打印机
             discovered = listener.get_printers()
-            print(f"📊 发现网络打印机数量: {len(discovered)}")
+            print(f" 发现网络打印机数量: {len(discovered)}")
             
             for printer in discovered:
                 printers.append(printer)
@@ -73,7 +122,7 @@ class PrinterDiscovery:
             zeroconf.close()
             
         except Exception as e:
-            print(f"❌ 网络打印机发现出错: {e}")
+            print(f" 网络打印机发现出错: {e}")
         
         return printers
 
@@ -87,7 +136,7 @@ class NetworkPrinterListener(ServiceListener):
     def add_service(self, zeroconf, type, name):
         """发现新的网络服务"""
         try:
-            print(f"🔍 发现网络服务: {name}")
+            print(f" 发现网络服务: {name}")
             info = zeroconf.get_service_info(type, name)
             if info:
                 # 提取IP地址
@@ -111,7 +160,7 @@ class NetworkPrinterListener(ServiceListener):
                     uri = f"ipp://{ip_address}:{info.port}/ipp/print"
                     # 也可以尝试其他常见路径如: /printers/{printer_name}
                 
-                print(f"✅ 网络打印机详情 - 名称: {printer_name}, 位置: {location}, URI: {uri}")
+                print(f" 网络打印机详情 - 名称: {printer_name}, 位置: {location}, URI: {uri}")
                 
                 self.printers.append({
                     "name": printer_name,
@@ -122,7 +171,7 @@ class NetworkPrinterListener(ServiceListener):
                     "enabled": False  # 网络打印机需要手动配置
                 })
         except Exception as e:
-            print(f"❌ 处理网络服务时出错: {e}")
+            print(f" 处理网络服务时出错: {e}")
     
     def remove_service(self, zeroconf, type, name):
         pass
@@ -146,7 +195,7 @@ class PrinterManager:
             self.platform_printer = WindowsEnterprisePrinter()
         else:
             self.platform_printer = LinuxPrinter()
-        print("🎯 PrinterManager初始化完成")
+        print(" PrinterManager初始化完成")
     
     def get_printers(self) -> List[Dict]:
         """获取管理的打印机列表"""
@@ -191,15 +240,37 @@ class PrinterManager:
         try:
             return self.platform_printer.get_printer_status(printer_name)
         except Exception as e:
-            print(f"❌ 获取打印机状态时出错: {e}")
+            print(f" 获取打印机状态时出错: {e}")
             return "未知"
+
+    def get_printer_status_detail(self, printer_name: str) -> Dict[str, Any]:
+        """获取打印机状态详情（含原始状态码）。"""
+        try:
+            if hasattr(self.platform_printer, 'get_printer_status_detail'):
+                return self.platform_printer.get_printer_status_detail(printer_name)
+
+            # 非Windows平台兜底
+            return {
+                "status_text": self.get_printer_status(printer_name),
+                "win32_status": None,
+                "win32_attributes": None,
+                "wmi": None,
+            }
+        except Exception as e:
+            print(f" 获取打印机状态详情时出错: {e}")
+            return {
+                "status_text": "未知",
+                "win32_status": None,
+                "win32_attributes": None,
+                "wmi": None,
+            }
     
     def get_print_queue(self, printer_name: str) -> List[Dict]:
         """获取打印队列"""
         try:
             return self.platform_printer.get_print_queue(printer_name)
         except Exception as e:
-            print(f"❌ 获取打印队列时出错: {e}")
+            print(f" 获取打印队列时出错: {e}")
             return []
     
     def submit_print_job(self, printer_name: str, file_path: str, job_name: str = "", print_options: Dict[str, str] = None) -> Dict[str, Any]:
@@ -207,7 +278,27 @@ class PrinterManager:
         try:
             if not print_options:
                 print_options = {}
-            result = self.platform_printer.submit_print_job(printer_name, file_path, job_name, print_options)
+            
+            # 获取打印机配置信息（用于HP Smart Printing等特殊协议）
+            printer_config = None
+            printer_info = self.config.get_printer_by_name(printer_name)
+            if printer_info:
+                printer_config = {
+                    "ip": printer_info.get("ip"),
+                    "port": printer_info.get("port"),
+                    "protocol": printer_info.get("protocol"),
+                    "uri": printer_info.get("uri")
+                }
+            
+            # 调用平台特定的打印实现
+            if platform.system() == "Windows" and hasattr(self.platform_printer, 'submit_print_job'):
+                # Windows平台支持printer_config参数
+                result = self.platform_printer.submit_print_job(
+                    printer_name, file_path, job_name, print_options, printer_config=printer_config
+                )
+            else:
+                # 其他平台使用标准调用
+                result = self.platform_printer.submit_print_job(printer_name, file_path, job_name, print_options)
             
             # 处理不同平台的返回格式
             if isinstance(result, bool):
@@ -219,7 +310,7 @@ class PrinterManager:
             else:
                 return {"success": False, "message": "未知的返回格式"}
         except Exception as e:
-            print(f"❌ 提交打印任务时出错: {e}")
+            print(f" 提交打印任务时出错: {e}")
             return {"success": False, "message": f"提交打印任务时出错: {e}"}
     
     def get_job_status(self, printer_name: str, job_id: int) -> Dict[str, Any]:
@@ -231,7 +322,7 @@ class PrinterManager:
                 # 对于不支持任务状态查询的平台，返回默认状态
                 return {"exists": False, "status": "not_supported"}
         except Exception as e:
-            print(f"❌ 获取任务状态时出错: {e}")
+            print(f" 获取任务状态时出错: {e}")
             return {"exists": False, "status": "error"}
     
     def get_printer_capabilities(self, printer_name: str) -> Dict[str, Any]:
@@ -239,7 +330,7 @@ class PrinterManager:
         try:
             return self.platform_printer.get_printer_capabilities(printer_name, self.parser_manager)
         except Exception as e:
-            print(f"❌ 获取打印机参数时出错: {e}")
+            print(f" 获取打印机参数时出错: {e}")
             # 返回默认参数
             return {
                 "resolution": ["300dpi", "600dpi", "1200dpi"],
@@ -293,7 +384,7 @@ class PrinterManager:
             else:
                 return False, "当前平台不支持自动添加网络打印机"
         except Exception as e:
-            print(f"❌ 添加网络打印机时出错: {e}")
+            print(f" 添加网络打印机时出错: {e}")
             return False, f"添加出错: {str(e)}"
     
     def get_printer_port_info(self, printer_name: str) -> str:
@@ -304,7 +395,7 @@ class PrinterManager:
             else:
                 return ""
         except Exception as e:
-            print(f"❌ 获取端口信息时出错: {e}")
+            print(f" 获取端口信息时出错: {e}")
             return ""
     
     def add_printer_intelligently(self, printer_info: Dict[str, Any]) -> tuple[bool, str]:
@@ -315,7 +406,7 @@ class PrinterManager:
             
             # 如果是网络打印机，先添加到CUPS
             if printer_type == "network":
-                print(f"🌐 检测到网络打印机，自动添加到CUPS: {printer_name}")
+                print(f" 检测到网络打印机，自动添加到CUPS: {printer_name}")
                 success, message = self.add_network_printer_to_cups(printer_info)
                 if not success:
                     return False, f"网络打印机添加到CUPS失败: {message}"
@@ -335,7 +426,7 @@ class PrinterManager:
                 if cups_printer:
                     # 使用CUPS中的打印机信息
                     printer_info = cups_printer
-                    print(f"✅ 找到CUPS中的打印机: {printer_info.get('name')}")
+                    print(f" 找到CUPS中的打印机: {printer_info.get('name')}")
                 else:
                     return False, "网络打印机添加到CUPS成功，但无法在CUPS中找到对应的打印机"
             
@@ -365,7 +456,7 @@ class PrinterManager:
             return True, f"打印机 {printer_info.get('name')} 添加成功"
             
         except Exception as e:
-            print(f"❌ 智能添加打印机失败: {e}")
+            print(f" 智能添加打印机失败: {e}")
             return False, f"添加失败: {str(e)}"
     
     def _get_current_time(self) -> str:
@@ -380,12 +471,15 @@ class PrinterManager:
         import os
         
         try:
-            print(f"🖨️ [{cleanup_source}] 提交打印任务: {job_name}")
+            print(f" [{cleanup_source}] 提交打印任务: {job_name}")
             print(f"  打印机: {printer_name}")
             print(f"  文件: {file_path}")
             
             # 提交打印任务
             result = self.submit_print_job(printer_name, file_path, job_name, print_options or {})
+            
+            # 获取可能的转换文件路径（如docx转pdf）
+            converted_file = result.get("converted_file")
             
             # 智能清理临时文件
             def smart_cleanup():
@@ -394,12 +488,36 @@ class PrinterManager:
                     if not result.get("success", False):
                         if os.path.exists(file_path):
                             os.remove(file_path)
-                            print(f"🗑️ [{cleanup_source}] 打印失败，立即清理临时文件: {file_path}")
+                            print(f" [{cleanup_source}] 打印失败，立即清理临时文件: {file_path}")
+                        # 同时清理转换后的文件
+                        if converted_file and os.path.exists(converted_file):
+                            os.remove(converted_file)
+                            print(f" [{cleanup_source}] 打印失败，清理转换文件: {converted_file}")
                         return
                     
                     # 如果有job_id，监控任务状态
                     job_id = result.get("job_id")
                     if job_id:
+                        # 对于云端任务，不在这里监控（由cloud_websocket_client的_monitor_job_completion负责）
+                        # 只做延迟清理，给足够时间让打印机完成
+                        if cleanup_source == "云端WebSocket":
+                            print(f"ℹ [{cleanup_source}] 延迟清理（任务监控由外部负责）")
+                            time.sleep(180)  # 延迟3分钟清理（足够打印完成）
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                    print(f" [{cleanup_source}] 延迟清理完成: {file_path}")
+                                except Exception as e:
+                                    print(f" 清理文件失败: {e}")
+                            if converted_file and os.path.exists(converted_file):
+                                try:
+                                    os.remove(converted_file)
+                                    print(f" [{cleanup_source}] 延迟清理转换文件: {converted_file}")
+                                except Exception as e:
+                                    print(f" 清理转换文件失败: {e}")
+                            return
+                        
+                        # 本地打印任务，进行监控
                         max_wait_time = 300  # 最大等待5分钟
                         check_interval = 5   # 每5秒检查一次
                         waited_time = 0
@@ -409,35 +527,52 @@ class PrinterManager:
                             
                             if not job_status.get("exists", False):
                                 # 任务不再存在（已完成或取消）
-                                print(f"✅ [{cleanup_source}] 打印任务已结束，清理文件")
+                                print(f" [{cleanup_source}] 打印任务已结束，清理文件")
                                 if os.path.exists(file_path):
                                     try:
                                         # 增加一点延迟确保文件句柄释放
                                         time.sleep(2)
                                         os.remove(file_path)
                                     except Exception as e:
-                                        print(f"⚠️ 清理文件失败 (重试中): {e}")
+                                        print(f" 清理文件失败 (重试中): {e}")
                                         time.sleep(5)
                                         if os.path.exists(file_path):
                                             os.remove(file_path)
+                                # 同时清理转换后的文件
+                                if converted_file and os.path.exists(converted_file):
+                                    try:
+                                        time.sleep(1)
+                                        os.remove(converted_file)
+                                        print(f" [{cleanup_source}] 清理转换文件: {converted_file}")
+                                    except Exception as e:
+                                        print(f" 清理转换文件失败: {e}")
                                 return
                             
                             time.sleep(check_interval)
                             waited_time += check_interval
                         
-                        print(f"⚠️ [{cleanup_source}] 打印任务超时未结束，强制清理")
+                        print(f" [{cleanup_source}] 打印任务超时未结束，强制清理")
                     
                     # 兜底清理
                     if os.path.exists(file_path):
                         try:
                             time.sleep(10)  # 简单延迟
                             os.remove(file_path)
-                            print(f"🗑️ [{cleanup_source}] 延迟清理完成: {file_path}")
+                            print(f" [{cleanup_source}] 延迟清理完成: {file_path}")
                         except Exception as e:
-                            print(f"❌ [{cleanup_source}] 清理文件失败: {e}")
+                            print(f" [{cleanup_source}] 清理文件失败: {e}")
+                    
+                    # 同时清理转换后的文件
+                    if converted_file and os.path.exists(converted_file):
+                        try:
+                            time.sleep(1)  # 短暂延迟
+                            os.remove(converted_file)
+                            print(f" [{cleanup_source}] 延迟清理转换文件: {converted_file}")
+                        except Exception as e:
+                            print(f" [{cleanup_source}] 清理转换文件失败: {e}")
                             
                 except Exception as e:
-                    print(f"❌ [{cleanup_source}] 智能清理过程出错: {e}")
+                    print(f" [{cleanup_source}] 智能清理过程出错: {e}")
             
             # 启动清理线程
             threading.Thread(target=smart_cleanup, daemon=True).start()
@@ -445,7 +580,7 @@ class PrinterManager:
             return result
             
         except Exception as e:
-            print(f"❌ [{cleanup_source}] 提交任务过程出错: {e}")
+            print(f" [{cleanup_source}] 提交任务过程出错: {e}")
             return {"success": False, "message": f"提交任务过程出错: {e}"}
     
     def get_print_queue_df(self, printer_name: str) -> pd.DataFrame:

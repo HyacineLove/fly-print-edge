@@ -1,4 +1,4 @@
-"""Linux/CUPS打印机实现
+﻿"""Linux/CUPS打印机实现
 包含所有Linux平台的打印机操作
 """
 
@@ -19,10 +19,10 @@ def run_command_with_debug(cmd, timeout=10):
         )
         return result
     except subprocess.TimeoutExpired:
-        print(f"⏰ [DEBUG] 命令超时: {' '.join(cmd)}")
+        print(f" [DEBUG] 命令超时: {' '.join(cmd)}")
         return None
     except Exception as e:
-        print(f"❌ [DEBUG] 命令执行出错: {e}")
+        print(f" [DEBUG] 命令执行出错: {e}")
         return None
 
 
@@ -45,7 +45,7 @@ class LinuxPrinter:
             # 使用lpstat -a 获取可用的打印机队列
             result_a = run_command_with_debug(['lpstat', '-a'])
             if result_a and result_a.returncode == 0:
-                print("📋 [DEBUG] 解析 lpstat -a 输出获取打印机名称...")
+                print(" [DEBUG] 解析 lpstat -a 输出获取打印机名称...")
                 lines = result_a.stdout.strip().split('\n')
                 for line in lines:
                     if line and not line.startswith(' '):
@@ -53,7 +53,7 @@ class LinuxPrinter:
                         parts = line.split(' ')
                         if len(parts) >= 1:
                             printer_name = parts[0]
-                            print(f"🔍 [DEBUG] 发现打印机名称: {printer_name}")
+                            print(f" [DEBUG] 发现打印机名称: {printer_name}")
                             
                             # 获取该打印机的详细信息
                             status_result = run_command_with_debug(['lpstat', '-p', printer_name])
@@ -89,7 +89,7 @@ class LinuxPrinter:
         except Exception as e:
             print(f"发现本地打印机时出错: {e}")
         
-        print(f"📊 [DEBUG] 发现本地打印机数量: {len(printers)}")
+        print(f" [DEBUG] 发现本地打印机数量: {len(printers)}")
         return printers
     
     def get_printer_status(self, printer_name: str) -> str:
@@ -169,12 +169,52 @@ class LinuxPrinter:
             # 构建lpr命令
             cmd = ['lpr', '-P', printer_name]
             
+            # 参数名称映射：将前端参数名转换为 CUPS 标准参数名
+            param_mapping = {
+                'color_mode': 'ColorModel',
+                'color_model': 'ColorModel', 
+                'duplex': 'Duplex',
+                'paper_size': 'PageSize',
+                'copies': 'copies'  # copies 是标准的，不需要转换
+            }
+            
+            # 参数值映射：将前端参数值转换为 CUPS 标准值
+            def normalize_value(key: str, value: str) -> str:
+                """标准化参数值"""
+                value_str = str(value)
+                
+                # 色彩模式值映射
+                if key in ['color_mode', 'color_model', 'ColorModel']:
+                    value_lower = value_str.lower()
+                    if value_lower in ['grayscale', 'gray', 'mono', 'monochrome', 'black']:
+                        return 'Gray'  # CUPS 标准灰度值
+                    elif value_lower in ['color', 'colour', 'rgb']:
+                        return 'RGB'  # CUPS 标准彩色值
+                
+                # 双面打印值映射
+                elif key in ['duplex', 'Duplex']:
+                    value_lower = value_str.lower()
+                    if value_lower in ['none', 'simplex']:
+                        return 'None'  # CUPS 单面打印
+                    elif value_lower in ['duplexnotumble', 'longedge', 'long', 'long_edge']:
+                        return 'DuplexNoTumble'  # CUPS 长边翻转
+                    elif value_lower in ['duplextumble', 'shortedge', 'short', 'short_edge']:
+                        return 'DuplexTumble'  # CUPS 短边翻转
+                
+                # 纸张大小通常直接使用（A4、Letter 等）
+                return value_str
+            
             # 添加打印选项
             for key, value in print_options.items():
-                if value and value != "None" and value.strip():
-                    option_str = f"{key}={value}"
+                if value and value != "None" and str(value).strip():
+                    # 转换参数名称
+                    cups_key = param_mapping.get(key, key)
+                    # 标准化参数值
+                    cups_value = normalize_value(key, value)
+                    
+                    option_str = f"{cups_key}={cups_value}"
                     cmd.extend(['-o', option_str])
-                    print(f"🔧 [DEBUG] 添加打印选项: {option_str}")
+                    print(f" [DEBUG] 添加打印选项: {option_str}")
             
             # 添加文件路径
             cmd.append(file_path)
@@ -182,7 +222,7 @@ class LinuxPrinter:
             # 执行打印命令
             result = run_command_with_debug(cmd)
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印任务提交成功")
+                print(f" [DEBUG] 打印任务提交成功")
                 
                 # 尝试获取job_id
                 job_id = self._get_latest_job_id(printer_name)
@@ -195,7 +235,7 @@ class LinuxPrinter:
                     "message": "打印任务已提交"
                 }
             else:
-                print(f"❌ [DEBUG] 打印任务提交失败")
+                print(f" [DEBUG] 打印任务提交失败")
                 error_msg = result.stderr if result and result.stderr else "未知错误"
                 return {
                     "success": False,
@@ -249,11 +289,11 @@ class LinuxPrinter:
             result = run_command_with_debug(['lpoptions', '-p', printer_name, '-l'])
             
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] lpoptions命令执行成功")
+                print(f" [DEBUG] lpoptions命令执行成功")
                 # 使用解析器管理器解析输出
                 return parser_manager.get_capabilities(printer_name, result.stdout)
             else:
-                print(f"❌ [DEBUG] lpoptions命令执行失败")
+                print(f" [DEBUG] lpoptions命令执行失败")
         except Exception as e:
             print(f"获取打印机能力时出错: {e}")
         
@@ -269,22 +309,22 @@ class LinuxPrinter:
     def enable_printer(self, printer_name: str) -> tuple[bool, str]:
         """启用打印机"""
         try:
-            print(f"🔄 [DEBUG] 启用打印机: {printer_name}")
+            print(f" [DEBUG] 启用打印机: {printer_name}")
             result = run_command_with_debug(['cupsenable', printer_name])
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印机启用成功")
+                print(f" [DEBUG] 打印机启用成功")
                 return True, f"打印机 {printer_name} 已启用"
             else:
-                print(f"❌ [DEBUG] 打印机启用失败")
+                print(f" [DEBUG] 打印机启用失败")
                 return False, f"启用失败: {result.stderr if result else '命令执行失败'}"
         except Exception as e:
-            print(f"❌ [DEBUG] 启用打印机时出错: {e}")
+            print(f" [DEBUG] 启用打印机时出错: {e}")
             return False, f"启用出错: {str(e)}"
     
     def disable_printer(self, printer_name: str, reason: str = "") -> tuple[bool, str]:
         """禁用打印机"""
         try:
-            print(f"🚫 [DEBUG] 禁用打印机: {printer_name}")
+            print(f" [DEBUG] 禁用打印机: {printer_name}")
             cmd = ['cupsdisable']
             if reason:
                 cmd.extend(['-r', reason])
@@ -292,43 +332,43 @@ class LinuxPrinter:
             
             result = run_command_with_debug(cmd)
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印机禁用成功")
+                print(f" [DEBUG] 打印机禁用成功")
                 return True, f"打印机 {printer_name} 已禁用"
             else:
-                print(f"❌ [DEBUG] 打印机禁用失败")
+                print(f" [DEBUG] 打印机禁用失败")
                 return False, f"禁用失败: {result.stderr if result else '命令执行失败'}"
         except Exception as e:
-            print(f"❌ [DEBUG] 禁用打印机时出错: {e}")
+            print(f" [DEBUG] 禁用打印机时出错: {e}")
             return False, f"禁用出错: {str(e)}"
     
     def clear_print_queue(self, printer_name: str) -> tuple[bool, str]:
         """清空打印队列"""
         try:
-            print(f"🗑️ [DEBUG] 清空打印队列: {printer_name}")
+            print(f" [DEBUG] 清空打印队列: {printer_name}")
             result = run_command_with_debug(['lprm', '-P', printer_name, '-'])
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印队列清空成功")
+                print(f" [DEBUG] 打印队列清空成功")
                 return True, f"打印机 {printer_name} 的队列已清空"
             else:
-                print(f"❌ [DEBUG] 打印队列清空失败")
+                print(f" [DEBUG] 打印队列清空失败")
                 return False, f"清空失败: {result.stderr if result else '命令执行失败'}"
         except Exception as e:
-            print(f"❌ [DEBUG] 清空打印队列时出错: {e}")
+            print(f" [DEBUG] 清空打印队列时出错: {e}")
             return False, f"清空出错: {str(e)}"
     
     def remove_print_job(self, printer_name: str, job_id: str) -> tuple[bool, str]:
         """删除特定打印任务"""
         try:
-            print(f"🗑️ [DEBUG] 删除打印任务: {printer_name} - {job_id}")
+            print(f" [DEBUG] 删除打印任务: {printer_name} - {job_id}")
             result = run_command_with_debug(['lprm', '-P', printer_name, job_id])
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印任务删除成功")
+                print(f" [DEBUG] 打印任务删除成功")
                 return True, f"任务 {job_id} 已删除"
             else:
-                print(f"❌ [DEBUG] 打印任务删除失败")
+                print(f" [DEBUG] 打印任务删除失败")
                 return False, f"删除失败: {result.stderr if result else '命令执行失败'}"
         except Exception as e:
-            print(f"❌ [DEBUG] 删除打印任务时出错: {e}")
+            print(f" [DEBUG] 删除打印任务时出错: {e}")
             return False, f"删除出错: {str(e)}"
     
     def get_printer_port_info(self, printer_name: str) -> str:
@@ -340,18 +380,18 @@ class LinuxPrinter:
                 output = result.stdout.strip()
                 if '：' in output:
                     port_info = output.split('：', 1)[1].strip()
-                    print(f"📡 [DEBUG] 获取端口信息: {printer_name} -> {port_info}")
+                    print(f" [DEBUG] 获取端口信息: {printer_name} -> {port_info}")
                     return port_info
                 elif ':' in output:  # 英文冒号
                     port_info = output.split(':', 1)[1].strip()
-                    print(f"📡 [DEBUG] 获取端口信息: {printer_name} -> {port_info}")
+                    print(f" [DEBUG] 获取端口信息: {printer_name} -> {port_info}")
                     return port_info
             
-            print(f"⚠️ [DEBUG] 无法获取打印机 {printer_name} 的端口信息")
+            print(f" [DEBUG] 无法获取打印机 {printer_name} 的端口信息")
             return ""
             
         except Exception as e:
-            print(f"❌ [DEBUG] 获取端口信息时出错: {e}")
+            print(f" [DEBUG] 获取端口信息时出错: {e}")
             return ""
     
     def add_network_printer_to_cups(self, printer_info: Dict[str, Any]) -> tuple[bool, str]:
@@ -368,7 +408,7 @@ class LinuxPrinter:
             # 生成CUPS友好的打印机名称（去除特殊字符）
             cups_name = printer_name.replace(' ', '_').replace('-', '_').replace('.', '_')
             
-            print(f"🖨️ [DEBUG] 自动添加网络打印机到CUPS:")
+            print(f" [DEBUG] 自动添加网络打印机到CUPS:")
             print(f"  名称: {cups_name}")
             print(f"  URI: {printer_uri}")
             print(f"  位置: {printer_location}")
@@ -394,7 +434,7 @@ class LinuxPrinter:
             result = run_command_with_debug(cmd, timeout=30)
             
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 网络打印机添加到CUPS成功")
+                print(f" [DEBUG] 网络打印机添加到CUPS成功")
                 
                 # 确保打印机启用
                 enable_result = run_command_with_debug(['cupsenable', cups_name])
@@ -403,27 +443,27 @@ class LinuxPrinter:
                 return True, f"网络打印机 {printer_name} 已成功添加到CUPS系统 (内部名称: {cups_name})"
             else:
                 error_msg = result.stderr if result and result.stderr else "未知错误"
-                print(f"❌ [DEBUG] 添加网络打印机失败: {error_msg}")
+                print(f" [DEBUG] 添加网络打印机失败: {error_msg}")
                 return False, f"添加失败: {error_msg}"
                 
         except Exception as e:
-            print(f"❌ [DEBUG] 添加网络打印机到CUPS时出错: {e}")
+            print(f" [DEBUG] 添加网络打印机到CUPS时出错: {e}")
             return False, f"添加出错: {str(e)}"
     
     def remove_printer_from_cups(self, printer_name: str) -> tuple[bool, str]:
         """从CUPS系统中移除打印机"""
         try:
-            print(f"🗑️ [DEBUG] 从CUPS移除打印机: {printer_name}")
+            print(f" [DEBUG] 从CUPS移除打印机: {printer_name}")
             result = run_command_with_debug(['lpadmin', '-x', printer_name])
             
             if result and result.returncode == 0:
-                print(f"✅ [DEBUG] 打印机从CUPS移除成功")
+                print(f" [DEBUG] 打印机从CUPS移除成功")
                 return True, f"打印机 {printer_name} 已从CUPS系统移除"
             else:
                 error_msg = result.stderr if result and result.stderr else "未知错误"
-                print(f"❌ [DEBUG] 移除打印机失败: {error_msg}")
+                print(f" [DEBUG] 移除打印机失败: {error_msg}")
                 return False, f"移除失败: {error_msg}"
                 
         except Exception as e:
-            print(f"❌ [DEBUG] 移除打印机时出错: {e}")
+            print(f" [DEBUG] 移除打印机时出错: {e}")
             return False, f"移除出错: {str(e)}"

@@ -31,11 +31,16 @@
             <div class="preview-card">
                 <div class="preview-body">
                     <img id="preview-image" src="" alt="预览加载中" />
-                </div>
-                <div class="preview-pager">
-                    <button id="preview-prev" class="pager-btn" onclick="changePreviewPage(-1)">←</button>
-                    <span id="page-indicator">1/1</span>
-                    <button id="preview-next" class="pager-btn" onclick="changePreviewPage(1)">→</button>
+                    <div id="preview-error" class="preview-overlay" style="display: none;">
+                        <div class="error-icon">❌</div>
+                        <p id="preview-error-msg">预览生成失败</p>
+                        <button class="btn btn-outline btn-sm" onclick="requestPreview()">重试</button>
+                    </div>
+                    <div class="preview-pager">
+                        <button id="preview-prev" class="pager-btn" onclick="changePreviewPage(-1)">←</button>
+                        <span id="page-indicator">1/1</span>
+                        <button id="preview-next" class="pager-btn" onclick="changePreviewPage(1)">→</button>
+                    </div>
                 </div>
             </div>
 

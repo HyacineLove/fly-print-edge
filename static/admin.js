@@ -342,9 +342,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const source = new EventSource('/api/events');
         source.onmessage = (event) => {
             try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'cloud_error') {
-                    const payload = data.data || {};
+                const msg = JSON.parse(event.data);
+                
+                // 处理本地状态变更事件（自动刷新列表）
+                if (msg.type === 'printer_added' || msg.type === 'printer_deleted' || msg.type === 'default_printer_changed') {
+                    console.log('收到打印机变更事件，自动刷新列表');
+                    loadManaged();
+                    loadDiscovered();
+                } else if (msg.type === 'node_status_changed') {
+                    console.log('收到节点状态变更事件，自动刷新状态');
+                    loadCloudStatus();
+                }
+                
+                // 处理云端错误
+                if (msg.type === 'cloud_error') {
+                    const payload = msg.data || {};
                     const code = payload.code || 'unknown';
                     const message = payload.message || '';
                     if (code === 'node_deleted') {
@@ -356,8 +368,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         updateNodeActions();
                     }
                 }
-                // 注：printer_deleted/node_state/printer_state 已从云端废弃，不再处理
-                // 云端实际发送的下行消息：print_job, preview_file, upload_token, error
             } catch (error) {
                 return;
             }

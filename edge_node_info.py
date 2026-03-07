@@ -1,4 +1,4 @@
-"""
+﻿"""
 边缘节点信息收集模块
 收集MAC地址、系统信息、硬件信息等
 """
@@ -31,7 +31,7 @@ class EdgeNodeInfo:
             else:
                 return self._get_linux_mac(interface)
         except Exception as e:
-            print(f"❌ [DEBUG] 获取MAC地址失败: {e}")
+            print(f" [DEBUG] 获取MAC地址失败: {e}")
             return "00:00:00:00:00:00"
     
     def _get_linux_mac(self, interface: str = None) -> str:
@@ -74,7 +74,7 @@ class EdgeNodeInfo:
                             if part == 'link/ether' and i + 1 < len(parts):
                                 return parts[i + 1]
         except Exception as e:
-            print(f"❌ [DEBUG] 获取Linux MAC地址失败: {e}")
+            print(f" [DEBUG] 获取Linux MAC地址失败: {e}")
         
         return "00:00:00:00:00:00"
     
@@ -93,7 +93,7 @@ class EdgeNodeInfo:
                         if mac and mac != "N/A":
                             return mac.replace('-', ':').lower()
         except Exception as e:
-            print(f"❌ [DEBUG] 获取Windows MAC地址失败: {e}")
+            print(f" [DEBUG] 获取Windows MAC地址失败: {e}")
         
         return "00:00:00:00:00:00"
     
@@ -117,7 +117,7 @@ class EdgeNodeInfo:
                         continue
                 return 'eth0'  # 默认值
         except Exception as e:
-            print(f"❌ [DEBUG] 获取网络接口失败: {e}")
+            print(f" [DEBUG] 获取网络接口失败: {e}")
             return "eth0"
     
     def get_os_version(self) -> str:
@@ -148,7 +148,7 @@ class EdgeNodeInfo:
             else:
                 return f"{platform.system()} {platform.release()}"
         except Exception as e:
-            print(f"❌ [DEBUG] 获取系统版本失败: {e}")
+            print(f" [DEBUG] 获取系统版本失败: {e}")
             return "Unknown OS"
     
     def get_cpu_info(self) -> str:
@@ -176,7 +176,7 @@ class EdgeNodeInfo:
             # 备选方案
             return f"{platform.processor()}"
         except Exception as e:
-            print(f"❌ [DEBUG] 获取CPU信息失败: {e}")
+            print(f" [DEBUG] 获取CPU信息失败: {e}")
             return "Unknown CPU"
     
     def get_memory_info(self) -> str:
@@ -186,7 +186,7 @@ class EdgeNodeInfo:
             total_gb = round(memory.total / (1024**3), 1)
             return f"{total_gb}GB RAM"
         except Exception as e:
-            print(f"❌ [DEBUG] 获取内存信息失败: {e}")
+            print(f" [DEBUG] 获取内存信息失败: {e}")
             return "Unknown Memory"
     
     def get_disk_info(self) -> str:
@@ -196,7 +196,7 @@ class EdgeNodeInfo:
             total_gb = round(disk.total / (1024**3), 1)
             return f"{total_gb}GB Disk"
         except Exception as e:
-            print(f"❌ [DEBUG] 获取磁盘信息失败: {e}")
+            print(f" [DEBUG] 获取磁盘信息失败: {e}")
             return "Unknown Disk"
     
     def get_edge_node_data(self, interface: str = None) -> Dict[str, Any]:
@@ -218,7 +218,7 @@ class EdgeNodeInfo:
             "disk_info": self.get_disk_info()
         }
         
-        print(f"📊 [DEBUG] 边缘节点信息收集完成:")
+        print(f" [DEBUG] 边缘节点信息收集完成:")
         for key, value in data.items():
             print(f"  {key}: {value}")
         

@@ -1,4 +1,4 @@
-"""
+﻿"""
 fly-print-cloud OAuth2认证客户端
 实现Client Credentials流程获取access token
 """
@@ -37,15 +37,16 @@ class CloudAuthClient:
     def _refresh_token(self) -> Optional[str]:
         """刷新access token"""
         try:
-            print(f"🔑 [DEBUG] 请求OAuth2 token: {self.auth_url}")
+            print(f" [DEBUG] 请求OAuth2 token: {self.auth_url}")
             
             data = {
                 'grant_type': 'client_credentials',
                 'client_id': self.client_id,
                 'client_secret': self.client_secret,
-                'scope': 'openid profile edge:heartbeat edge:printer edge:register'
+                'scope': 'edge:register edge:heartbeat edge:printer edge:print edge:file'
             }
             
+            # verify=False 允许自签名证书
             response = requests.post(
                 self.auth_url,
                 data=data,
@@ -60,14 +61,14 @@ class CloudAuthClient:
                 
                 self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
                 
-                print(f"✅ [DEBUG] OAuth2 token获取成功，过期时间: {self.token_expires_at}")
+                print(f" [DEBUG] OAuth2 token获取成功，过期时间: {self.token_expires_at}")
                 return self.access_token
             else:
-                print(f"❌ [DEBUG] OAuth2 token获取失败: {response.status_code} - {response.text}")
+                print(f" [DEBUG] OAuth2 token获取失败: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"❌ [DEBUG] OAuth2认证异常: {e}")
+            print(f" [DEBUG] OAuth2认证异常: {e}")
             return None
     
     def get_auth_headers(self) -> Dict[str, str]:

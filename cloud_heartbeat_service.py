@@ -1,4 +1,4 @@
-"""
+﻿"""
 fly-print-cloud 心跳服务
 定期发送心跳到云端，报告边缘节点状态
 通过WebSocket发送心跳消息
@@ -35,21 +35,21 @@ class HeartbeatService:
     def start(self):
         """启动心跳服务"""
         if self.running:
-            print("⚠️ [DEBUG] 心跳服务已经在运行")
+            print(" [DEBUG] 心跳服务已经在运行")
             return
         
         self.running = True
         self.heartbeat_failures = 0
         self.thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.thread.start()
-        print(f"💓 [DEBUG] 心跳服务已启动，间隔: {self.interval}秒")
+        print(f" [DEBUG] 心跳服务已启动，间隔: {self.interval}秒")
     
     def stop(self):
         """停止心跳服务"""
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        print("🛑 [DEBUG] 心跳服务已停止")
+        print(" [DEBUG] 心跳服务已停止")
     
     def _heartbeat_loop(self):
         """心跳循环"""
@@ -63,15 +63,15 @@ class HeartbeatService:
                     self.last_heartbeat_time = time.time()
                 else:
                     self.heartbeat_failures += 1
-                    print(f"⚠️ [DEBUG] 心跳失败次数: {self.heartbeat_failures}/{self.max_failures}")
+                    print(f" [DEBUG] 心跳失败次数: {self.heartbeat_failures}/{self.max_failures}")
                 
                 # 如果连续失败次数过多，可以触发重连或其他恢复机制
                 if self.heartbeat_failures >= self.max_failures:
-                    print("❌ [DEBUG] 心跳连续失败，可能需要重新注册节点")
+                    print(" [DEBUG] 心跳连续失败，可能需要重新注册节点")
                     # 这里可以添加重新注册逻辑或者通知主程序
                 
             except Exception as e:
-                print(f"❌ [DEBUG] 心跳循环异常: {e}")
+                print(f" [DEBUG] 心跳循环异常: {e}")
                 self.heartbeat_failures += 1
             
             # 等待下次心跳
@@ -82,7 +82,7 @@ class HeartbeatService:
         try:
             # 检查WebSocket是否可用
             if not self.websocket_client or not self.websocket_client.running:
-                print("⚠️ [DEBUG] WebSocket未连接，跳过心跳发送")
+                print(" [DEBUG] WebSocket未连接，跳过心跳发送")
                 return False
             
             # 收集系统状态信息
@@ -92,12 +92,12 @@ class HeartbeatService:
             result = self.websocket_client.send_heartbeat(self.node_id, system_info)
             
             if result:
-                print(f"💓 [DEBUG] 心跳发送成功 (WebSocket)")
+                print(f" [DEBUG] 心跳发送成功 (WebSocket)")
             
             return result
             
         except Exception as e:
-            print(f"❌ [DEBUG] 发送心跳异常: {e}")
+            print(f" [DEBUG] 发送心跳异常: {e}")
             return False
     
     def _collect_system_info(self) -> Dict[str, Any]:
@@ -138,7 +138,7 @@ class HeartbeatService:
             }
             
         except Exception as e:
-            print(f"❌ [DEBUG] 收集系统信息异常: {e}")
+            print(f" [DEBUG] 收集系统信息异常: {e}")
             return {
                 "cpu_usage": 0.0,
                 "memory_usage": 0.0,
@@ -169,18 +169,16 @@ class HeartbeatService:
                 
             import requests
             start_time = time.time()
-            
-            # 简单的HEAD请求测量延迟
-            response = requests.head(f"{self.base_url}/api/v1/health", timeout=3)
-            
+            url = f"{self.base_url}/api/v1/health"
+            # 使用较短的超时，仅用于测量
+            requests.get(url, timeout=3)
             end_time = time.time()
-            latency_ms = int((end_time - start_time) * 1000)
             
-            return latency_ms
-            
+            # 计算毫秒延迟
+            return int((end_time - start_time) * 1000)
         except Exception as e:
-            print(f"⚠️ [DEBUG] 测量延迟失败: {e}")
-            return 0  # 返回0表示无法测量
+            print(f" [DEBUG] 测量延迟失败: {e}")
+            return -1
     
     def get_status(self) -> Dict[str, Any]:
         """获取心跳服务状态"""
@@ -192,20 +190,23 @@ class HeartbeatService:
             "max_failures": self.max_failures
         }
     
-    def force_heartbeat(self) -> Dict[str, Any]:
-        """强制发送一次心跳"""
+    def force_heartbeat(self):
+        """强制发送心跳（HTTP方式）"""
         try:
-            print("💓 [DEBUG] 强制发送心跳")
-            success = self._send_heartbeat()
+            if not self.base_url:
+                return {"success": False, "message": "base_url 未配置"}
+                
+            url = f"{self.base_url}/api/v1/health"
+            print(f" [DEBUG] 发送HTTP心跳: {url}")
             
-            if success:
-                self.heartbeat_failures = 0
+            response = requests.get(url, timeout=5)
+            
+            if response.status_code == 200:
                 self.last_heartbeat_time = time.time()
-                return {"success": True, "message": "心跳发送成功"}
+                return {"success": True, "message": "心跳成功"}
             else:
-                self.heartbeat_failures += 1
-                return {"success": False, "message": "心跳发送失败"}
+                return {"success": False, "message": f"HTTP {response.status_code}"}
                 
         except Exception as e:
-            print(f"❌ [DEBUG] 强制心跳异常: {e}")
+            print(f" [DEBUG] 发送HTTP心跳异常: {e}")
             return {"success": False, "message": str(e)}

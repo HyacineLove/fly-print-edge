@@ -37,3 +37,7 @@ _fly-print-cloud
 .qoder
 ai_docs/
 test/
+portable/
+
+# Portable 临时文件目录
+temp/
