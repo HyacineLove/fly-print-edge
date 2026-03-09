@@ -1,4 +1,4 @@
-﻿
+
 import sys
 # Windows 控制台默认 GBK 编码，无法输出 emoji 等 Unicode 字符，强制切换为 UTF-8
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -203,7 +203,7 @@ async def read_root():
 
 @app.get("/admin")
 async def read_admin():
-    return FileResponse("static/admin.html")
+    return FileResponse("static/admin/html/index.html")
 
 @app.get("/api/status")
 async def get_status():
@@ -385,17 +385,104 @@ def _get_paper_size_px(paper_size: Optional[str], dpi: int = 120):
     h = int(mm[1] / 25.4 * dpi)
     return w, h
 
-def _apply_paper_size(image: Image.Image, paper_size: Optional[str]):
-    target = _get_paper_size_px(paper_size)
-    if not target:
-        return image
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+def _normalize_scale_mode(value: Any, default: str = "fit") -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"fit", "actual", "fill"}:
+        return mode
+    return default
+
+def _resolve_layout_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    opts = dict(options or {})
+    settings = _get_settings()
+
+    default_paper_size = settings.get("default_paper_size") or "A4"
+    paper_size = opts.get("paper_size") or opts.get("page_size") or opts.get("size") or default_paper_size
+    if paper_size:
+        paper_size = str(paper_size).strip()
+
+    default_scale_mode = _normalize_scale_mode(settings.get("default_scale_mode"), "fit")
+    scale_mode = _normalize_scale_mode(opts.get("scale_mode"), default_scale_mode)
+
+    default_max_upscale = _safe_float(settings.get("default_max_upscale"), 3.0)
+    max_upscale = _safe_float(opts.get("max_upscale"), default_max_upscale)
+    if max_upscale <= 0:
+        max_upscale = default_max_upscale if default_max_upscale > 0 else 3.0
+
+    return {
+        "paper_size": paper_size,
+        "scale_mode": scale_mode,
+        "max_upscale": max_upscale
+    }
+
+def _compute_scaled_size(src_w: int, src_h: int, dst_w: int, dst_h: int, scale_mode: str, max_upscale: float):
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return 1, 1
+
+    fit_scale = min(dst_w / src_w, dst_h / src_h)
+    fill_scale = max(dst_w / src_w, dst_h / src_h)
+
+    if scale_mode == "actual":
+        scale = min(1.0, fit_scale)
+    elif scale_mode == "fill":
+        scale = fill_scale
+    else:
+        scale = fit_scale
+
+    if scale_mode != "actual":
+        scale = min(scale, max_upscale)
+
+    scale = max(scale, 1.0 / max(src_w, src_h))
+    target_w = max(1, int(round(src_w * scale)))
+    target_h = max(1, int(round(src_h * scale)))
+    return target_w, target_h
+
+def _normalize_request_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized = dict(options or {})
+    layout = _resolve_layout_options(normalized)
+    normalized.update(layout)
+    return normalized
+
+def _apply_paper_size(image: Image.Image, paper_size: Optional[str], options: Optional[Dict[str, Any]] = None):
+    opts = options or {}
+    preview_w = _safe_int(opts.get("preview_width_px"), 0)
+    preview_h = _safe_int(opts.get("preview_height_px"), 0)
+    layout = _resolve_layout_options(opts)
+
+    if preview_w > 0 and preview_h > 0:
+        target = (preview_w, preview_h)
+    else:
+        target = _get_paper_size_px(paper_size or layout.get("paper_size"))
+        if not target:
+            return image
+
     w, h = target
     canvas = Image.new("RGB", (w, h), "white")
     img = image.convert("RGB")
-    img.thumbnail((w, h))
-    x = max((w - img.width) // 2, 0)
-    y = max((h - img.height) // 2, 0)
-    canvas.paste(img, (x, y))
+    new_w, new_h = _compute_scaled_size(
+        img.width,
+        img.height,
+        w,
+        h,
+        layout.get("scale_mode", "fit"),
+        _safe_float(layout.get("max_upscale"), 3.0)
+    )
+    resample_lanczos = getattr(Image, "Resampling", Image).LANCZOS
+    resized = img.resize((new_w, new_h), resample=resample_lanczos)
+    x = (w - new_w) // 2
+    y = (h - new_h) // 2
+    canvas.paste(resized, (x, y))
     return canvas
 
 def _render_pdf_to_image(file_path: str, page_index: int):
@@ -573,8 +660,8 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
     color_mode = (options.get("color_mode") or options.get("color") or "").lower()
     if "gray" in color_mode or "mono" in color_mode or "黑白" in color_mode:
         image = image.convert("L").convert("RGB")
-    paper_size = options.get("paper_size") or options.get("size")
-    image = _apply_paper_size(image, paper_size)
+    resolved_options = _normalize_request_options(options)
+    image = _apply_paper_size(image, resolved_options.get("paper_size"), resolved_options)
     return image, page_count, resolved_page_index, None
 
 def _remove_managed_printer(printer_id: str, allow_missing: bool = False):
@@ -784,21 +871,18 @@ async def events(request: Request):
 async def preview(request: Request):
     print(f"\n [DEBUG] ===== 预览请求开始 =====")
     try:
-        # 读取并打印原始请求体
         body_bytes = await request.body()
-        print(f" [DEBUG] 原始请求体: {body_bytes[:500]}...")  # 只打印前500字节
+        print(f" [DEBUG] 请求体长度: {len(body_bytes)} bytes")
         
-        # 解析JSON
         body = json.loads(body_bytes)
-        print(f" [DEBUG] 解析后的body: {json.dumps(body, ensure_ascii=False, indent=2)}")
         
         file_id = body.get("file_id")
         file_url = body.get("file_url")
         file_name = body.get("file_name")
         file_type = body.get("file_type")
-        options = body.get("options") or {}
+        options = _normalize_request_options(body.get("options") or {})
         
-        print(f" [DEBUG] 参数提取: file_id={file_id}, file_url={file_url}, file_name={file_name}")
+        print(f" [DEBUG] 参数提取: file_id={file_id}, file_type={file_type}, file_name={file_name}, option_keys={list(options.keys())}")
         
         if not file_id or not file_url:
             print(f" [DEBUG] 参数验证失败")
@@ -809,7 +893,7 @@ async def preview(request: Request):
 
         print(f" [DEBUG] 检查缓存...")
         cached = preview_files.get(file_id)
-        print(f" [DEBUG] 缓存查询结果: {cached}")
+        print(f" [DEBUG] 缓存命中: {bool(cached)}")
         
         if cached and cached.get("file_url") != file_url:
             print(f" [DEBUG] URL变化，清理旧文件...")
@@ -851,7 +935,7 @@ async def preview(request: Request):
         options_for_cache = dict(options)
         options_for_cache["page_index"] = page_index
         key = f"{file_id}:{json.dumps(options_for_cache, sort_keys=True, ensure_ascii=False)}"
-        print(f" [DEBUG] cache key={key[:100]}...")
+        print(f" [DEBUG] cache key长度: {len(key)}")
         
         if key in preview_cache:
             print(f" [DEBUG] 命中缓存，直接返回")
@@ -918,12 +1002,13 @@ async def submit_print(request: Request):
     try:
         body = await request.json()
         task_token = body.get("task_token")
-        options = body.get("options")
+        raw_options = body.get("options")
+        options = _normalize_request_options(raw_options)
         file_id = body.get("file_id")
         
-        if not options or not file_id:
+        if not raw_options or not file_id:
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: options, file_id 均必需"})
-        if not isinstance(options, dict):
+        if not isinstance(raw_options, dict):
             return JSONResponse(status_code=400, content={"success": False, "message": "参数错误: options 必须为对象"})
         if not printer_manager:
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})

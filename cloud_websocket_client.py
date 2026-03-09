@@ -541,12 +541,17 @@ class PrintJobHandler:
                 "paper_size": "paper_size", 
                 "color_mode": "color_mode",
                 "duplex": "duplex_mode",  # 注意字段名映射
-                "page_count": "page_count"
+                "page_count": "page_count",
+                "scale_mode": "scale_mode",
+                "max_upscale": "max_upscale"
             }
 
             for option_key, data_key in fields_mapping.items():
                 if option_key not in print_options and data_key in data:
                     print_options[option_key] = data[data_key]
+
+            if "paper_size" not in print_options and "page_size" in print_options:
+                print_options["paper_size"] = print_options.get("page_size")
 
             # 处理旧有的 duplex_mode 逻辑 (保留兼容性，但已被上面的映射覆盖了一部分)
             # 如果映射后的 print_options['duplex'] 还是原始值（如 "duplex"），需要转换为 CUPS 标准值

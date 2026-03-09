@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fly Print Admin UI</title>
+  <link rel="stylesheet" href="/static/admin/css/admin.css">
+</head>
+<body>
+  <main class="admin-shell">
+    <header class="admin-header">
+      <h1>打印机管理</h1>
+      <p>管理已接入打印机、发现新打印机并设置默认打印机。</p>
+    </header>
+
+    <section class="admin-toolbar">
+      <button id="refreshAllBtn" type="button" class="btn btn-primary">刷新全部</button>
+      <button id="refreshManagedBtn" type="button" class="btn">刷新已管理</button>
+      <button id="refreshDiscoveredBtn" type="button" class="btn">刷新可添加</button>
+      <span id="cloudStatusText" class="status-pill">云端状态: 加载中...</span>
+    </section>
+
+    <section id="errorBox" class="error-box is-hidden"></section>
+
+    <section class="admin-card">
+      <div class="card-header">
+        <h2>已管理打印机</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>ID</th>
+              <th>地址/端口</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="managedTbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <div class="card-header">
+        <h2>可添加打印机</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>地址/端口</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="discoveredTbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/admin/main.js" defer></script>
+</body>
+</html>
