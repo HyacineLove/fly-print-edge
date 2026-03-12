@@ -104,6 +104,7 @@
   const state = loadState();
   ensureStateOptions();
   let sseRetryTimer = null;
+  let currentEventSource = null;
 
   let loginCountdownValue = 0;
   let loginCountdownActive = false;
@@ -285,7 +286,24 @@
     return { type, data };
   }
 
+  function closeSSEConnection() {
+    if (currentEventSource) {
+      try {
+        currentEventSource.close();
+      } catch {
+        // no-op
+      }
+      currentEventSource = null;
+    }
+    if (sseRetryTimer) {
+      window.clearTimeout(sseRetryTimer);
+      sseRetryTimer = null;
+    }
+  }
+
   function gotoPage(name) {
+    // 跳转前关闭SSE连接
+    closeSSEConnection();
     window.location.href = `/static/user/html/${name}.html`;
   }
 
@@ -396,7 +414,18 @@
   }
 
   function startSSE() {
+    // 如果已有连接，先关闭
+    if (currentEventSource) {
+      try {
+        currentEventSource.close();
+      } catch {
+        // no-op
+      }
+      currentEventSource = null;
+    }
+
     const es = new EventSource(api.events);
+    currentEventSource = es;
 
     es.onmessage = (ev) => {
       let raw;
@@ -430,10 +459,18 @@
         } catch {
           // no-op
         }
-        startSSE();
+        // 只有在当前连接还是这个实例时才重连
+        if (currentEventSource === es) {
+          startSSE();
+        }
       }, 2000);
     };
   }
+
+  // 页面卸载时关闭SSE连接
+  window.addEventListener("beforeunload", () => {
+    closeSSEConnection();
+  });
 
   function updateCapabilityUi(capabilities) {
     if (!capabilities || typeof capabilities !== "object") return;
