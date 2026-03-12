@@ -290,8 +290,6 @@ def _build_file_url(file_url: str):
     base_url = cloud_service.api_client.base_url if cloud_service and cloud_service.api_client else ""
     base_url = base_url.rstrip("/")
     if file_url.startswith("/"):
-        if file_url.startswith("/api/v1") and base_url.endswith("/api/v1"):
-            base_url = base_url[:-len("/api/v1")]
         return f"{base_url}{file_url}"
     return f"{base_url}/{file_url}"
 
@@ -883,7 +881,6 @@ async def get_qr_code():
     
     # 构建完整的上传 URL（指向云端）
     # 使用完整 base_url（含子路径），以便子路径部署时二维码指向正确地址
-    from urllib.parse import urlparse
     base_url = cloud_service.api_client.base_url if cloud_service and cloud_service.api_client else "http://localhost:8080"
     upload_base = (base_url or "").rstrip("/")
 
@@ -902,11 +899,12 @@ async def get_qr_code():
     if raw_upload_url.startswith("http://") or raw_upload_url.startswith("https://"):
         upload_url = raw_upload_url
     else:
-        path = (raw_upload_url.strip() or "/upload").strip()
+        # 严格模式：Cloud 必须下发 web_url/upload_url，相对路径必须以 / 开头
+        if not raw_upload_url.strip():
+            return JSONResponse(status_code=500, content={"success": False, "message": "云端未返回可用的上传页面 URL"})
+        path = raw_upload_url.strip()
         if not path.startswith("/"):
             path = "/" + path
-        if path.startswith("/upload") and not path.startswith("/web/"):
-            path = "/web" + path
         upload_url = f"{upload_base}{path}"
     
     qr_img_url = build_qr_data_url(upload_url)
