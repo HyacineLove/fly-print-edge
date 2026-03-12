@@ -1,8 +1,9 @@
-﻿"""
+"""
 测试打印机检测和参数传递
 """
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printer_windows import WindowsEnterprisePrinter
 

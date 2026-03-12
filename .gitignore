@@ -4,6 +4,13 @@ venv
 __pycache__
 config.json
 
+# 本地/敏感环境（若后续使用）
+.env
+.env.local
+
+# 日志
+*.log
+
 # PyInstaller 构建产物
 build/
 dist/
@@ -35,8 +42,6 @@ _fly-print-cloud
 
 
 .qoder
-ai_docs/
-test/
 portable/
 
 # Portable 临时文件目录

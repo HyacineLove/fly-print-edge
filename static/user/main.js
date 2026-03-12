@@ -1,5 +1,90 @@
 (() => {
   const page = document.body?.dataset?.page || "";
+
+  // 全局触摸限制：仅保留“点击”，禁止滑动/缩放/双指/长按等手势
+  function initTouchRestrictions() {
+    try {
+      const root = document.documentElement;
+      const body = document.body;
+
+      if (root) {
+        root.style.touchAction = "none";
+        root.style.overscrollBehavior = "none";
+        root.style.userSelect = "none";
+        root.style.webkitUserSelect = "none";
+        root.style.msUserSelect = "none";
+      }
+
+      if (body) {
+        body.style.touchAction = "none";
+        body.style.overscrollBehavior = "none";
+        body.style.userSelect = "none";
+        body.style.webkitUserSelect = "none";
+        body.style.msUserSelect = "none";
+      }
+
+      // 禁止多指/复杂触摸手势
+      window.addEventListener(
+        "touchstart",
+        (e) => {
+          if (e.touches && e.touches.length > 1) {
+            e.preventDefault();
+          }
+        },
+        { passive: false }
+      );
+
+      // 禁止滑动导致的滚动、回退等
+      window.addEventListener(
+        "touchmove",
+        (e) => {
+          e.preventDefault();
+        },
+        { passive: false }
+      );
+
+      // 禁止双击缩放
+      window.addEventListener(
+        "dblclick",
+        (e) => {
+          e.preventDefault();
+        },
+        true
+      );
+
+      // 禁止长按菜单 / 右键菜单
+      window.addEventListener(
+        "contextmenu",
+        (e) => {
+          e.preventDefault();
+        },
+        true
+      );
+
+      // 禁止滚轮滚动/缩放（外接触控板或滚轮）
+      window.addEventListener(
+        "wheel",
+        (e) => {
+          e.preventDefault();
+        },
+        { passive: false }
+      );
+
+      // 某些浏览器实现的手势事件，统一拦截
+      ["gesturestart", "gesturechange", "gestureend"].forEach((type) => {
+        window.addEventListener(
+          type,
+          (e) => {
+            e.preventDefault();
+          },
+          { passive: false }
+        );
+      });
+    } catch {
+      // 避免触摸限制影响主流程
+    }
+  }
+
   const api = {
     qr: "/api/qr_code",
     events: "/api/events",
@@ -12,6 +97,10 @@
   const defaultPaperSize = "A4";
   const defaultScaleMode = "fit";
   const defaultMaxUpscale = 3;
+  const loginQrRetryIntervalMs = 10000;
+  const loginQrRetryCountdownSeconds = 10;
+  const loginQrRetrySuffix = "，10 秒后将自动重试";
+  const previewFailureFallbackSeconds = 10;
   const state = loadState();
   ensureStateOptions();
   let sseRetryTimer = null;
@@ -20,6 +109,7 @@
   let loginCountdownActive = false;
   let loginCountdownTimer = null;
   let loginQrRefreshing = false;
+  let loginQrRetryTimer = null;
 
   let previewCountdownValue = 60;
   let previewCountdownActive = false;
@@ -30,6 +120,8 @@
   let previewRefreshTimer = null;
   let previewCurrentPage = 0;
   let previewPageCount = 0;
+  let previewFailureMode = false;
+  let printSubmitting = false;
   let doneReturnCountdownValue = 10;
   let doneReturnCountdownTimer = null;
 
@@ -55,6 +147,12 @@
     el.style.backgroundImage = `url(${url})`;
     el.style.backgroundSize = "cover";
     el.style.backgroundPosition = "center";
+  }
+
+  function clearQrImage() {
+    const qrWrap = q("3_37");
+    if (!qrWrap) return;
+    qrWrap.style.backgroundImage = "none";
   }
 
   function setPreviewBg(id, url) {
@@ -212,6 +310,10 @@
       setQrStatus(`🔴 ${message}`, "error");
       return true;
     }
+    if (page === "preview") {
+      enterPreviewFailureMode(mapPreviewErrorMessage(data?.error_code || data?.code, message));
+      return true;
+    }
     if (page === "printing") {
       setDoneResult("error", mapPrintErrorMessage(data?.error_code, message));
       gotoPage("done");
@@ -276,7 +378,7 @@
 
   function renderCommonText() {
     setText(["97_158"], "简历打印服务");
-    setText(["3_45"], "扫描二维码登录");
+    setText(["3_45"], "扫描二维码上传");
     setText(["3_30"], "刷新二维码");
     setText(["97_456"], "返回");
     setText(["97_462"], "立刻打印");
@@ -391,6 +493,12 @@
     if (msg.includes("云端服务未连接")) return "🔴 无法连接到云端服务器";
     if (msg.includes("设备未注册") || msg.includes("设备未就绪")) return "🔴 设备未就绪，请联系管理员";
     if (msg.includes("暂无可用打印机")) return "🔴 暂无可用打印机";
+    if (msg.includes("HTTP 500") || msg.includes("HTTP500") || /^\s*500\s*$/.test(msg) || /\b500\b/.test(msg)) {
+      return "🔴 服务暂时不可用";
+    }
+    if (msg.includes("HTTP 502") || msg.includes("HTTP502") || msg.includes("HTTP 503") || msg.includes("HTTP503")) {
+      return "🔴 服务暂时不可用";
+    }
 
     return `🔴 ${msg || "获取二维码失败，请稍后重试"}`;
   }
@@ -430,6 +538,44 @@
     return `🔴 ${msg || "打印失败，请稍后重试"}`;
   }
 
+  function mapPreviewErrorMessage(errorCode, message) {
+    const code = String(errorCode || "").toLowerCase();
+    const msg = String(message || "").trim();
+    const lowerMsg = msg.toLowerCase();
+
+    if (code === "file_not_found") return "🔴 文件不存在或已过期，请重新扫码上传";
+    if (code === "token_generation_failed") return "🔴 文件访问凭证生成失败，请重新扫码上传";
+    if (code === "node_disabled") return "🔴 节点已被禁用，请联系管理员";
+    if (code === "node_not_found") return "🔴 节点不存在，请联系管理员";
+    if (code === "printer_disabled") return "🔴 打印机已被禁用，请联系管理员";
+    if (code === "printer_not_found") return "🔴 打印机不存在，请联系管理员";
+
+    if (msg.includes("下载文件失败") || msg.includes("拉取文件失败")) {
+      return "🔴 文件拉取失败，请重新扫码上传";
+    }
+    if (msg.includes("文件不存在") || msg.includes("文件已删除") || lowerMsg.includes("file not found")) {
+      return "🔴 文件不存在或已过期，请重新扫码上传";
+    }
+    if (msg.includes("超时") || lowerMsg.includes("timeout") || lowerMsg.includes("timed out")) {
+      return "🔴 预览超时，请检查网络后重试";
+    }
+    if (
+      msg.includes("云端服务未连接") ||
+      msg.includes("无法连接") ||
+      msg.includes("连接不上") ||
+      lowerMsg.includes("failed to fetch") ||
+      lowerMsg.includes("networkerror") ||
+      lowerMsg.includes("connection")
+    ) {
+      return "🔴 无法连接云端服务，请稍后重试";
+    }
+    if (msg.includes("HTTP 404") || lowerMsg.includes("http 404") || lowerMsg.includes("status 404")) {
+      return "🔴 文件地址已失效，请重新扫码上传";
+    }
+
+    return `🔴 ${msg || "预览加载失败，请重新扫码上传"}`;
+  }
+
   function startLoginCountdownLoop() {
     if (loginCountdownTimer) return;
 
@@ -454,10 +600,29 @@
     }, 1000);
   }
 
+  function clearLoginQrRetryTimer() {
+    if (!loginQrRetryTimer) return;
+    window.clearTimeout(loginQrRetryTimer);
+    loginQrRetryTimer = null;
+  }
+
+  function scheduleLoginQrRetry() {
+    if (page !== "login") return;
+    if (loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
+
+    loginQrRetryTimer = window.setTimeout(() => {
+      loginQrRetryTimer = null;
+      if (loginQrRefreshing || loginCountdownActive) return;
+      refreshQrCode({ trigger: "retry" });
+    }, loginQrRetryIntervalMs);
+  }
+
   async function refreshQrCode({ trigger = "auto" } = {}) {
     if (loginQrRefreshing) return false;
+    clearLoginQrRetryTimer();
 
     const qrWrap = q("3_37");
+    clearQrImage();
     loginQrRefreshing = true;
     loginCountdownActive = false;
     loginCountdownValue = 0;
@@ -475,14 +640,21 @@
     try {
       const qr = await getJson(api.qr);
       if (qr?.standby) {
-        setQrStatus(mapQrErrorMessage(qr?.error_code, qr?.message), "error");
+        setQrStatus(`${mapQrErrorMessage(qr?.error_code, qr?.message)}${loginQrRetrySuffix}`, "error");
+        loginCountdownValue = loginQrRetryCountdownSeconds;
+        loginCountdownActive = true;
+        setText(["77_56"], String(loginCountdownValue));
         return false;
       }
       if (qr?.success === false) {
-        setQrStatus(mapQrErrorMessage(qr?.error_code, qr?.message), "error");
+        setQrStatus(`${mapQrErrorMessage(qr?.error_code, qr?.message)}${loginQrRetrySuffix}`, "error");
+        loginCountdownValue = loginQrRetryCountdownSeconds;
+        loginCountdownActive = true;
+        setText(["77_56"], String(loginCountdownValue));
         return false;
       }
       if (qr?.success && qr.qr_url) {
+        clearLoginQrRetryTimer();
         setBg("3_37", qr.qr_url);
         updateCapabilityUi(qr.default_printer_capabilities);
         setQrStatus("🟢 已连接到云端服务器", "ok");
@@ -491,10 +663,16 @@
         setText(["77_56"], String(loginCountdownValue));
         return true;
       }
-      setQrStatus("🔴 二维码响应异常，请稍后重试", "error");
+      setQrStatus(`🔴 二维码响应异常${loginQrRetrySuffix}`, "error");
+      loginCountdownValue = loginQrRetryCountdownSeconds;
+      loginCountdownActive = true;
+      setText(["77_56"], String(loginCountdownValue));
       return false;
     } catch (err) {
-      setQrStatus(mapQrErrorMessage("", err?.message || "二维码获取失败"), "error");
+      setQrStatus(`${mapQrErrorMessage("", err?.message || "二维码获取失败")}${loginQrRetrySuffix}`, "error");
+      loginCountdownValue = loginQrRetryCountdownSeconds;
+      loginCountdownActive = true;
+      setText(["77_56"], String(loginCountdownValue));
       return false;
     } finally {
       if (qrWrap) qrWrap.style.opacity = "1";
@@ -510,6 +688,7 @@
     loginCountdownValue = 0;
     loginCountdownActive = false;
     setText(["77_56"], "0");
+    clearQrImage();
     setQrStatus("正在获取二维码...", "info");
 
     startLoginCountdownLoop();
@@ -562,25 +741,39 @@
     const nextBtn = q("115_62");
     if (!prevBtn || !nextBtn) return;
 
-    const enable = previewFirstLoadDone && !previewLoading && previewPageCount > 1;
+    const enable =
+      previewFirstLoadDone && !previewLoading && !previewFailureMode && previewPageCount > 1;
     prevBtn.disabled = !enable || previewCurrentPage <= 0;
     nextBtn.disabled = !enable || previewCurrentPage >= previewPageCount - 1;
   }
 
-  function setPreviewControlsLocked(locked) {
+  function setPreviewControlsLocked(locked, allowBackWhenLocked = false) {
     const optionsGroup = q("115_60");
     const backBtn = q("97_454");
     const printBtn = q("97_460");
 
     optionsGroup?.classList.toggle("is-disabled", locked);
-    backBtn?.classList.toggle("is-disabled", locked);
+    backBtn?.classList.toggle("is-disabled", locked && !allowBackWhenLocked);
     printBtn?.classList.toggle("is-disabled", locked);
 
     if (optionsGroup) optionsGroup.style.pointerEvents = locked ? "none" : "auto";
-    if (backBtn) backBtn.style.pointerEvents = locked ? "none" : "auto";
+    if (backBtn) backBtn.style.pointerEvents = locked && !allowBackWhenLocked ? "none" : "auto";
     if (printBtn) printBtn.style.pointerEvents = locked ? "none" : "auto";
 
     updatePreviewPageButtons();
+  }
+
+  function enterPreviewFailureMode(errorMessage) {
+    previewFailureMode = true;
+    pausePreviewCountdown();
+    previewCountdownValue = previewFailureFallbackSeconds;
+    previewCountdownActive = true;
+    setPreviewCountdownDisplay(previewCountdownValue);
+
+    setText(["97_481"], "预览加载失败，正在返回二维码页...");
+    setText(["97_480"], `-${errorMessage || "请稍后重试"}-`);
+    setPreviewLoadingPlaceholder(true);
+    setPreviewControlsLocked(true, true);
   }
 
   function renderOptionsUI() {
@@ -630,7 +823,7 @@
   }
 
   function queuePreviewRefresh() {
-    if (!previewFirstLoadDone) return;
+    if (!previewFirstLoadDone || previewFailureMode) return;
 
     if (previewRefreshTimer) {
       window.clearTimeout(previewRefreshTimer);
@@ -653,6 +846,7 @@
   async function renderPreview(pageIndex = 0, blockUi = false) {
     if (!state.file?.file_id || !state.file?.file_url) return false;
     if (previewLoading) return false;
+    if (previewFailureMode) return false;
 
     previewLoading = true;
     setPreviewLoadingPlaceholder(true);
@@ -701,12 +895,10 @@
       updatePreviewPageButtons();
       return true;
     } catch (err) {
-      showError(err?.message || "预览加载失败");
-      setText(["97_481"], "预览加载失败，请稍后重试");
-      setText(["97_480"], "-0/0页-");
+      enterPreviewFailureMode(mapPreviewErrorMessage("", err?.message || "预览加载失败"));
       setPreviewLoadingPlaceholder(true);
       if (blockUi) {
-        setPreviewControlsLocked(true);
+        setPreviewControlsLocked(true, true);
         pausePreviewCountdown();
       }
       return false;
@@ -726,6 +918,7 @@
     previewLoading = false;
     previewCurrentPage = 0;
     previewPageCount = 0;
+    previewFailureMode = false;
 
     setPreviewCountdownDisplay(60);
     setText(["97_481"], "文档加载中...");
@@ -742,26 +935,30 @@
     startPreviewCountdownLoop();
 
     on("97_454", () => {
+      if (previewFailureMode) {
+        cleanupAndBackToLogin();
+        return;
+      }
       if (!previewFirstLoadDone) return;
       gotoPage("login");
     });
 
     const pickCopies = (value) => {
-      if (!previewFirstLoadDone) return;
+      if (!previewFirstLoadDone || previewFailureMode) return;
       state.options.copies = value;
       saveState();
       renderOptionsUI();
       queuePreviewRefresh();
     };
     const pickDuplex = (value) => {
-      if (!previewFirstLoadDone) return;
+      if (!previewFirstLoadDone || previewFailureMode) return;
       state.options.duplex = value;
       saveState();
       renderOptionsUI();
       queuePreviewRefresh();
     };
     const pickColor = (value) => {
-      if (!previewFirstLoadDone) return;
+      if (!previewFirstLoadDone || previewFailureMode) return;
       state.options.color_mode = value;
       saveState();
       renderOptionsUI();
@@ -779,7 +976,13 @@
     ["133_36", "133_38"].forEach((id) => on(id, () => pickColor("mono")));
 
     on("115_61", async () => {
-      if (!previewFirstLoadDone || previewLoading || previewCurrentPage <= 0) return;
+      if (
+        !previewFirstLoadDone ||
+        previewLoading ||
+        previewFailureMode ||
+        previewCurrentPage <= 0
+      )
+        return;
       await renderPreview(previewCurrentPage - 1, false);
     });
 
@@ -787,6 +990,7 @@
       if (
         !previewFirstLoadDone ||
         previewLoading ||
+        previewFailureMode ||
         previewCurrentPage >= previewPageCount - 1
       )
         return;
@@ -794,7 +998,10 @@
     });
 
     on("97_460", async () => {
-      if (!previewFirstLoadDone || !state.file?.file_id) return;
+      if (!previewFirstLoadDone || previewFailureMode || !state.file?.file_id) return;
+      if (printSubmitting) return;
+      printSubmitting = true;
+      setPreviewControlsLocked(true);
       try {
         await postJson(api.print, {
           file_id: state.file.file_id,
@@ -811,6 +1018,9 @@
         gotoPage("printing");
       } catch (err) {
         showError(err?.message || "提交打印失败");
+      } finally {
+        printSubmitting = false;
+        if (page === "preview") setPreviewControlsLocked(false);
       }
     });
 
@@ -874,6 +1084,8 @@
     on("115_40", () => leave());
   }
 
+  // 先启用触摸限制，再初始化 UI 逻辑
+  initTouchRestrictions();
   renderCommonText();
   tickClock();
   setInterval(tickClock, 1000);

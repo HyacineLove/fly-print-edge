@@ -1,4 +1,4 @@
-﻿@font-face {
+@font-face {
   font-family: 'Microsoft YaHei-Bold';
   font-style: normal;
   font-weight: 700;
@@ -355,6 +355,8 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   left: 50%;
   top: 17px;
   transform: translateX(calc(-50% + 122.5px));
+  border-radius: 10px 10px 10px 10px;
+  overflow: hidden;
 }
 
 .Pixso-paragraph-55_113 {
@@ -448,6 +450,8 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   left: 50%;
   top: 183px;
   transform: translateX(calc(-50% + 222.5px));
+  border-radius: 10px 10px 10px 10px;
+  overflow: hidden;
 }
 
 .Pixso-paragraph-55_124 {
@@ -528,6 +532,8 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   left: 50%;
   top: 349px;
   transform: translateX(calc(-50% + 222.5px));
+  border-radius: 10px 10px 10px 10px;
+  overflow: hidden;
 }
 
 .Pixso-paragraph-133_37 {

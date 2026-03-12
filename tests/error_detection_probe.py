@@ -2,9 +2,13 @@ import argparse
 import json
 import os
 import platform
+import sys
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+# 保证从项目根目录可导入
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printer_utils import PrinterManager
 

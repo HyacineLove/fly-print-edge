@@ -1,0 +1,24 @@
+{
+    "managed_printers": [],
+    "settings": {},
+    "network": {
+        "bind_address": "127.0.0.1",
+        "port": 7860
+    },
+    "printers": {
+        "discovery_mode": "auto",
+        "static_list": []
+    },
+    "cloud": {
+        "enabled": false,
+        "base_url": "http://localhost:8012",
+        "auth_url": "http://localhost:8012/auth/token",
+        "client_id": "edge-default",
+        "client_secret": "YOUR_CLIENT_SECRET",
+        "node_name": "my-edge-node",
+        "location": "",
+        "heartbeat_interval": 30,
+        "auto_register": true
+    },
+    "default_printer_id": null
+}

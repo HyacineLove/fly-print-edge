@@ -38,6 +38,8 @@ logger = logging.getLogger("EdgeServer")
 
 # 全局变量
 app = FastAPI(title="FlyPrint Edge Kiosk")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # API Key Authentication - 已移除，仅保留空函数占位以防报错
 api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -81,7 +83,7 @@ app.add_middleware(
 )
 
 # 挂载静态文件
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 async def startup_event():
@@ -199,11 +201,11 @@ async def shutdown_event():
 # API 路由
 @app.get("/")
 async def read_root():
-    return FileResponse("static/index.html")
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 @app.get("/admin")
 async def read_admin():
-    return FileResponse("static/admin/html/index.html")
+    return FileResponse(os.path.join(STATIC_DIR, "admin", "html", "index.html"))
 
 @app.get("/api/status")
 async def get_status():
@@ -369,18 +371,32 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
         print(f" [DEBUG] 错误详情:\n{error_detail}")
         return None, str(e)
 
+def _normalize_paper_size(paper_size: Optional[str]) -> str:
+    """规范化纸张名称，支持 'Letter (横向)' 等"""
+    s = str(paper_size or "").strip()
+    if " (横向)" in s or " (landscape)" in s.lower():
+        s = s.split(" (")[0].strip()
+    return s
+
+
 def _get_paper_size_px(paper_size: Optional[str], dpi: int = 120):
+    raw = str(paper_size or "").strip()
+    is_landscape = (" (横向)" in raw) or ("(landscape)" in raw.lower())
     sizes = {
         "A3": (297, 420),
         "A4": (210, 297),
         "A5": (148, 210),
         "B5": (176, 250),
         "Letter": (216, 279),
-        "Legal": (216, 356)
+        "Legal": (216, 356),
+        "Tabloid": (279, 432),
     }
-    mm = sizes.get(paper_size or "")
+    normalized = _normalize_paper_size(paper_size)
+    mm = sizes.get(normalized or "")
     if not mm:
         return None
+    if is_landscape:
+        mm = (mm[1], mm[0])
     w = int(mm[0] / 25.4 * dpi)
     h = int(mm[1] / 25.4 * dpi)
     return w, h
@@ -459,11 +475,17 @@ def _apply_paper_size(image: Image.Image, paper_size: Optional[str], options: Op
     preview_w = _safe_int(opts.get("preview_width_px"), 0)
     preview_h = _safe_int(opts.get("preview_height_px"), 0)
     layout = _resolve_layout_options(opts)
-
+    paper_target = _get_paper_size_px(paper_size or layout.get("paper_size"))
     if preview_w > 0 and preview_h > 0:
-        target = (preview_w, preview_h)
+        # 预览始终以页面容器为边界，但按真实纸张比例缩放，避免预览与实打方向/比例偏移
+        if paper_target:
+            pw, ph = paper_target
+            scale = min(preview_w / max(1, pw), preview_h / max(1, ph))
+            target = (max(1, int(round(pw * scale))), max(1, int(round(ph * scale))))
+        else:
+            target = (preview_w, preview_h)
     else:
-        target = _get_paper_size_px(paper_size or layout.get("paper_size"))
+        target = paper_target
         if not target:
             return image
 
@@ -484,6 +506,50 @@ def _apply_paper_size(image: Image.Image, paper_size: Optional[str], options: Op
     y = (h - new_h) // 2
     canvas.paste(resized, (x, y))
     return canvas
+
+def _detect_pdf_paper_size_from_file(file_path: str) -> Optional[str]:
+    """从 PDF 第一页检测纸张尺寸，用于预览与打印一致"""
+    try:
+        doc = fitz.open(file_path)
+        if doc.page_count == 0:
+            doc.close()
+            return None
+        page = doc.load_page(0)
+        media_box = page.mediabox
+        width_pt = media_box.width
+        height_pt = media_box.height
+        doc.close()
+        width_inch = width_pt / 72.0
+        height_inch = height_pt / 72.0
+        paper_sizes = {
+            "A4": (8.27, 11.69),
+            "Letter": (8.5, 11.0),
+            "Legal": (8.5, 14.0),
+            "A3": (11.69, 16.54),
+            "A5": (5.83, 8.27),
+            "Tabloid": (11.0, 17.0),
+        }
+        tolerance = 0.2
+        for size_name, (std_w, std_h) in paper_sizes.items():
+            if abs(width_inch - std_w) <= tolerance and abs(height_inch - std_h) <= tolerance:
+                return size_name
+            if abs(width_inch - std_h) <= tolerance and abs(height_inch - std_w) <= tolerance:
+                return f"{size_name} (横向)"
+        return None
+    except Exception:
+        return None
+
+
+def _detect_paper_size_from_file(file_path: str, file_name: Optional[str], file_type: Optional[str], pdf_path: Optional[str] = None) -> Optional[str]:
+    """根据文件类型检测纸张尺寸"""
+    ext = os.path.splitext(file_name or "")[1].lower()
+    if not ext and file_type:
+        ext = ".pdf" if "pdf" in (file_type or "").lower() else ".docx" if "word" in (file_type or "").lower() else ""
+    path_to_check = pdf_path if pdf_path and os.path.exists(pdf_path) else file_path
+    if ext == ".pdf" and path_to_check:
+        return _detect_pdf_paper_size_from_file(path_to_check)
+    return None
+
 
 def _render_pdf_to_image(file_path: str, page_index: int):
     try:
@@ -661,6 +727,23 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
     if "gray" in color_mode or "mono" in color_mode or "黑白" in color_mode:
         image = image.convert("L").convert("RGB")
     resolved_options = _normalize_request_options(options)
+    # 预览纸张策略：
+    # - 用户显式指定 paper_size 时，严格使用用户设置（与打印参数保持一致）
+    # - 仅当用户未显式指定时，才根据文件自动检测纸张
+    explicit_paper = options.get("paper_size") or options.get("page_size") or options.get("size")
+    if explicit_paper:
+        resolved_options["paper_size"] = str(explicit_paper).strip()
+    else:
+        pdf_path_for_detect = None
+        if file_id and ext in [".doc", ".docx"]:
+            pdf_path_for_detect = preview_files.get(file_id, {}).get("pdf_path")
+        detected_paper = _detect_paper_size_from_file(file_path, file_name, file_type, pdf_path_for_detect)
+        if detected_paper:
+            paper_px = _get_paper_size_px(detected_paper)
+            if paper_px:
+                resolved_options["preview_width_px"] = paper_px[0]
+                resolved_options["preview_height_px"] = paper_px[1]
+                resolved_options["paper_size"] = detected_paper
     image = _apply_paper_size(image, resolved_options.get("paper_size"), resolved_options)
     return image, page_count, resolved_page_index, None
 
@@ -799,23 +882,32 @@ async def get_qr_code():
             })
     
     # 构建完整的上传 URL（指向云端）
+    # 使用完整 base_url（含子路径），以便子路径部署时二维码指向正确地址
     from urllib.parse import urlparse
     base_url = cloud_service.api_client.base_url if cloud_service and cloud_service.api_client else "http://localhost:8080"
-    parsed = urlparse(base_url)
-    cloud_host = f"{parsed.scheme}://{parsed.netloc}"
-    
-    # 获取局域网 IP 并替换 localhost/127.0.0.1
+    upload_base = (base_url or "").rstrip("/")
+
+    # 获取局域网 IP 并替换 localhost/127.0.0.1（在完整 base 上替换，保留 path）
     try:
         lan_ip = get_host_ip()
-        if "localhost" in cloud_host:
-            cloud_host = cloud_host.replace("localhost", lan_ip)
-        elif "127.0.0.1" in cloud_host:
-            cloud_host = cloud_host.replace("127.0.0.1", lan_ip)
+        if lan_ip and "localhost" in upload_base:
+            upload_base = upload_base.replace("localhost", lan_ip)
+        elif lan_ip and "127.0.0.1" in upload_base:
+            upload_base = upload_base.replace("127.0.0.1", lan_ip)
     except Exception as e:
         logger.warning(f"无法获取局域网 IP: {e}")
-    
-    # 使用云端返回的 upload_url（相对路径），拼接完整 URL
-    upload_url = f"{cloud_host}{token_data['upload_url']}"
+
+    # 使用云端返回的 upload_url（相对路径），拼接成对浏览器可访问的完整 URL
+    raw_upload_url = str(token_data.get("upload_url") or "")
+    if raw_upload_url.startswith("http://") or raw_upload_url.startswith("https://"):
+        upload_url = raw_upload_url
+    else:
+        path = (raw_upload_url.strip() or "/upload").strip()
+        if not path.startswith("/"):
+            path = "/" + path
+        if path.startswith("/upload") and not path.startswith("/web/"):
+            path = "/web" + path
+        upload_url = f"{upload_base}{path}"
     
     qr_img_url = build_qr_data_url(upload_url)
 
