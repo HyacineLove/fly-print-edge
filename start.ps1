@@ -85,6 +85,9 @@ if (-not (Test-Path $VenvDir) -or $Setup) {
 # Check config file
 if (-not (Test-Path "config.json")) {
     Write-Host "WARNING: config.json not found" -ForegroundColor Yellow
+    if (Test-Path "config.example.json") {
+        Write-Host "Tip: Copy config.example.json to config.json, then edit cloud.client_secret etc." -ForegroundColor Cyan
+    }
     Write-Host ""
     Write-Host "Please configure Edge node first:" -ForegroundColor Yellow
     Write-Host "1. Login to Cloud Admin (http://localhost)" -ForegroundColor White

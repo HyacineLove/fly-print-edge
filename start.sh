@@ -87,6 +87,7 @@ fi
 # 检查配置文件
 if [ ! -f "config.json" ]; then
     echo "⚠️  警告: config.json 不存在"
+    [ -f "config.example.json" ] && echo "提示: 可复制 config.example.json 为 config.json 后修改 cloud.client_secret 等"
     echo ""
     echo "请先配置 Edge 节点:"
     echo "1. 登录 Cloud 管理后台 (http://localhost)"

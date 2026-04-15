@@ -1,90 +1,11 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
+﻿<!doctype html>
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>飞印自助打印</title>
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=/static/user/index.html">
+  <title>Fly Print</title>
 </head>
 <body>
-    <div class="container">
-        <!-- 状态1: 扫码上传 -->
-        <div id="scan-section" class="section active">
-            <h1>👋 欢迎使用飞印自助打印</h1>
-            <p class="subtitle">请扫描下方二维码上传文件</p>
-            <div class="qr-container">
-                <img id="qr-code" src="" alt="加载中..." />
-                <div id="qr-loading" class="qr-loading" style="display: none;">
-                    <div class="spinner"></div>
-                    <p>正在刷新二维码...</p>
-                </div>
-            </div>
-            <div id="qr-expiry" class="status-text" style="font-size: 12px; color: #999; margin-top: 10px;"></div>
-            <button id="refresh-qr-btn" class="btn btn-secondary" onclick="refreshQRCode()" style="margin-top: 10px; display: none;">🔄 刷新二维码</button>
-            <div id="connection-status" class="status-text" style="font-size: 12px; color: #666; margin-top: 5px;">连接中...</div>
-        </div>
-
-        <!-- 状态2: 预览与设置 -->
-        <div id="preview-section" class="section">
-            <h1>📄 打印预览与设置</h1>
-            
-            <div class="preview-card">
-                <div class="preview-body">
-                    <img id="preview-image" src="" alt="预览加载中" />
-                    <div id="preview-error" class="preview-overlay" style="display: none;">
-                        <div class="error-icon">❌</div>
-                        <p id="preview-error-msg">预览生成失败</p>
-                        <button class="btn btn-outline btn-sm" onclick="requestPreview()">重试</button>
-                    </div>
-                    <div class="preview-pager">
-                        <button id="preview-prev" class="pager-btn" onclick="changePreviewPage(-1)">←</button>
-                        <span id="page-indicator">1/1</span>
-                        <button id="preview-next" class="pager-btn" onclick="changePreviewPage(1)">→</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="settings-form">
-                <div class="form-group">
-                    <label>打印份数</label>
-                    <div class="counter">
-                        <button class="counter-btn" onclick="updateCopies(-1)">−</button>
-                        <input type="number" id="copies" value="1" min="1" readonly>
-                        <button class="counter-btn" onclick="updateCopies(1)">+</button>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label>色彩模式</label>
-                    <div id="color-options" class="option-group"></div>
-                </div>
-
-                <div class="form-group">
-                    <label>双面打印</label>
-                    <div id="duplex-options" class="option-group"></div>
-                </div>
-            </div>
-
-            <div class="actions">
-                <button class="btn btn-secondary" onclick="resetState()">取消</button>
-                <button class="btn btn-primary" onclick="submitPrint()">✅ 确认打印</button>
-            </div>
-        </div>
-
-        <!-- 状态3: 打印中/完成 -->
-        <div id="printing-section" class="section">
-            <h1 id="printing-title">🖨️ 正在打印...</h1>
-            <p class="subtitle" id="printing-message">系统正在处理您的文档，请勿离开...</p>
-            <div class="progress-bar">
-                <div class="progress-fill"></div>
-            </div>
-            <div id="printing-countdown" class="status-text" style="font-size: 14px; color: #666; margin-top: 10px; display: none;"></div>
-            <button id="return-btn" class="btn btn-secondary hidden" onclick="resetState()">返回首页</button>
-        </div>
-
-
-    </div>
-
-    <script src="/static/app.js"></script>
+  <script>window.location.replace('/static/user/index.html');</script>
 </body>
 </html>
