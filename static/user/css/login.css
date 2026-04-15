@@ -165,29 +165,37 @@ span {
 
 .Pixso-rectangle-3_29 {
   width: 418px;
-  height: 200px;
+  height: 110px;
   position: absolute;
   left: 0px;
-  top: -45px;
+  top: 0px;
   transform: none;
-  border-radius: 32px;
+  border-radius: 20px;
+  background-image: none;
+  background-color: rgba(127, 156, 255, 1);
+  background: linear-gradient(90deg, rgba(151, 184, 255, 1) 0%, rgba(102, 91, 244, 1) 100%);
+  box-shadow: 0px 10px 22px rgba(102, 91, 244, 0.18);
 }
 
 .Pixso-paragraph-3_30 {
-  font-size: 50px;
-  font-family: "Microsoft YaHei-Bold";
-  font-weight: 700;
+  font-size: 38px;
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-weight: 600;
   letter-spacing: 0em;
   color: rgba(255, 255, 255, 1);
-  width: 360px;
+  width: 100%;
   height: auto;
   position: absolute;
   left: 50%;
   top: 50%;
-  transform: translateX(-50%) translateY(calc(-50% + 1px));
+  transform: translate(-50%, -50%);
   text-align: center;
-  white-space: pre;
-  flex-grow: 0;
+  white-space: nowrap;
+  line-height: 1.3;
+  overflow: visible;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  z-index: 1;
 }
 
 .Pixso-group-97_159 {
@@ -359,6 +367,11 @@ span {
   transform: translateX(calc(-50% + 0px));
   white-space: pre;
   flex-grow: 0;
+}
+
+.Pixso-rectangle-3_33,
+.Pixso-paragraph-97_162 {
+  display: none;
 }
 
 .container {

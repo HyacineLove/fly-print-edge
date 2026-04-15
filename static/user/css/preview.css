@@ -265,6 +265,11 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   flex-grow: 0;
 }
 
+.Pixso-rectangle-97_446,
+.Pixso-paragraph-97_459 {
+  display: none;
+}
+
 .Pixso-group-97_460 {
   width: 418px;
   height: 110px;
