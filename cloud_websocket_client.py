@@ -528,6 +528,14 @@ class PrintJobHandler:
             if not all([job_id, printer_name, file_url]):
                 print(" [WARNING] 打印任务参数不完整")
                 return
+
+            try:
+                import main
+                bound_session_id = main.bind_interactive_cloud_job(file_url, job_id)
+                if bound_session_id:
+                    print(f" [INFO] 已将云端任务绑定到当前交互会话: {bound_session_id}")
+            except Exception as bind_error:
+                print(f" [WARNING] 绑定交互会话失败: {bind_error}")
             
             # 【去重检查】如果任务已经完成过，直接上报成功，不重复打印
             if self.websocket_client and self.websocket_client._is_job_completed(job_id):
