@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from printer_utils import PrinterManager
 from cloud_service import CloudService
+from config_service import ConfigService
 from file_manager import init_file_manager, get_file_manager
 from interactive_session import InteractiveSessionManager
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
@@ -68,6 +69,7 @@ preview_page_meta: Dict[str, Dict[str, int]] = {}
 file_access_tokens: Dict[str, Dict[str, str]] = {}  # 文件访问 token 缓存
 interactive_session_manager = InteractiveSessionManager()
 qr_code_request_lock: Optional[asyncio.Lock] = None
+config_service: Optional[ConfigService] = None
 
 # CORS设置
 # 仅允许本地和受信域名访问
@@ -90,7 +92,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 async def startup_event():
-    global printer_manager, cloud_service, node_id, sse_clients, main_loop, qr_code_request_lock
+    global printer_manager, cloud_service, node_id, sse_clients, main_loop, qr_code_request_lock, config_service
     
     logger.info(" Edge Server 正在启动...")
     main_loop = asyncio.get_running_loop()
@@ -98,6 +100,7 @@ async def startup_event():
     
     # 初始化打印机管理器
     printer_manager = PrinterManager()
+    config_service = ConfigService(printer_manager.config)
     
     # 初始化文件管理器（传入 preview_cache 引用用于自动清理）
     file_mgr = init_file_manager(cleanup_interval=300, file_ttl=1800, preview_cache=preview_cache)
@@ -108,34 +111,20 @@ async def startup_event():
     
     # 初始化云端服务
     cloud_config = printer_manager.config.config.get("cloud", {})
-    
-    # 特殊处理：如果配置了 auto_register 但 enabled=False，我们在 CloudService 内部会自动启用
-    # 这里不需要提前警告，CloudService 会处理并返回正确状态
-    
     cloud_service = CloudService(cloud_config, printer_manager)
-    
-    # 启动云端服务
+
+    if cloud_service:
+        cloud_service.add_message_listener("preview_file", handle_cloud_message)
+        cloud_service.add_message_listener("error", handle_cloud_message)
+        cloud_service.add_message_listener("cloud_error", handle_cloud_message)
+        cloud_service.add_message_listener("job_status", handle_cloud_message)
+
     start_result = cloud_service.start()
     if start_result.get("success"):
         node_id = start_result.get("node_id")
-        logger.info(f" 云端服务启动成功，Node ID: {node_id}")
-        
-        # 注册WebSocket消息的SSE转发处理器（将云端消息推送给前端）
-        # 云端实际发送的下行消息：print_job, preview_file, upload_token, error
-        # - print_job/upload_token/error 由 cloud_service.py 中的 PrintJobHandler 处理业务逻辑，不需要转发给前端
-        # - preview_file/error 需要同时转发给前端（用户界面需要显示）
-        if cloud_service.websocket_client:
-            # preview_file: 将文件预览消息推送到SSE，前端显示预览界面
-            cloud_service.websocket_client.add_message_handler("preview_file", handle_cloud_message)
-            
-            # error: 将云端错误消息推送到SSE，前端显示错误提示
-            cloud_service.websocket_client.add_message_handler("error", handle_cloud_message)
-            # cloud_error: 由本地封装的云端错误（如节点被删除等），同样转发到前端
-            cloud_service.websocket_client.add_message_handler("cloud_error", handle_cloud_message)
-            # job_status: 将打印任务状态更新推送到SSE，前端显示打印进度
-            cloud_service.websocket_client.add_message_handler("job_status", handle_cloud_message)
+        logger.info(f" Cloud service startup result: {start_result.get('message')}, node_id={node_id}")
     else:
-        logger.error(f" 云端服务启动失败: {start_result.get('message')}")
+        logger.warning(f" Cloud service startup skipped: {start_result.get('message')}")
 
 async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
     """广播SSE事件给所有连接的客户端"""
@@ -326,6 +315,32 @@ def _get_settings():
     if not printer_manager:
         return {}
     return printer_manager.config.config.get("settings", {})
+
+def _get_config_service() -> ConfigService:
+    global config_service
+    if config_service:
+        return config_service
+    if not printer_manager:
+        raise RuntimeError("设备未就绪")
+    config_service = ConfigService(printer_manager.config)
+    return config_service
+
+async def _wait_for_cloud_connected(timeout_seconds: float = 5.0, interval_seconds: float = 0.2) -> bool:
+    if not cloud_service:
+        return False
+
+    elapsed = 0.0
+    while elapsed < timeout_seconds:
+        status = cloud_service.get_status()
+        websocket = status.get("websocket") or {}
+        if status.get("registered") and websocket.get("connected"):
+            return True
+        await asyncio.sleep(interval_seconds)
+        elapsed += interval_seconds
+
+    status = cloud_service.get_status()
+    websocket = status.get("websocket") or {}
+    return bool(status.get("registered") and websocket.get("connected"))
 
 def _resolve_path(path_value: Optional[str]):
     if not path_value:
@@ -1262,80 +1277,169 @@ async def cleanup_preview_file(request: Request):
 
 @admin_router.post("/node/reregister")
 async def reregister_node():
-    """重新注册云端节点（在节点被删除或配置异常时使用）"""
     global cloud_service, node_id
     if not printer_manager:
         return {"success": False, "message": "设备未就绪"}
     if not cloud_service:
-        return {"success": False, "message": "云端服务未启用"}
+        return {"success": False, "message": "云端服务不可用"}
     try:
-        # 停止当前云端服务
-        cloud_service.stop()
+        cloud_cfg = printer_manager.config.config.get("cloud", {})
+        cloud_cfg.pop("node_id", None)
+        printer_manager.config.save_config()
 
-        # 清除本地缓存的 node_id
-        try:
-            if hasattr(printer_manager, "config"):
-                cloud_cfg = printer_manager.config.config.get("cloud", {})
-                cloud_cfg.pop("node_id", None)
-                printer_manager.config.save_config()
-        except Exception as e:
-            logger.warning(f"清除本地 node_id 缓存失败: {e}")
+        result = cloud_service.reconfigure(cloud_cfg, preserve_node_id=False)
+        if result.get("success"):
+            result = cloud_service.ensure_registered(force_reregister=True)
+        if not result.get("success"):
+            return {"success": False, "message": result.get("message") or "节点重新注册失败"}
 
-        # 重置 CloudService 状态
-        cloud_service.node_id = None
-        cloud_service.registered = False
-
-        # 重新启动云端服务（会触发自动注册）
-        start_result = cloud_service.start()
-        if not start_result.get("success"):
-            return {"success": False, "message": start_result.get("message") or "节点重新注册失败"}
-
-        node_id = start_result.get("node_id")
-
-        # 重新注册 SSE 消息转发处理器
-        if cloud_service.websocket_client:
-            cloud_service.websocket_client.add_message_handler("preview_file", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("error", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("cloud_error", handle_cloud_message)
-            cloud_service.websocket_client.add_message_handler("job_status", handle_cloud_message)
-
-        # 广播节点重新注册事件
+        node_id = result.get("node_id")
         await broadcast_sse_event("node_status_changed", {
             "status": "registered",
-            "node_id": node_id
+            "node_id": node_id,
         })
-
-        return {"success": True, "message": "节点重新注册成功", "node_id": node_id}
+        return {"success": True, "message": "节点已重新注册", "node_id": node_id}
     except Exception as e:
-        logger.error(f"重新注册节点失败: {e}")
+        logger.error(f"node reregister failed: {e}")
         return {"success": False, "message": str(e)}
+
+
+@admin_router.get("/config")
+async def get_admin_config():
+    service = _get_config_service()
+    payload = service.get_public_config()
+    return {"success": True, **payload}
+
+
+@admin_router.post("/config")
+async def save_admin_config(request: Request):
+    global node_id
+    body = await request.json()
+    try:
+        service = _get_config_service()
+        result = service.save_and_apply(body, cloud_service=cloud_service)
+        if cloud_service:
+            node_id = cloud_service.node_id
+        status_code = 200 if result.get("success") else 400
+        return JSONResponse(status_code=status_code, content=result)
+    except Exception as e:
+        logger.error(f"save admin config failed: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "saved": False, "errors": [str(e)]})
+
+
+@admin_router.post("/cloud/check-register")
+@admin_router.post("/config/test-cloud")
+async def check_cloud_and_register_node(request: Request):
+    global node_id
+    body = await request.json()
+    try:
+        service = _get_config_service()
+        if not printer_manager or not cloud_service:
+            return JSONResponse(status_code=503, content={"success": False, "message": "\u670d\u52a1\u4e0d\u53ef\u7528"})
+
+        current = printer_manager.config.get_full_config()
+        merged = service.merge_update(current, body)
+        errors = service.validate(merged)
+        if errors:
+            return JSONResponse(status_code=400, content={"success": False, "message": "; ".join(errors), "errors": errors})
+
+        preflight = service.test_cloud_connection({"cloud": merged.get("cloud", {})})
+        if not preflight.get("success"):
+            return JSONResponse(status_code=400, content=preflight)
+
+        was_registered = bool((current.get("cloud") or {}).get("node_id") or cloud_service.node_id)
+
+        printer_manager.config.replace_full_config(merged)
+        reconfigure_result = cloud_service.reconfigure(merged.get("cloud", {}), preserve_node_id=True)
+        if not reconfigure_result.get("success"):
+            return JSONResponse(status_code=400, content=reconfigure_result)
+
+        if was_registered:
+            result_payload = {
+                "success": True,
+                "node_id": cloud_service.node_id,
+                "registered": bool(cloud_service.node_id),
+                "connected": bool(reconfigure_result.get("connected")),
+            }
+        else:
+            ensure_result = cloud_service.ensure_registered(force_reregister=False)
+            if not ensure_result.get("success"):
+                return JSONResponse(status_code=400, content=ensure_result)
+            result_payload = ensure_result
+
+        connected = await _wait_for_cloud_connected()
+        if not connected:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": "\u8282\u70b9\u5df2\u6ce8\u518c\uff0c\u4f46\u4e91\u7aef\u8fde\u63a5\u5c1a\u672a\u5efa\u7acb",
+                    "node_id": cloud_service.node_id,
+                    "registered": True,
+                    "connected": False,
+                },
+            )
+
+        node_id = cloud_service.node_id
+        if not was_registered and node_id:
+            await broadcast_sse_event("node_status_changed", {
+                "status": "registered",
+                "node_id": node_id,
+            })
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": "\u4e91\u7aef\u8fde\u63a5\u6b63\u5e38\uff0c\u8282\u70b9\u5df2\u8fde\u63a5",
+                "node_id": node_id,
+                "registered": result_payload.get("registered", False),
+                "connected": True,
+                "saved": True,
+            },
+        )
+    except Exception as e:
+        logger.error(f"check/register cloud failed: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
 
 @admin_router.get("/cloud/status")
 async def get_cloud_status():
-    """获取云端服务连接/注册状态"""
     if not cloud_service:
         return {
             "success": True,
-            "enabled": False,
+            "configured": False,
             "registered": False,
             "connected": False,
             "node_id": None,
-            "message": "云端服务未启用"
+            "message": "\u4e91\u7aef\u670d\u52a1\u4e0d\u53ef\u7528",
+            "missing_fields": ["base_url", "auth_url", "client_id", "client_secret"],
         }
     try:
         status = cloud_service.get_status()
         ws = status.get("websocket") or {}
-        connected = bool(ws.get("connected"))  # 使用 connected 而不是 running
+        connected = bool(ws.get("connected"))
+        configured = bool(status.get("configured"))
+        registered = bool(status.get("registered"))
+        if not configured:
+            message = "\u914d\u7f6e\u4e0d\u5b8c\u6574"
+        elif connected:
+            message = "\u5df2\u8fde\u63a5"
+        elif registered:
+            message = "\u7b49\u5f85\u8fde\u63a5"
+        else:
+            message = "\u5f85\u6ce8\u518c\u8282\u70b9"
         return {
             "success": True,
-            "enabled": status.get("enabled", False),
-            "registered": status.get("registered", False),
+            "configured": configured,
+            "registered": registered,
             "connected": connected,
             "node_id": status.get("node_id"),
-            "message": "正常" if connected and status.get("registered") else "未连接"
+            "message": message,
+            "missing_fields": status.get("missing_fields", []),
         }
     except Exception as e:
-        logger.error(f"获取云端状态失败: {e}")
+        logger.error(f"get cloud status failed: {e}")
         return {"success": False, "message": str(e)}
 
 @admin_router.get("/printers/managed")

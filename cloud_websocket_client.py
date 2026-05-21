@@ -68,8 +68,19 @@ class CloudWebSocketClient:
     def stop(self):
         """停止WebSocket客户端"""
         self.running = False
-        # 不直接关闭WebSocket连接，让异步循环自然结束
-        # WebSocket连接会在_connect_and_listen循环结束时自动关闭
+        self.connected = False
+
+        if self.loop and self.loop.is_running() and self.websocket:
+            try:
+                future = asyncio.run_coroutine_threadsafe(self.websocket.close(), self.loop)
+                future.result(timeout=3)
+            except Exception as e:
+                print(f" [DEBUG] 停止WebSocket时关闭连接失败: {e}")
+
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=3)
+
+        self.websocket = None
         print(" [INFO] WebSocket客户端已停止")
     
     def _start_cleanup_task(self):
@@ -155,12 +166,16 @@ class CloudWebSocketClient:
                             await self._handle_message(message)
                         except Exception as e:
                             print(f" [ERROR] 处理WebSocket消息异常: {e}")
+                    self.websocket = None
+                    self.connected = False
                             
             except websockets.exceptions.ConnectionClosed as e:
                 self.connected = False
+                self.websocket = None
                 print(f" [WARNING] WebSocket连接关闭: {e}")
             except Exception as e:
                 self.connected = False
+                self.websocket = None
                 print(f" [ERROR] WebSocket连接异常: {e}")
             
             if self.running:

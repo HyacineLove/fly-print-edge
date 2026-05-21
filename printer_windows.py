@@ -143,7 +143,7 @@ class WindowsEnterprisePrinter:
             if not os.path.exists(config_path):
                 continue
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, "r", encoding="utf-8-sig") as f:
                     config = json.load(f)
                 return config.get("settings", {})
             except Exception:
