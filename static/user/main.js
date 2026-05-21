@@ -232,6 +232,10 @@
     sessionStorage.setItem(stateKey, JSON.stringify(state));
   }
 
+  function currentSessionId() {
+    return state.session_id || "";
+  }
+
   function setDoneResult(type, message) {
     state.doneResult = {
       type: type || "success",
@@ -309,20 +313,27 @@
 
   async function cleanupAndBackToLogin() {
     try {
-      if (state.file?.file_id) {
-        await postJson(api.cleanup, { file_id: state.file.file_id });
+      if (state.file?.file_id || currentSessionId()) {
+        await postJson(api.cleanup, {
+          file_id: state.file?.file_id,
+          session_id: currentSessionId() || undefined,
+        });
       }
     } catch {
       // Ignore cleanup errors to avoid blocking the flow.
     }
 
     state.file = {};
+    state.session_id = null;
     saveState();
     gotoPage("login");
   }
 
   function handleCloudError(type, data) {
     if (type !== "error" && type !== "cloud_error") return false;
+    if (data?.session_id && currentSessionId() && data.session_id !== currentSessionId()) {
+      return true;
+    }
     const message = data?.message || "云端服务异常，请稍后重试";
     if (page === "login") {
       setQrStatus(`🔴 ${message}`, "error");
@@ -343,6 +354,8 @@
 
   function handlePreviewEvent(data) {
     if (!data?.file_id || !data?.file_url) return;
+    if (currentSessionId() && data?.session_id !== currentSessionId()) return;
+    state.session_id = data.session_id || state.session_id || null;
     state.file = {
       file_id: data.file_id,
       file_url: data.file_url,
@@ -358,10 +371,15 @@
   }
 
   function handleJobStatusEvent(data) {
+    if (currentSessionId() && data?.session_id !== currentSessionId()) return;
     const status = String(data?.status || "").toLowerCase();
     const progress = Number(data?.progress || 0);
     const total = Number(data?.total_pages || state.file?.page_count || 1);
     const current = Number(data?.current_page || data?.page_index || 1);
+    if (data?.job_id) {
+      state.file.job_id = data.job_id;
+      saveState();
+    }
 
     if (status.includes("failed") || status.includes("error")) {
       const message = data?.message || data?.error_message || "打印失败，请重试";
@@ -677,6 +695,7 @@
     try {
       const qr = await getJson(api.qr);
       if (qr?.standby) {
+        state.session_id = null;
         setQrStatus(`${mapQrErrorMessage(qr?.error_code, qr?.message)}${loginQrRetrySuffix}`, "error");
         loginCountdownValue = loginQrRetryCountdownSeconds;
         loginCountdownActive = true;
@@ -684,6 +703,7 @@
         return false;
       }
       if (qr?.success === false) {
+        state.session_id = null;
         setQrStatus(`${mapQrErrorMessage(qr?.error_code, qr?.message)}${loginQrRetrySuffix}`, "error");
         loginCountdownValue = loginQrRetryCountdownSeconds;
         loginCountdownActive = true;
@@ -692,6 +712,9 @@
       }
       if (qr?.success && qr.qr_url) {
         clearLoginQrRetryTimer();
+        state.session_id = qr.session_id || null;
+        state.file = {};
+        saveState();
         setBg("3_37", qr.qr_url);
         updateCapabilityUi(qr.default_printer_capabilities);
         setQrStatus("🟢 已连接到云端服务器", "ok");
@@ -706,6 +729,7 @@
       setText(["77_56"], String(loginCountdownValue));
       return false;
     } catch (err) {
+      state.session_id = null;
       setQrStatus(`${mapQrErrorMessage("", err?.message || "二维码获取失败")}${loginQrRetrySuffix}`, "error");
       loginCountdownValue = loginQrRetryCountdownSeconds;
       loginCountdownActive = true;
@@ -722,6 +746,10 @@
   }
 
   async function initLogin() {
+    state.file = {};
+    state.session_id = null;
+    state.doneResult = null;
+    saveState();
     loginCountdownValue = 0;
     loginCountdownActive = false;
     setText(["77_56"], "0");
@@ -899,6 +927,7 @@
       const previewHeight = previewBox?.clientHeight || 870;
 
       const r = await postJson(api.preview, {
+        session_id: currentSessionId() || undefined,
         file_id: state.file.file_id,
         file_url: state.file.file_url,
         file_name: state.file.file_name,
@@ -972,12 +1001,8 @@
     startPreviewCountdownLoop();
 
     on("97_454", () => {
-      if (previewFailureMode) {
-        cleanupAndBackToLogin();
-        return;
-      }
-      if (!previewFirstLoadDone) return;
-      gotoPage("login");
+      if (!previewFailureMode && !previewFirstLoadDone) return;
+      cleanupAndBackToLogin();
     });
 
     const pickCopies = (value) => {
@@ -1041,6 +1066,7 @@
       setPreviewControlsLocked(true);
       try {
         await postJson(api.print, {
+          session_id: currentSessionId() || undefined,
           file_id: state.file.file_id,
           task_token: state.file.task_token || undefined,
           options: {

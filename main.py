@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from printer_utils import PrinterManager
 from cloud_service import CloudService
 from file_manager import init_file_manager, get_file_manager
+from interactive_session import InteractiveSessionManager
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
 
 # 配置日志
@@ -65,6 +66,8 @@ preview_files: Dict[str, Dict[str, str]] = {}
 preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
 preview_page_meta: Dict[str, Dict[str, int]] = {}
 file_access_tokens: Dict[str, Dict[str, str]] = {}  # 文件访问 token 缓存
+interactive_session_manager = InteractiveSessionManager()
+qr_code_request_lock: Optional[asyncio.Lock] = None
 
 # CORS设置
 # 仅允许本地和受信域名访问
@@ -87,10 +90,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 async def startup_event():
-    global printer_manager, cloud_service, node_id, sse_clients, main_loop
+    global printer_manager, cloud_service, node_id, sse_clients, main_loop, qr_code_request_lock
     
     logger.info(" Edge Server 正在启动...")
     main_loop = asyncio.get_running_loop()
+    qr_code_request_lock = asyncio.Lock()
     
     # 初始化打印机管理器
     printer_manager = PrinterManager()
@@ -157,15 +161,63 @@ async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
     except Exception as e:
         logger.error(f" 广播SSE事件失败: {e}")
 
+def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    message_type = message.get("type", "")
+    payload = message.get("data", {})
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if message_type == "preview_file":
+        accepted = interactive_session_manager.accept_preview_event(payload)
+        if not accepted:
+            logger.info(" 丢弃未绑定到当前会话的 preview_file 事件")
+            return None
+        enriched = dict(message)
+        enriched["data"] = accepted
+        return enriched
+
+    if message_type == "job_status":
+        accepted = interactive_session_manager.accept_job_status_event(payload)
+        if not accepted:
+            logger.info(" 丢弃未绑定到当前会话的 job_status 事件")
+            return None
+        enriched = dict(message)
+        enriched["data"] = accepted
+        return enriched
+
+    if message_type in {"error", "cloud_error"}:
+        active_session = interactive_session_manager.get_active_session()
+        if active_session:
+            enriched = dict(message)
+            enriched_payload = dict(payload)
+            enriched_payload.setdefault("session_id", active_session["session_id"])
+            enriched["data"] = enriched_payload
+            return enriched
+
+    return message
+
+def bind_interactive_cloud_job(file_url: Optional[str], job_id: Optional[str]) -> Optional[str]:
+    if not file_url or not job_id:
+        return None
+    bound = interactive_session_manager.attach_cloud_job(file_url, job_id)
+    if not bound:
+        return None
+    return bound.get("session_id")
+
 def handle_cloud_message(data: Dict[str, Any]):
     """处理云端消息并推送到所有SSE客户端"""
     try:
+        enriched_message = _enrich_message_with_session(data)
+        if enriched_message is None:
+            return
+
         # 直接使用广播函数，保持原有数据结构（如果是云端消息，直接转发）
         # 云端消息格式通常为 {"type": "...", "data": ...}
         # 如果data本身已经包含type，则直接发送整个对象
         
         client_count = len(sse_clients)
-        logger.info(f" 收到云端消息: {data.get('type')}, 推送给 {client_count} 个客户端")
+        logger.info(f" 收到云端消息: {enriched_message.get('type')}, 推送给 {client_count} 个客户端")
         
         if client_count == 0:
             return
@@ -173,7 +225,7 @@ def handle_cloud_message(data: Dict[str, Any]):
         def push_to_queues():
             for q in sse_clients:
                 try:
-                    q.put_nowait(data)
+                    q.put_nowait(enriched_message)
                 except asyncio.QueueFull:
                     pass
 
@@ -777,63 +829,69 @@ def _remove_managed_printer(printer_id: str, allow_missing: bool = False):
 @app.get("/api/qr_code")
 async def get_qr_code():
     """获取上传二维码信息"""
-    if not node_id:
-        return JSONResponse(status_code=503, content={"success": False, "message": "设备未注册或离线"})
-    if not printer_manager:
-        return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
-    if len(_get_managed_printers()) == 0:
-        return {"success": False, "standby": True, "message": "暂无可用打印机"}
-    default_printer_id = _ensure_default_printer()
-    if not default_printer_id:
-        return {"success": False, "standby": True, "message": "暂无可用打印机"}
-    
-    # 通过 WebSocket 请求上传凭证
-    if not cloud_service or not cloud_service.websocket_client:
-        return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
-    
-    # 创建一个 Future 用于等待上传凭证响应
-    upload_token_future = asyncio.Future()
-    
-    def upload_token_callback(token, expires_at, upload_url):
-        """上传凭证成功回调"""
-        if not upload_token_future.done():
-            upload_token_future.set_result({
-                "success": True,
-                "token": token,
-                "expires_at": expires_at,
-                "upload_url": upload_url
-            })
-    
-    def upload_token_error_callback(error_code, error_message):
-        """上传凭证错误回调"""
-        if not upload_token_future.done():
-            upload_token_future.set_result({
-                "success": False,
-                "error_code": error_code,
-                "error_message": error_message
-            })
-    
-    # 设置回调
-    if cloud_service.print_job_handler:
-        cloud_service.print_job_handler.upload_token_callback = upload_token_callback
-        cloud_service.print_job_handler.upload_token_error_callback = upload_token_error_callback
-    
-    # 请求上传凭证
-    success = cloud_service.websocket_client.request_upload_token(node_id, default_printer_id)
-    if not success:
-        return JSONResponse(status_code=500, content={"success": False, "message": "请求上传凭证失败"})
-    
-    # 等待上传凭证响应（最多等待 10 秒）
-    # 增加超时时间以应对 WebSocket 重连场景（打印完成后可能断开重连需要约5秒）
-    try:
-        token_data = await asyncio.wait_for(upload_token_future, timeout=10.0)
-    except asyncio.TimeoutError:
-        return JSONResponse(status_code=504, content={"success": False, "message": "获取上传凭证超时"})
-    finally:
-        # 清除回调
+    global qr_code_request_lock
+
+    if qr_code_request_lock is None:
+        qr_code_request_lock = asyncio.Lock()
+
+    async with qr_code_request_lock:
+        if not node_id:
+            return JSONResponse(status_code=503, content={"success": False, "message": "设备未注册或离线"})
+        if not printer_manager:
+            return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
+        if len(_get_managed_printers()) == 0:
+            return {"success": False, "standby": True, "message": "暂无可用打印机"}
+        default_printer_id = _ensure_default_printer()
+        if not default_printer_id:
+            return {"success": False, "standby": True, "message": "暂无可用打印机"}
+
+        # 通过 WebSocket 请求上传凭证
+        if not cloud_service or not cloud_service.websocket_client:
+            return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
+
+        # 创建一个 Future 用于等待上传凭证响应
+        upload_token_future = asyncio.Future()
+
+        def upload_token_callback(token, expires_at, upload_url):
+            """上传凭证成功回调"""
+            if not upload_token_future.done():
+                upload_token_future.set_result({
+                    "success": True,
+                    "token": token,
+                    "expires_at": expires_at,
+                    "upload_url": upload_url
+                })
+
+        def upload_token_error_callback(error_code, error_message):
+            """上传凭证错误回调"""
+            if not upload_token_future.done():
+                upload_token_future.set_result({
+                    "success": False,
+                    "error_code": error_code,
+                    "error_message": error_message
+                })
+
+        # 设置回调
         if cloud_service.print_job_handler:
-            cloud_service.print_job_handler.upload_token_callback = None
-            cloud_service.print_job_handler.upload_token_error_callback = None
+            cloud_service.print_job_handler.upload_token_callback = upload_token_callback
+            cloud_service.print_job_handler.upload_token_error_callback = upload_token_error_callback
+
+        # 请求上传凭证
+        success = cloud_service.websocket_client.request_upload_token(node_id, default_printer_id)
+        if not success:
+            return JSONResponse(status_code=500, content={"success": False, "message": "请求上传凭证失败"})
+
+        # 等待上传凭证响应（最多等待 10 秒）
+        # 增加超时时间以应对 WebSocket 重连场景（打印完成后可能断开重连需要约5秒）
+        try:
+            token_data = await asyncio.wait_for(upload_token_future, timeout=10.0)
+        except asyncio.TimeoutError:
+            return JSONResponse(status_code=504, content={"success": False, "message": "获取上传凭证超时"})
+        finally:
+            # 清除回调
+            if cloud_service.print_job_handler:
+                cloud_service.print_job_handler.upload_token_callback = None
+                cloud_service.print_job_handler.upload_token_error_callback = None
     
     # 检查是否是错误响应
     if not token_data.get("success"):
@@ -906,7 +964,8 @@ async def get_qr_code():
         if not path.startswith("/"):
             path = "/" + path
         upload_url = f"{upload_base}{path}"
-    
+
+    session = interactive_session_manager.start_session(upload_token=token_data["token"])
     qr_img_url = build_qr_data_url(upload_url)
 
     default_printer = _get_printer_by_id(default_printer_id)
@@ -922,7 +981,8 @@ async def get_qr_code():
         "token": token_data['token'],
         "expires_at": token_data['expires_at'],
         "default_printer_id": default_printer_id,
-        "default_printer_capabilities": default_printer_capabilities
+        "default_printer_capabilities": default_printer_capabilities,
+        "session_id": session["session_id"],
     }
 
 @app.get("/api/events")
@@ -966,6 +1026,7 @@ async def preview(request: Request):
         
         body = json.loads(body_bytes)
         
+        session_id = body.get("session_id")
         file_id = body.get("file_id")
         file_url = body.get("file_url")
         file_name = body.get("file_name")
@@ -977,6 +1038,8 @@ async def preview(request: Request):
         if not file_id or not file_url:
             print(f" [DEBUG] 参数验证失败")
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: file_id, file_url 必需"})
+        if session_id and not interactive_session_manager.matches(session_id, file_id):
+            return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
         if not printer_manager:
             print(f" [DEBUG] 打印机管理器未就绪")
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
@@ -1091,6 +1154,7 @@ async def submit_print(request: Request):
     """提交打印参数"""
     try:
         body = await request.json()
+        session_id = body.get("session_id")
         task_token = body.get("task_token")
         raw_options = body.get("options")
         options = _normalize_request_options(raw_options)
@@ -1102,12 +1166,16 @@ async def submit_print(request: Request):
             return JSONResponse(status_code=400, content={"success": False, "message": "参数错误: options 必须为对象"})
         if not printer_manager:
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
+        if not session_id or not interactive_session_manager.matches(session_id, file_id):
+            return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
         
         if cloud_service and cloud_service.websocket_client:
             printer_id = _ensure_default_printer()
             
             if not printer_id:
                  return JSONResponse(status_code=500, content={"success": False, "message": "未找到可用打印机"})
+            if not interactive_session_manager.mark_print_submitted(session_id, file_id):
+                return JSONResponse(status_code=409, content={"success": False, "message": "打印请求已提交，请勿重复点击"})
 
             # 发送参数到云端
             # 构造消息
@@ -1131,7 +1199,10 @@ async def submit_print(request: Request):
                 }
             }
             # 使用异步发送方法
-            await cloud_service.websocket_client.send_message(msg)
+            send_ok = await cloud_service.websocket_client.send_message(msg)
+            if not send_ok:
+                interactive_session_manager.revert_print_submission(session_id, file_id)
+                return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
             
             # 清理预览文件（打印时会重新下载，预览文件不再需要）
             file_mgr = get_file_manager()
@@ -1151,6 +1222,8 @@ async def submit_print(request: Request):
             return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
             
     except Exception as e:
+        if 'session_id' in locals() and 'file_id' in locals() and session_id and file_id:
+            interactive_session_manager.revert_print_submission(session_id, file_id)
         logger.error(f"提交打印参数失败: {e}")
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
 
@@ -1160,22 +1233,26 @@ async def cleanup_preview_file(request: Request):
     try:
         body = await request.json()
         file_id = body.get("file_id")
+        session_id = body.get("session_id")
         
-        if not file_id:
-            return JSONResponse(status_code=400, content={"success": False, "message": "file_id 不能为空"})
+        if not file_id and not session_id:
+            return JSONResponse(status_code=400, content={"success": False, "message": "file_id 或 session_id 不能为空"})
+        if session_id and not interactive_session_manager.clear_session(session_id):
+            return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
         
         # 通过文件管理器清理
-        file_mgr = get_file_manager()
-        if file_mgr:
-            file_mgr.cleanup_file(file_id, source="cancel")
+        if file_id:
+            file_mgr = get_file_manager()
+            if file_mgr:
+                file_mgr.cleanup_file(file_id, source="cancel")
         
-        # 清理内存缓存
-        preview_files.pop(file_id, None)
-        keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
-        for k in keys:
-            preview_cache.pop(k, None)
-        preview_page_cache.pop(file_id, None)
-        preview_page_meta.pop(file_id, None)
+            # 清理内存缓存
+            preview_files.pop(file_id, None)
+            keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
+            for k in keys:
+                preview_cache.pop(k, None)
+            preview_page_cache.pop(file_id, None)
+            preview_page_meta.pop(file_id, None)
         
         return {"success": True, "message": "文件已清理"}
         

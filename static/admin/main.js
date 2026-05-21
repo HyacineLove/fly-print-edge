@@ -16,6 +16,7 @@
     discovered: [],
     defaultPrinterId: "",
     loading: false,
+    pendingActions: new Set(),
   };
 
   function showError(message) {
@@ -48,6 +49,23 @@
     });
   }
 
+  function actionKey(action, value) {
+    return `${action}:${value}`;
+  }
+
+  function isActionPending(action, value) {
+    return state.pendingActions.has(actionKey(action, value));
+  }
+
+  function setActionPending(action, value, pending) {
+    const key = actionKey(action, value);
+    if (pending) {
+      state.pendingActions.add(key);
+    } else {
+      state.pendingActions.delete(key);
+    }
+  }
+
   function printerName(item) {
     return item.name || item.printer_name || item.display_name || "未命名打印机";
   }
@@ -70,6 +88,9 @@
         const id = item.id || "";
         const isDefault = id && id === state.defaultPrinterId;
         const status = item.enabled === false ? "已禁用" : "可用";
+        const pendingDefault = isActionPending("default", id);
+        const pendingDelete = isActionPending("delete", id);
+
         return `
           <tr>
             <td>
@@ -81,8 +102,12 @@
             <td>${status}</td>
             <td>
               <div class="ops">
-                <button type="button" class="btn" data-action="default" data-id="${id}" ${isDefault ? "disabled" : ""}>设为默认</button>
-                <button type="button" class="btn btn-danger" data-action="delete" data-id="${id}">删除</button>
+                <button type="button" class="btn" data-action="default" data-id="${id}" ${isDefault || pendingDefault ? "disabled" : ""}>
+                  ${pendingDefault ? "处理中..." : "设为默认"}
+                </button>
+                <button type="button" class="btn btn-danger" data-action="delete" data-id="${id}" ${pendingDelete ? "disabled" : ""}>
+                  ${pendingDelete ? "处理中..." : "删除"}
+                </button>
               </div>
             </td>
           </tr>
@@ -101,13 +126,17 @@
     el.discoveredTbody.innerHTML = state.discovered
       .map((item, index) => {
         const type = item.is_network ? "网络打印机" : "本地打印机";
+        const pendingAdd = isActionPending("add", index);
+
         return `
           <tr>
             <td>${printerName(item)}</td>
             <td class="muted">${item.type || type}</td>
             <td class="muted">${printerAddr(item)}</td>
             <td>
-              <button type="button" class="btn btn-primary" data-action="add" data-index="${index}">添加</button>
+              <button type="button" class="btn btn-primary" data-action="add" data-index="${index}" ${pendingAdd ? "disabled" : ""}>
+                ${pendingAdd ? "处理中..." : "添加"}
+              </button>
             </td>
           </tr>
         `;
@@ -176,8 +205,11 @@
   }
 
   async function setDefaultPrinter(printerId) {
-    if (!printerId) return;
+    if (!printerId || isActionPending("default", printerId)) return;
     showError("");
+    setActionPending("default", printerId, true);
+    renderManaged();
+
     try {
       await request("/printers/default", {
         method: "POST",
@@ -186,27 +218,39 @@
       await loadManaged();
     } catch (err) {
       showError(err.message || "设置默认打印机失败");
+    } finally {
+      setActionPending("default", printerId, false);
+      renderManaged();
     }
   }
 
   async function deletePrinter(printerId) {
-    if (!printerId) return;
+    if (!printerId || isActionPending("delete", printerId)) return;
     if (!window.confirm("确认删除该打印机吗？")) return;
 
     showError("");
+    setActionPending("delete", printerId, true);
+    renderManaged();
+
     try {
       await request(`/printers/${encodeURIComponent(printerId)}`, { method: "DELETE" });
       await Promise.all([loadManaged(), loadDiscovered()]);
     } catch (err) {
       showError(err.message || "删除打印机失败");
+    } finally {
+      setActionPending("delete", printerId, false);
+      renderManaged();
     }
   }
 
   async function addPrinterByIndex(index) {
     const item = state.discovered[index];
-    if (!item) return;
+    if (!item || isActionPending("add", index)) return;
 
     showError("");
+    setActionPending("add", index, true);
+    renderDiscovered();
+
     try {
       await request("/printers/add", {
         method: "POST",
@@ -215,16 +259,19 @@
       await Promise.all([loadManaged(), loadDiscovered()]);
     } catch (err) {
       showError(err.message || "添加打印机失败");
+    } finally {
+      setActionPending("add", index, false);
+      renderDiscovered();
     }
   }
 
   function bindEvents() {
     el.refreshAllBtn?.addEventListener("click", loadAll);
     el.refreshManagedBtn?.addEventListener("click", () => {
-      loadManaged().catch((err) => showError(err.message || "刷新已管理失败"));
+      loadManaged().catch((err) => showError(err.message || "刷新已管理列表失败"));
     });
     el.refreshDiscoveredBtn?.addEventListener("click", () => {
-      loadDiscovered().catch((err) => showError(err.message || "刷新可添加失败"));
+      loadDiscovered().catch((err) => showError(err.message || "刷新可添加列表失败"));
     });
 
     el.managedTbody?.addEventListener("click", (event) => {
