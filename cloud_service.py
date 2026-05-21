@@ -14,141 +14,222 @@ from edge_node_info import EdgeNodeInfo
 
 
 class CloudService:
-    """云端服务管理器"""
-    
+    """Cloud service coordinator."""
+
     def __init__(self, config: Dict[str, Any], printer_manager=None):
-        self.config = config
+        self.config = dict(config or {})
         self.printer_manager = printer_manager
-        self.enabled = config.get("enabled", False)
-        
-        # 初始化各个组件
+
         self.auth_client = None
         self.api_client = None
         self.websocket_client = None
         self.heartbeat_service = None
         self.print_job_handler = None
         self.status_reporter = None
-        
-        # 状态跟踪
-        # 如果配置中已经缓存了 node_id，则认为节点已经注册过，避免重复注册
-        self.node_id = config.get("node_id")
+        self.last_error: Optional[str] = None
+
+        self.node_id = self.config.get("node_id")
         self.registered = bool(self.node_id)
-        
-        if self.enabled:
-            self._initialize_components()
-    
+
+    def _cloud_config_ready(self) -> tuple[bool, list[str]]:
+        required_fields = ("base_url", "auth_url", "client_id", "client_secret")
+        missing = [field for field in required_fields if not str(self.config.get(field) or "").strip()]
+        return not missing, missing
+
     def _initialize_components(self):
-        """初始化云端服务组件"""
+        """Initialize cloud clients from the current configuration."""
+        ready, missing_fields = self._cloud_config_ready()
+        if not ready:
+            self.last_error = f"missing cloud config: {', '.join(missing_fields)}"
+            self.auth_client = None
+            self.api_client = None
+            self.websocket_client = None
+            self.heartbeat_service = None
+            self.print_job_handler = None
+            self.status_reporter = None
+            return {"success": False, "message": self.last_error}
+
         try:
-            print(" [DEBUG] 初始化云端服务组件...")
-            
-            # 初始化认证客户端
+            print(" [DEBUG] Initializing cloud service components...")
             self.auth_client = CloudAuthClient(
                 auth_url=self.config["auth_url"],
                 client_id=self.config["client_id"],
-                client_secret=self.config["client_secret"]
+                client_secret=self.config["client_secret"],
             )
-            
-            # 初始化API客户端
             self.api_client = CloudAPIClient(
                 base_url=self.config["base_url"],
-                auth_client=self.auth_client
+                auth_client=self.auth_client,
             )
-            # 如果本地已缓存 node_id，则同步到 API 客户端，避免重复注册
             if self.node_id:
                 self.api_client.node_id = self.node_id
-            
-            # 心跳服务稍后初始化（需要等待WebSocket和node_id）
+
             self.heartbeat_interval = self.config.get("heartbeat_interval", 30)
-            
-            # 初始化打印任务处理器
+
             if self.printer_manager:
                 self.print_job_handler = PrintJobHandler(
                     printer_manager=self.printer_manager,
                     api_client=self.api_client,
                     websocket_client=self.websocket_client,
                     auth_client=self.auth_client,
-                    node_id=self.node_id
-                )
-            
-            print(" [DEBUG] 云端服务组件初始化完成")
-            
-        except Exception as e:
-            print(f" [DEBUG] 云端服务组件初始化失败: {e}")
-            self.enabled = False
-    
-    def start(self) -> Dict[str, Any]:
-        """启动云端服务"""
-        # 允许 auto_register=True 时自动启用云服务
-        if not self.enabled and self.config.get("auto_register", False):
-             print(" [DEBUG] 检测到自动注册配置，尝试启动云端服务...")
-             self.enabled = True
-             self._initialize_components()
-             
-        if not self.enabled:
-            return {"success": False, "message": "云端服务未启用"}
-        
-        try:
-            print(" [DEBUG] 启动云端服务...")
-            
-            # 1. 如果启用自动注册，且本地尚未有 node_id，则注册边缘节点
-            if self.config.get("auto_register", True) and not self.registered:
-                register_result = self._register_node()
-                if not register_result["success"]:
-                    return register_result
-            
-            # 2. 启动WebSocket客户端（心跳服务需要它）
-            self._start_websocket()
-            
-            # 3. 初始化并启动心跳服务（需要WebSocket和node_id）
-            if self.websocket_client and self.node_id:
-                self.heartbeat_service = HeartbeatService(
-                    websocket_client=self.websocket_client,
                     node_id=self.node_id,
-                    interval=self.heartbeat_interval,
-                    base_url=self.config.get("base_url")
                 )
-                self.heartbeat_service.start()
-                print(" [DEBUG] 心跳服务已启动 (WebSocket模式)")
-            else:
-                print(" [WARNING] WebSocket未就绪，跳过心跳服务启动")
-            
-            # 4. 启动时不再自动注册打印机，注册逻辑由管理端显式触发
-            
-            # 5. 启动状态上报服务
+
+            self.last_error = None
+            return {"success": True}
+        except Exception as exc:
+            print(f" [DEBUG] Cloud service init failed: {exc}")
+            self.last_error = str(exc)
+            return {"success": False, "message": str(exc)}
+
+    def start(self) -> Dict[str, Any]:
+        """Bring the cloud runtime online for the current node state."""
+        try:
+            print(" [DEBUG] Starting cloud service...")
+
+            if not self.auth_client or not self.api_client or not self.print_job_handler:
+                init_result = self._initialize_components()
+                if not init_result.get("success"):
+                    return init_result
+
+            if not self.registered or not self.node_id:
+                self.last_error = "node registration required"
+                return {
+                    "success": True,
+                    "message": "cloud configured, waiting for manual node registration",
+                    "node_id": None,
+                    "registered": False,
+                    "connected": False,
+                }
+
+            self._start_websocket()
+
             if self.websocket_client and self.node_id:
-                self.status_reporter = PrinterStatusReporter(
-                    self.websocket_client, self.printer_manager, self.node_id, self.api_client
-                )
-                self.status_reporter.start()
-                # 将status_reporter传递给PrintJobHandler
-                if self.print_job_handler:
-                    self.print_job_handler.status_reporter = self.status_reporter
-                print(" [DEBUG] 打印机状态上报服务已启动")
-            
-            print(" [DEBUG] 云端服务启动成功")
-            return {"success": True, "message": "云端服务启动成功", "node_id": self.node_id}
-            
-        except Exception as e:
-            print(f" [DEBUG] 云端服务启动失败: {e}")
-            return {"success": False, "message": str(e)}
-    
+                if (
+                    not self.heartbeat_service
+                    or not self.heartbeat_service.running
+                    or self.heartbeat_service.websocket_client is not self.websocket_client
+                ):
+                    if self.heartbeat_service and self.heartbeat_service.running:
+                        self.heartbeat_service.stop()
+                    self.heartbeat_service = HeartbeatService(
+                        websocket_client=self.websocket_client,
+                        node_id=self.node_id,
+                        interval=self.heartbeat_interval,
+                        base_url=self.config.get("base_url"),
+                    )
+                    self.heartbeat_service.start()
+                    print(" [DEBUG] Heartbeat service started (WebSocket mode)")
+            else:
+                print(" [WARNING] WebSocket unavailable, skipping heartbeat startup")
+
+            if self.websocket_client and self.node_id:
+                if (
+                    not self.status_reporter
+                    or not self.status_reporter.running
+                    or self.status_reporter.websocket_client is not self.websocket_client
+                ):
+                    if self.status_reporter and self.status_reporter.running:
+                        self.status_reporter.stop()
+                    self.status_reporter = PrinterStatusReporter(
+                        self.websocket_client, self.printer_manager, self.node_id, self.api_client
+                    )
+                    self.status_reporter.start()
+                    if self.print_job_handler:
+                        self.print_job_handler.status_reporter = self.status_reporter
+                    print(" [DEBUG] Printer status reporter started")
+
+            self.last_error = None
+            return {
+                "success": True,
+                "message": "cloud service started",
+                "node_id": self.node_id,
+                "registered": True,
+                "connected": bool(self.websocket_client and self.websocket_client.connected),
+            }
+        except Exception as exc:
+            print(f" [DEBUG] Cloud service start failed: {exc}")
+            self.last_error = str(exc)
+            return {"success": False, "message": str(exc)}
+
     def stop(self):
-        """停止云端服务"""
-        print(" [DEBUG] 停止云端服务...")
-        
-        if self.websocket_client:
-            self.websocket_client.stop()
-        
+        """Stop active cloud runtime components."""
+        print(" [DEBUG] Stopping cloud service...")
+
         if self.heartbeat_service:
             self.heartbeat_service.stop()
-        
+            self.heartbeat_service = None
+
         if self.status_reporter:
             self.status_reporter.stop()
-        
-        self.registered = False
-        print(" [DEBUG] 云端服务已停止")
-    
+            self.status_reporter = None
+
+        if self.websocket_client:
+            self.websocket_client.stop()
+
+        self.websocket_client = None
+        self.registered = bool(self.node_id)
+
+    def reconfigure(self, new_config: Dict[str, Any], preserve_node_id: bool = True) -> Dict[str, Any]:
+        """Rebuild the runtime with updated cloud config."""
+        old_node_id = self.node_id
+
+        self.stop()
+        self.config = dict(new_config or {})
+
+        if preserve_node_id and old_node_id:
+            self.config["node_id"] = old_node_id
+            self.node_id = old_node_id
+        else:
+            self.node_id = self.config.get("node_id")
+        self.registered = bool(self.node_id)
+
+        self.auth_client = None
+        self.api_client = None
+        self.websocket_client = None
+        self.heartbeat_service = None
+        self.print_job_handler = None
+        self.status_reporter = None
+
+        init_result = self._initialize_components()
+        if not init_result.get("success"):
+            return {"success": False, "message": init_result.get("message"), "node_id": self.node_id}
+
+        result = self.start()
+        if result.get("success") and self.printer_manager and hasattr(self.printer_manager, "config"):
+            cloud_cfg = self.printer_manager.config.config.get("cloud", {})
+            cloud_cfg.update(self.config)
+            if self.node_id:
+                cloud_cfg["node_id"] = self.node_id
+            self.printer_manager.config.save_config()
+        return result
+
+    def ensure_registered(self, force_reregister: bool = False) -> Dict[str, Any]:
+        init_result = self._initialize_components()
+        if not init_result.get("success"):
+            return init_result
+
+        if force_reregister:
+            self.node_id = None
+            self.registered = False
+            self.config.pop("node_id", None)
+
+        if not self.registered or not self.node_id:
+            register_result = self._register_node()
+            if not register_result.get("success"):
+                return register_result
+
+        start_result = self.start()
+        if not start_result.get("success"):
+            return start_result
+
+        return {
+            "success": True,
+            "message": "cloud checked and node ready",
+            "node_id": self.node_id,
+            "registered": True,
+            "connected": bool(self.websocket_client and self.websocket_client.connected),
+        }
+
     def _register_node(self) -> Dict[str, Any]:
         """注册边缘节点"""
         try:
@@ -279,6 +360,10 @@ class CloudService:
             if not self.registered:
                 print(" [DEBUG] 节点未注册，跳过WebSocket连接")
                 return
+
+            if self.websocket_client and self.websocket_client.running:
+                print(" [DEBUG] WebSocket client already running, reuse existing connection")
+                return
             
             print(" [DEBUG] 启动WebSocket客户端...")
             
@@ -315,7 +400,6 @@ class CloudService:
             if hasattr(self, 'pending_listeners'):
                 for msg_type, handler in self.pending_listeners:
                     self.websocket_client.add_message_handler(msg_type, handler)
-                self.pending_listeners = []
             
             print(" [DEBUG] WebSocket客户端启动成功")
             
@@ -325,15 +409,18 @@ class CloudService:
     def add_message_listener(self, message_type: str, handler):
         """添加消息监听器"""
         print(f" [DEBUG] CloudService添加消息监听器: {message_type}")
+        if not hasattr(self, 'pending_listeners'):
+            self.pending_listeners = []
+
+        listener = (message_type, handler)
+        if listener not in self.pending_listeners:
+            self.pending_listeners.append(listener)
+
         if self.websocket_client:
             print(f"  ↳ 直接添加到WebSocket客户端")
             self.websocket_client.add_message_handler(message_type, handler)
         else:
-            # 如果WebSocket未初始化，先保存
             print(f"  ↳ WebSocket未就绪，加入待处理列表")
-            if not hasattr(self, 'pending_listeners'):
-                self.pending_listeners = []
-            self.pending_listeners.append((message_type, handler))
 
     def submit_print_params(self, file_id: str, printer_id: str, options: Dict[str, Any]):
         """提交打印参数
@@ -349,27 +436,30 @@ class CloudService:
             print(" [DEBUG] WebSocket未连接或节点未注册，无法提交打印参数")
 
     def get_status(self) -> Dict[str, Any]:
-        """获取云端服务状态"""
+        """Return current cloud runtime state."""
+        configured, missing_fields = self._cloud_config_ready()
         status = {
-            "enabled": self.enabled,
+            "configured": configured,
+            "missing_fields": missing_fields,
             "registered": self.registered,
             "node_id": self.node_id,
             "heartbeat": None,
-            "websocket": None
+            "websocket": None,
+            "last_error": self.last_error,
         }
-        
+
         if self.heartbeat_service:
             status["heartbeat"] = self.heartbeat_service.get_status()
-        
+
         if self.websocket_client:
             status["websocket"] = {
                 "running": self.websocket_client.running,
-                "connected": self.websocket_client.connected,  # 使用真实连接状态
-                "url": self.websocket_client.websocket_url
+                "connected": self.websocket_client.connected,
+                "url": self.websocket_client.websocket_url,
             }
-        
+
         return status
-    
+
     def force_heartbeat(self) -> Dict[str, Any]:
         """强制发送心跳"""
         if not self.heartbeat_service:

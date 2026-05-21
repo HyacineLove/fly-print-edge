@@ -6,6 +6,7 @@
 import json
 import uuid
 import os
+from copy import deepcopy
 from datetime import datetime
 from typing import List, Dict
 
@@ -21,7 +22,7 @@ class PrinterConfig:
         """加载配置文件"""
         try:
             print(f" [DEBUG] 加载配置文件: {self.config_file}")
-            with open(self.config_file, 'r', encoding='utf-8') as f:
+            with open(self.config_file, 'r', encoding='utf-8-sig') as f:
                 config = json.load(f)
                 if "default_printer_id" not in config:
                     config["default_printer_id"] = None
@@ -42,6 +43,9 @@ class PrinterConfig:
                 elif "discovery_mode" not in config["printers"]:
                     config["printers"]["discovery_mode"] = "auto"
                     config["printers"]["static_list"] = []
+                if "cloud" in config:
+                    config["cloud"].pop("enabled", None)
+                    config["cloud"].pop("auto_register", None)
 
                 # (已移除环境变量读取逻辑，完全依赖 config.json)
                 
@@ -72,15 +76,13 @@ class PrinterConfig:
                     "static_list": []
                 },
                 "cloud": {
-                    "enabled": False,
                     "base_url": "",
                     "auth_url": "",
                     "client_id": "fly-print-edge",
                     "client_secret": "",
                     "node_name": "",
                     "location": "",
-                    "heartbeat_interval": 30,
-                    "auto_register": True
+                    "heartbeat_interval": 30
                 },
                 "default_printer_id": None
             }
@@ -95,6 +97,13 @@ class PrinterConfig:
         with open(self.config_file, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
         print(f" [DEBUG] 配置文件保存成功")
+
+    def get_full_config(self) -> Dict:
+        return deepcopy(self.config)
+
+    def replace_full_config(self, new_config: Dict):
+        self.config = deepcopy(new_config)
+        self.save_config()
     
     def add_printer(self, printer_info: Dict):
         """添加打印机到管理列表"""
