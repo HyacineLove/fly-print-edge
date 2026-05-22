@@ -27,6 +27,7 @@ class CloudService:
         self.print_job_handler = None
         self.status_reporter = None
         self.last_error: Optional[str] = None
+        self.node_missing_remote = False
 
         self.node_id = self.config.get("node_id")
         self.registered = bool(self.node_id)
@@ -35,6 +36,50 @@ class CloudService:
         required_fields = ("base_url", "auth_url", "client_id", "client_secret")
         missing = [field for field in required_fields if not str(self.config.get(field) or "").strip()]
         return not missing, missing
+
+    def has_stale_node_registration(self) -> bool:
+        return self.node_missing_remote
+
+    def _persist_node_id(self):
+        if self.printer_manager and hasattr(self.printer_manager, "config"):
+            cloud_cfg = self.printer_manager.config.config.get("cloud", {})
+            if self.node_id:
+                cloud_cfg["node_id"] = self.node_id
+            else:
+                cloud_cfg.pop("node_id", None)
+            self.printer_manager.config.save_config()
+
+    def _mark_remote_node_missing(self, detail: str):
+        stale_node_id = self.node_id
+        if not stale_node_id and self.node_missing_remote:
+            return
+
+        self.node_missing_remote = True
+        self.last_error = f"remote node missing: {detail}"
+        self.node_id = None
+        self.registered = False
+        self.config.pop("node_id", None)
+
+        if self.api_client:
+            self.api_client.node_id = None
+        if self.print_job_handler:
+            self.print_job_handler.node_id = None
+        if self.heartbeat_service:
+            self.heartbeat_service.stop()
+            self.heartbeat_service = None
+        if self.status_reporter:
+            self.status_reporter.stop()
+            self.status_reporter = None
+        if self.websocket_client:
+            self.websocket_client.running = False
+            self.websocket_client.connected = False
+
+        try:
+            self._persist_node_id()
+        except Exception as exc:
+            print(f" [DEBUG] 清理失效 node_id 失败: {exc}")
+
+        print(f" [WARNING] 云端节点不存在，已清理本地 node_id: {stale_node_id}")
 
     def _initialize_components(self):
         """Initialize cloud clients from the current configuration."""
@@ -131,7 +176,11 @@ class CloudService:
                     if self.status_reporter and self.status_reporter.running:
                         self.status_reporter.stop()
                     self.status_reporter = PrinterStatusReporter(
-                        self.websocket_client, self.printer_manager, self.node_id, self.api_client
+                        self.websocket_client,
+                        self.printer_manager,
+                        self.node_id,
+                        self.api_client,
+                        node_missing_handler=self._mark_remote_node_missing,
                     )
                     self.status_reporter.start()
                     if self.print_job_handler:
@@ -181,6 +230,8 @@ class CloudService:
             self.node_id = old_node_id
         else:
             self.node_id = self.config.get("node_id")
+            if not self.node_id:
+                self.node_missing_remote = False
         self.registered = bool(self.node_id)
 
         self.auth_client = None
@@ -211,6 +262,7 @@ class CloudService:
         if force_reregister:
             self.node_id = None
             self.registered = False
+            self.node_missing_remote = False
             self.config.pop("node_id", None)
 
         if not self.registered or not self.node_id:
@@ -243,14 +295,12 @@ class CloudService:
             if result["success"]:
                 self.registered = True
                 self.node_id = result["node_id"]
+                self.node_missing_remote = False
                 
                 # 将 node_id 缓存到配置，避免重复注册
                 try:
                     self.config["node_id"] = self.node_id
-                    if self.printer_manager and hasattr(self.printer_manager, "config"):
-                        cloud_cfg = self.printer_manager.config.config.get("cloud", {})
-                        cloud_cfg["node_id"] = self.node_id
-                        self.printer_manager.config.save_config()
+                    self._persist_node_id()
                 except Exception as e:
                     print(f" [DEBUG] 缓存 node_id 到配置失败: {e}")
                 
@@ -374,7 +424,11 @@ class CloudService:
                 return
             
             # 初始化WebSocket客户端
-            self.websocket_client = CloudWebSocketClient(ws_url, self.auth_client)
+            self.websocket_client = CloudWebSocketClient(
+                ws_url,
+                self.auth_client,
+                node_missing_handler=self._mark_remote_node_missing,
+            )
             
             # 注册核心业务处理器（由 PrintJobHandler 处理云端下行指令）
             if self.print_job_handler:
@@ -443,6 +497,7 @@ class CloudService:
             "missing_fields": missing_fields,
             "registered": self.registered,
             "node_id": self.node_id,
+            "node_missing_remote": self.node_missing_remote,
             "heartbeat": None,
             "websocket": None,
             "last_error": self.last_error,
@@ -456,6 +511,8 @@ class CloudService:
                 "running": self.websocket_client.running,
                 "connected": self.websocket_client.connected,
                 "url": self.websocket_client.websocket_url,
+                "last_http_status": self.websocket_client.last_http_status,
+                "last_error_message": self.websocket_client.last_error_message,
             }
 
         return status
@@ -587,15 +644,27 @@ class CloudService:
 class PrinterStatusReporter:
     """打印机状态上报器 - 使用批量HTTP接口上报"""
     
-    def __init__(self, websocket_client, printer_manager, node_id, api_client=None):
+    def __init__(self, websocket_client, printer_manager, node_id, api_client=None, node_missing_handler=None):
         self.websocket_client = websocket_client
         self.printer_manager = printer_manager
         self.node_id = node_id
         self.api_client = api_client  # 用于批量HTTP上报
+        self.node_missing_handler = node_missing_handler
         self.last_status = {}  # 缓存上次状态
         self.running = False
         self.thread = None
         self.check_interval = 30  # 30秒检查一次
+
+    def _is_remote_node_missing_error(self, error_text: Any) -> bool:
+        text = str(error_text or "")
+        return "Edge Node 不存在" in text or "Edge node not found" in text or "node_not_found" in text
+
+    def _notify_node_missing(self, error_text: Any):
+        if self.node_missing_handler:
+            try:
+                self.node_missing_handler(str(error_text or "printer status report node not found"))
+            except Exception as e:
+                print(f" [ERROR] 节点缺失回调异常: {e}")
     
     def start(self):
         """启动状态上报服务"""
@@ -665,6 +734,8 @@ class PrinterStatusReporter:
                 }
                 print(f" [DEBUG] 立即上报打印机状态成功: {p_name} ({cloud_status})")
             else:
+                if self._is_remote_node_missing_error(result.get("error")):
+                    self._notify_node_missing(result.get("error"))
                 print(f" [WARNING] 立即上报打印机状态失败: {result.get('error')}")
                 
         except Exception as e:
@@ -730,6 +801,8 @@ class PrinterStatusReporter:
                         }
                     print(f" [DEBUG] 批量状态上报成功: {len(printers_to_report)} 个打印机")
                 else:
+                    if self._is_remote_node_missing_error(result.get("error")):
+                        self._notify_node_missing(result.get("error"))
                     print(f" [WARNING] 批量状态上报失败: {result.get('error')}")
                     
         except Exception as e:

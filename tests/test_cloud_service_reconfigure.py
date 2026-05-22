@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,6 +78,52 @@ class CloudServiceReconfigureTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         mocked_register.assert_called_once()
+
+    def test_mark_remote_node_missing_clears_stale_registration(self):
+        printer_config = Mock()
+        printer_config.config = {
+            "cloud": {"node_id": "node-123"},
+            "managed_printers": [],
+        }
+        printer_manager = Mock()
+        printer_manager.config = printer_config
+
+        service = CloudService(
+            {
+                "base_url": "http://old",
+                "auth_url": "http://old/auth",
+                "client_id": "edge",
+                "client_secret": "secret",
+                "node_id": "node-123",
+            },
+            printer_manager=printer_manager,
+        )
+        service.api_client = Mock()
+        service.api_client.node_id = "node-123"
+        service.print_job_handler = Mock()
+        service.print_job_handler.node_id = "node-123"
+        heartbeat_service = Mock()
+        status_reporter = Mock()
+        websocket_client = Mock()
+        websocket_client.running = True
+        websocket_client.connected = True
+        service.heartbeat_service = heartbeat_service
+        service.status_reporter = status_reporter
+        service.websocket_client = websocket_client
+
+        service._mark_remote_node_missing("websocket handshake returned 404")
+
+        self.assertTrue(service.has_stale_node_registration())
+        self.assertIsNone(service.node_id)
+        self.assertFalse(service.registered)
+        self.assertNotIn("node_id", service.config)
+        self.assertNotIn("node_id", printer_config.config["cloud"])
+        self.assertIsNone(service.api_client.node_id)
+        self.assertIsNone(service.print_job_handler.node_id)
+        heartbeat_service.stop.assert_called_once()
+        status_reporter.stop.assert_called_once()
+        self.assertFalse(websocket_client.running)
+        self.assertFalse(websocket_client.connected)
 
 
 if __name__ == "__main__":

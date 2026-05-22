@@ -17,15 +17,19 @@ from cloud_auth import CloudAuthClient
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
     
-    def __init__(self, websocket_url: str, auth_client: CloudAuthClient):
+    def __init__(self, websocket_url: str, auth_client: CloudAuthClient, node_missing_handler: Optional[Callable[[str], None]] = None):
         self.websocket_url = websocket_url
         self.auth_client = auth_client
+        self.node_missing_handler = node_missing_handler
         self.websocket = None
         self.running = False
         self.connected = False  # 实际连接状态（握手成功才为True）
         self.thread = None
         self.loop = None  # 存储WebSocket线程的事件循环
         self.message_handlers = {}  # type: Dict[str, List[Callable]]
+        self.last_http_status = None
+        self.last_error_message = None
+        self.node_missing = False
         self.reconnect_interval = 5  # 重连间隔秒数
         
         # 任务去重缓存：记录已完成的任务ID及完成时间戳
@@ -83,6 +87,27 @@ class CloudWebSocketClient:
         self.websocket = None
         print(" [INFO] WebSocket客户端已停止")
     
+    def _extract_http_status(self, exc: Exception) -> Optional[int]:
+        status = getattr(exc, "status_code", None)
+        if status is not None:
+            return int(status)
+        response = getattr(exc, "response", None)
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if response_status is not None:
+                return int(response_status)
+        return None
+
+    def _notify_node_missing(self, detail: str):
+        if self.node_missing:
+            return
+        self.node_missing = True
+        if self.node_missing_handler:
+            try:
+                self.node_missing_handler(detail)
+            except Exception as e:
+                print(f" [ERROR] 鑺傜偣澶辫仈鍥炶皟寮傚父: {e}")
+
     def _start_cleanup_task(self):
         """启动定期清理过期任务记录的后台线程"""
         def cleanup_loop():
@@ -158,6 +183,9 @@ class CloudWebSocketClient:
                 ) as websocket:
                     self.websocket = websocket
                     self.connected = True  # 握手成功
+                    self.last_http_status = None
+                    self.last_error_message = None
+                    self.node_missing = False
                     print(" [INFO] WebSocket连接成功")
                     
                     # 监听消息
@@ -172,10 +200,15 @@ class CloudWebSocketClient:
             except websockets.exceptions.ConnectionClosed as e:
                 self.connected = False
                 self.websocket = None
+                self.last_error_message = str(e)
                 print(f" [WARNING] WebSocket连接关闭: {e}")
             except Exception as e:
                 self.connected = False
                 self.websocket = None
+                self.last_http_status = self._extract_http_status(e)
+                self.last_error_message = str(e)
+                if self.last_http_status == 404:
+                    self._notify_node_missing("websocket handshake returned 404")
                 print(f" [ERROR] WebSocket连接异常: {e}")
             
             if self.running:
