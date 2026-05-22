@@ -8,6 +8,7 @@ import time
 import threading
 from typing import List, Dict, Any
 import pandas as pd
+from file_manager import get_file_manager
 
 # 导入拆分的模块
 from printer_config import PrinterConfig
@@ -464,7 +465,7 @@ class PrinterManager:
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    def submit_print_job_with_cleanup(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None, cleanup_source: str = "unknown", printer_id: str = None) -> Dict[str, Any]:
+    def submit_print_job_with_cleanup(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None, cleanup_source: str = "unknown", printer_id: str = None, artifact_key: str = None) -> Dict[str, Any]:
         """提交打印任务并智能清理临时文件（统一入口）"""
         import threading
         import time
@@ -480,19 +481,18 @@ class PrinterManager:
             
             # 获取可能的转换文件路径（如docx转pdf）
             converted_file = result.get("converted_file")
+            cleanup_key = artifact_key or job_name
+            file_mgr = get_file_manager()
+            if converted_file and file_mgr and cleanup_key:
+                file_mgr.update_print_artifact(cleanup_key, converted_file)
             
             # 智能清理临时文件
             def smart_cleanup():
                 try:
                     # 如果提交失败，立即清理
                     if not result.get("success", False):
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                            print(f" [{cleanup_source}] 打印失败，立即清理临时文件: {file_path}")
-                        # 同时清理转换后的文件
-                        if converted_file and os.path.exists(converted_file):
-                            os.remove(converted_file)
-                            print(f" [{cleanup_source}] 打印失败，清理转换文件: {converted_file}")
+                        if file_mgr and cleanup_key:
+                            file_mgr.release_print_artifact(cleanup_key, reason=f"{cleanup_source}:submit_failed")
                         return
                     
                     # 如果有job_id，监控任务状态
@@ -503,18 +503,8 @@ class PrinterManager:
                         if cleanup_source == "云端WebSocket":
                             print(f"ℹ [{cleanup_source}] 延迟清理（任务监控由外部负责）")
                             time.sleep(180)  # 延迟3分钟清理（足够打印完成）
-                            if os.path.exists(file_path):
-                                try:
-                                    os.remove(file_path)
-                                    print(f" [{cleanup_source}] 延迟清理完成: {file_path}")
-                                except Exception as e:
-                                    print(f" 清理文件失败: {e}")
-                            if converted_file and os.path.exists(converted_file):
-                                try:
-                                    os.remove(converted_file)
-                                    print(f" [{cleanup_source}] 延迟清理转换文件: {converted_file}")
-                                except Exception as e:
-                                    print(f" 清理转换文件失败: {e}")
+                            if file_mgr and cleanup_key:
+                                file_mgr.release_print_artifact(cleanup_key, reason=f"{cleanup_source}:delayed")
                             return
                         
                         # 本地打印任务，进行监控
@@ -528,24 +518,9 @@ class PrinterManager:
                             if not job_status.get("exists", False):
                                 # 任务不再存在（已完成或取消）
                                 print(f" [{cleanup_source}] 打印任务已结束，清理文件")
-                                if os.path.exists(file_path):
-                                    try:
-                                        # 增加一点延迟确保文件句柄释放
-                                        time.sleep(2)
-                                        os.remove(file_path)
-                                    except Exception as e:
-                                        print(f" 清理文件失败 (重试中): {e}")
-                                        time.sleep(5)
-                                        if os.path.exists(file_path):
-                                            os.remove(file_path)
-                                # 同时清理转换后的文件
-                                if converted_file and os.path.exists(converted_file):
-                                    try:
-                                        time.sleep(1)
-                                        os.remove(converted_file)
-                                        print(f" [{cleanup_source}] 清理转换文件: {converted_file}")
-                                    except Exception as e:
-                                        print(f" 清理转换文件失败: {e}")
+                                time.sleep(2)
+                                if file_mgr and cleanup_key:
+                                    file_mgr.release_print_artifact(cleanup_key, reason=f"{cleanup_source}:job_finished")
                                 return
                             
                             time.sleep(check_interval)
@@ -554,22 +529,9 @@ class PrinterManager:
                         print(f" [{cleanup_source}] 打印任务超时未结束，强制清理")
                     
                     # 兜底清理
-                    if os.path.exists(file_path):
-                        try:
-                            time.sleep(10)  # 简单延迟
-                            os.remove(file_path)
-                            print(f" [{cleanup_source}] 延迟清理完成: {file_path}")
-                        except Exception as e:
-                            print(f" [{cleanup_source}] 清理文件失败: {e}")
-                    
-                    # 同时清理转换后的文件
-                    if converted_file and os.path.exists(converted_file):
-                        try:
-                            time.sleep(1)  # 短暂延迟
-                            os.remove(converted_file)
-                            print(f" [{cleanup_source}] 延迟清理转换文件: {converted_file}")
-                        except Exception as e:
-                            print(f" [{cleanup_source}] 清理转换文件失败: {e}")
+                    time.sleep(10)  # 简单延迟
+                    if file_mgr and cleanup_key:
+                        file_mgr.release_print_artifact(cleanup_key, reason=f"{cleanup_source}:fallback")
                             
                 except Exception as e:
                     print(f" [{cleanup_source}] 智能清理过程出错: {e}")

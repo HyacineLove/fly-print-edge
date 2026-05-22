@@ -63,10 +63,8 @@ sse_clients: list[asyncio.Queue] = []
 node_id: Optional[str] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 preview_cache: Dict[str, Dict[str, Any]] = {}
-preview_files: Dict[str, Dict[str, str]] = {}
 preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
 preview_page_meta: Dict[str, Dict[str, int]] = {}
-file_access_tokens: Dict[str, Dict[str, str]] = {}  # 文件访问 token 缓存
 interactive_session_manager = InteractiveSessionManager()
 qr_code_request_lock: Optional[asyncio.Lock] = None
 config_service: Optional[ConfigService] = None
@@ -103,7 +101,13 @@ async def startup_event():
     config_service = ConfigService(printer_manager.config)
     
     # 初始化文件管理器（传入 preview_cache 引用用于自动清理）
-    file_mgr = init_file_manager(cleanup_interval=300, file_ttl=1800, preview_cache=preview_cache)
+    file_mgr = init_file_manager(
+        cleanup_interval=300,
+        file_ttl=1800,
+        preview_cache=preview_cache,
+        preview_page_cache=preview_page_cache,
+        preview_page_meta=preview_page_meta,
+    )
     # 清理 portable temp 目录中的遗留文件
     cleanup_temp_dir(max_age_hours=24)
     file_mgr.start()
@@ -453,34 +457,27 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
         headers = cloud_service.auth_client.get_auth_headers() if cloud_service and cloud_service.auth_client else {}
         
         # 尝试使用文件访问 token（优先级更高）
-        global file_access_tokens
+        file_mgr = get_file_manager()
         download_url = None
-        if file_id and file_id in file_access_tokens:
-            token_info = file_access_tokens[file_id]
-            file_access_token = token_info.get('token')
-            if file_access_token:
-                # 使用文件访问 token 作为 URL query 参数（云端要求）
-                from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-                full_url = _build_file_url(file_url)
-                parsed = urlparse(full_url)
-                query_params = parse_qs(parsed.query)
-                query_params['token'] = [file_access_token]
-                new_query = urlencode(query_params, doseq=True)
-                download_url = urlunparse((
-                    parsed.scheme, parsed.netloc, parsed.path,
-                    parsed.params, new_query, parsed.fragment
-                ))
-                print(f" [INFO] 使用文件访问 token: {file_access_token[:20]}...")
-                print(f" [INFO] 带token的URL: {download_url[:100]}...")
-                # 使用后删除 token（一次性）
-                del file_access_tokens[file_id]
-                print(f" [DEBUG] 已从全局字典删除 token")
-                # 不需要 Bearer token
-                headers.pop('Authorization', None)
-            else:
-                print(f" [WARNING] file_access_token 为空，使用默认 Bearer token")
+        file_access_token = file_mgr.consume_file_access_token(file_id) if file_mgr and file_id else None
+        if file_access_token:
+            # 使用文件访问 token 作为 URL query 参数（云端要求）
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            full_url = _build_file_url(file_url)
+            parsed = urlparse(full_url)
+            query_params = parse_qs(parsed.query)
+            query_params['token'] = [file_access_token]
+            new_query = urlencode(query_params, doseq=True)
+            download_url = urlunparse((
+                parsed.scheme, parsed.netloc, parsed.path,
+                parsed.params, new_query, parsed.fragment
+            ))
+            print(f" [INFO] 使用文件访问 token: {file_access_token[:20]}...")
+            print(f" [INFO] 带token的URL: {download_url[:100]}...")
+            # 不需要 Bearer token
+            headers.pop('Authorization', None)
         else:
-            print(f" [WARNING] 未找到 file_id={file_id} 的访问 token，全局字典内容: {list(file_access_tokens.keys())}")
+            print(f" [WARNING] 未找到 file_id={file_id} 的访问 token")
         
         # 如果没有文件访问 token，使用默认URL
         if not download_url:
@@ -862,19 +859,15 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
         image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, file_path, page_index)
     elif ext in [".doc", ".docx"]:
         pdf_path = None
-        if file_id:
-            cached = preview_files.get(file_id, {})
-            pdf_path = cached.get("pdf_path")
+        file_mgr = get_file_manager()
+        file_info = file_mgr.get_preview_resource(file_id) if file_mgr and file_id else None
+        if file_info:
+            pdf_path = file_info.get("pdf_path")
         if not pdf_path or not os.path.exists(pdf_path):
             pdf_path, error = _convert_word_to_pdf(file_path)
             if pdf_path and file_id:
-                preview_files.setdefault(file_id, {})["pdf_path"] = pdf_path
-                # 同步更新 FileManager 中的 PDF 路径
-                file_mgr = get_file_manager()
-                if file_mgr:
-                    file_info = file_mgr.get_file_info(file_id)
-                    if file_info:
-                        file_mgr.register_preview_file(file_id, file_info["path"], pdf_path)
+                if file_mgr and file_info and file_info.get("source_path"):
+                    file_mgr.register_preview_resource(file_id, file_info.get("file_url") or "", file_info["source_path"], pdf_path)
         if pdf_path:
             image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, pdf_path, page_index)
     else:
@@ -893,8 +886,8 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
         resolved_options["paper_size"] = str(explicit_paper).strip()
     else:
         pdf_path_for_detect = None
-        if file_id and ext in [".doc", ".docx"]:
-            pdf_path_for_detect = preview_files.get(file_id, {}).get("pdf_path")
+        if file_id and ext in [".doc", ".docx"] and 'file_info' in locals():
+            pdf_path_for_detect = file_info.get("pdf_path") if file_info else None
         detected_paper = _detect_paper_size_from_file(file_path, file_name, file_type, pdf_path_for_detect)
         if detected_paper:
             paper_px = _get_paper_size_px(detected_paper)
@@ -1158,35 +1151,14 @@ async def preview(request: Request):
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
 
         print(f" [DEBUG] 检查缓存...")
-        cached = preview_files.get(file_id)
+        file_mgr = get_file_manager()
+        cached = file_mgr.get_preview_resource(file_id) if file_mgr else None
         print(f" [DEBUG] 缓存命中: {bool(cached)}")
         
         if cached and cached.get("file_url") != file_url:
             print(f" [DEBUG] URL变化，清理旧文件...")
-            # URL变化，清理旧文件
-            old_path = cached.get("path")
-            if old_path and os.path.exists(old_path):
-                try:
-                    os.remove(old_path)
-                except Exception:
-                    pass
-            old_pdf = cached.get("pdf_path")
-            if old_pdf and os.path.exists(old_pdf):
-                try:
-                    os.remove(old_pdf)
-                except Exception:
-                    pass
-            preview_files.pop(file_id, None)
-            keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
-            for k in keys:
-                preview_cache.pop(k, None)
-            preview_page_cache.pop(file_id, None)
-            preview_page_meta.pop(file_id, None)
-            
-            # 从文件管理器移除
-            file_mgr = get_file_manager()
-            if file_mgr:
-                file_mgr.cleanup_file(file_id, source="url_changed")
+            file_mgr.release_preview_resource(file_id, reason="url_changed")
+            cached = None
 
         print(f" [DEBUG] 解析page_index...")
         try:
@@ -1215,7 +1187,7 @@ async def preview(request: Request):
             }
 
         print(f" [DEBUG] 检查文件路径...")
-        file_path = preview_files.get(file_id, {}).get("path")
+        file_path = cached.get("source_path") if cached else None
         print(f" [DEBUG] file_path={file_path}")
         if not file_path or not os.path.exists(file_path):
             print(f" [DEBUG] 文件不存在，开始下载...")
@@ -1223,20 +1195,15 @@ async def preview(request: Request):
             if not file_path:
                 print(f" [DEBUG] 下载失败: {err}")
                 return JSONResponse(status_code=500, content={"success": False, "message": err or "下载文件失败"})
-            cached_pdf = preview_files.get(file_id, {}).get("pdf_path")
-            preview_files[file_id] = {"path": file_path, "file_url": file_url}
-            if cached_pdf and os.path.exists(cached_pdf):
-                preview_files[file_id]["pdf_path"] = cached_pdf
-            
-            # 注册到文件管理器
-            file_mgr = get_file_manager()
             if file_mgr:
-                file_mgr.register_preview_file(file_id, file_path, cached_pdf)
+                cached_pdf = cached.get("pdf_path") if cached else None
+                if cached_pdf and not os.path.exists(cached_pdf):
+                    cached_pdf = None
+                file_mgr.register_preview_resource(file_id, file_url, file_path, cached_pdf)
         else:
             # 更新访问时间
-            file_mgr = get_file_manager()
             if file_mgr:
-                file_mgr.update_file_access(file_id)
+                file_mgr.touch_preview_resource(file_id)
 
         image, page_count, resolved_page_index, err = _generate_preview_image(file_id, file_path, file_name, file_type, options, page_index)
         if not image:
@@ -1321,15 +1288,7 @@ async def submit_print(request: Request):
             # 清理预览文件（打印时会重新下载，预览文件不再需要）
             file_mgr = get_file_manager()
             if file_mgr:
-                file_mgr.cleanup_file(file_id, source="print")
-            
-            # 清理内存缓存
-            preview_files.pop(file_id, None)
-            keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
-            for k in keys:
-                preview_cache.pop(k, None)
-            preview_page_cache.pop(file_id, None)
-            preview_page_meta.pop(file_id, None)
+                file_mgr.release_preview_resource(file_id, reason="print")
             
             return {"success": True, "message": "打印任务已提交"}
         else:
@@ -1358,15 +1317,7 @@ async def cleanup_preview_file(request: Request):
         if file_id:
             file_mgr = get_file_manager()
             if file_mgr:
-                file_mgr.cleanup_file(file_id, source="cancel")
-        
-            # 清理内存缓存
-            preview_files.pop(file_id, None)
-            keys = [k for k in preview_cache.keys() if k.startswith(f"{file_id}:")]
-            for k in keys:
-                preview_cache.pop(k, None)
-            preview_page_cache.pop(file_id, None)
-            preview_page_meta.pop(file_id, None)
+                file_mgr.release_preview_resource(file_id, reason="cancel")
         
         return {"success": True, "message": "文件已清理"}
         

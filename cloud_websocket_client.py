@@ -13,6 +13,7 @@ import os
 import base64
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
+from file_manager import get_file_manager
 
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
@@ -538,13 +539,12 @@ class PrintJobHandler:
             
             # 保存文件访问 token 到全局字典（使用 main.py 中的全局变量）
             if file_access_token:
-                # 导入 main.py 的全局变量
-                import main
-                main.file_access_tokens[file_id] = {
-                    'token': file_access_token,
-                    'expires_at': file_access_token_expires_at
-                }
-                print(f" [INFO] 保存文件访问 token 到全局字典，过期时间: {file_access_token_expires_at}")
+                file_mgr = get_file_manager()
+                if file_mgr:
+                    file_mgr.store_file_access_token(file_id, file_access_token, file_access_token_expires_at)
+                    print(f" [INFO] 保存文件访问 token 到统一管理器，过期时间: {file_access_token_expires_at}")
+                else:
+                    print(" [WARNING] FileManager 未初始化，无法缓存文件访问 token")
             else:
                 print(f" [WARNING] 未收到文件访问 token")
             
@@ -633,7 +633,7 @@ class PrintJobHandler:
                         print_options["duplex"] = "DuplexNoTumble"
             # 使用统一的打印任务提交方法（自动处理清理）
             result = self.printer_manager.submit_print_job_with_cleanup(
-                printer_name, file_path, job_name, print_options, "云端WebSocket", printer_id
+                printer_name, file_path, job_name, print_options, "云端WebSocket", printer_id, artifact_key=job_id
             )
             
             if result.get("success"):
@@ -743,6 +743,9 @@ class PrintJobHandler:
                     f.write(response.content)
                 
                 print(f" [INFO] 文件下载成功: {temp_file_path}")
+                file_mgr = get_file_manager()
+                if file_mgr:
+                    file_mgr.register_print_artifact(job_id, temp_file_path)
                 return temp_file_path
             else:
                 print(f" [ERROR] 文件下载失败: {response.status_code}")
