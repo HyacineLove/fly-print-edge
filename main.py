@@ -1347,27 +1347,51 @@ async def check_cloud_and_register_node(request: Request):
         if not preflight.get("success"):
             return JSONResponse(status_code=400, content=preflight)
 
-        was_registered = bool((current.get("cloud") or {}).get("node_id") or cloud_service.node_id)
+        had_local_node_id = bool((current.get("cloud") or {}).get("node_id") or cloud_service.node_id)
+        stale_node = bool(getattr(cloud_service, "has_stale_node_registration", lambda: False)())
+        should_register = not had_local_node_id or stale_node
+
+        if should_register:
+            merged.setdefault("cloud", {}).pop("node_id", None)
 
         printer_manager.config.replace_full_config(merged)
-        reconfigure_result = cloud_service.reconfigure(merged.get("cloud", {}), preserve_node_id=True)
+        reconfigure_result = cloud_service.reconfigure(
+            merged.get("cloud", {}),
+            preserve_node_id=not should_register,
+        )
         if not reconfigure_result.get("success"):
             return JSONResponse(status_code=400, content=reconfigure_result)
 
-        if was_registered:
+        if should_register:
+            ensure_result = cloud_service.ensure_registered(force_reregister=False)
+            if not ensure_result.get("success"):
+                return JSONResponse(status_code=400, content=ensure_result)
+            result_payload = ensure_result
+        else:
             result_payload = {
                 "success": True,
                 "node_id": cloud_service.node_id,
                 "registered": bool(cloud_service.node_id),
                 "connected": bool(reconfigure_result.get("connected")),
             }
-        else:
+
+        connected = await _wait_for_cloud_connected()
+        if not connected and getattr(cloud_service, "has_stale_node_registration", lambda: False)():
+            repaired = printer_manager.config.get_full_config()
+            repaired.setdefault("cloud", {}).pop("node_id", None)
+            printer_manager.config.replace_full_config(repaired)
+
+            reconfigure_result = cloud_service.reconfigure(repaired.get("cloud", {}), preserve_node_id=False)
+            if not reconfigure_result.get("success"):
+                return JSONResponse(status_code=400, content=reconfigure_result)
+
             ensure_result = cloud_service.ensure_registered(force_reregister=False)
             if not ensure_result.get("success"):
                 return JSONResponse(status_code=400, content=ensure_result)
             result_payload = ensure_result
+            should_register = True
+            connected = await _wait_for_cloud_connected()
 
-        connected = await _wait_for_cloud_connected()
         if not connected:
             return JSONResponse(
                 status_code=409,
@@ -1381,7 +1405,7 @@ async def check_cloud_and_register_node(request: Request):
             )
 
         node_id = cloud_service.node_id
-        if not was_registered and node_id:
+        if should_register and node_id:
             await broadcast_sse_event("node_status_changed", {
                 "status": "registered",
                 "node_id": node_id,

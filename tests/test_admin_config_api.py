@@ -43,19 +43,21 @@ class DummyPrinterManager:
 
 
 class DummyCloudService:
-    def __init__(self, connected=True):
+    def __init__(self, connected=True, stale=False):
         self.node_id = "node-123"
         self.calls = []
         self.connected = connected
+        self.stale = stale
 
     def reconfigure(self, new_config, preserve_node_id=True):
         self.calls.append({"config": new_config, "preserve_node_id": preserve_node_id})
-        self.node_id = "node-123"
+        self.node_id = None if self.stale and not preserve_node_id else "node-123"
         return {"success": True, "node_id": self.node_id, "registered": True, "connected": self.connected}
 
     def ensure_registered(self, force_reregister=False):
         self.calls.append({"ensure_registered": force_reregister})
         self.node_id = "node-123"
+        self.stale = False
         return {"success": True, "node_id": self.node_id, "registered": True, "connected": self.connected}
 
     def get_status(self):
@@ -65,6 +67,9 @@ class DummyCloudService:
             "node_id": self.node_id,
             "websocket": {"connected": self.connected},
         }
+
+    def has_stale_node_registration(self):
+        return self.stale
 
 
 class DummyRequest:
@@ -152,6 +157,24 @@ class AdminConfigApiTests(unittest.TestCase):
             response = asyncio.run(main.check_cloud_and_register_node(request))
 
         self.assertEqual(response.status_code, 409)
+
+    def test_check_register_cloud_reregisters_when_local_node_is_stale(self):
+        request = DummyRequest({
+            "cloud": {
+                "client_secret": "",
+                "base_url": "http://example.com",
+            }
+        })
+        dummy_cloud = DummyCloudService(connected=True, stale=True)
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "cloud_service", dummy_cloud), \
+             patch("main.ConfigService.test_cloud_connection", return_value={"success": True, "message": "ok"}), \
+             patch("main._wait_for_cloud_connected", return_value=True):
+            response = asyncio.run(main.check_cloud_and_register_node(request))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(dummy_cloud.calls[0]["preserve_node_id"])
+        self.assertTrue(any("ensure_registered" in call for call in dummy_cloud.calls))
 
     def test_get_cloud_status_prefers_connected_message(self):
         with patch.object(main, "cloud_service", DummyCloudService(connected=True)):
