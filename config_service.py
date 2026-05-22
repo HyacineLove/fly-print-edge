@@ -39,6 +39,10 @@ class ConfigService:
         settings["default_max_upscale"] = self._normalize_optional_positive_number(
             settings.get("default_max_upscale")
         )
+        settings["copies_min"], settings["copies_max"] = self._normalize_copy_limits(
+            settings.get("copies_min"),
+            settings.get("copies_max"),
+        )
         data.setdefault("network", {"bind_address": "127.0.0.1", "port": 7860})
         data.setdefault("printers", {"discovery_mode": "auto", "static_list": []})
         data["meta"] = {
@@ -118,6 +122,24 @@ class ConfigService:
                     raise ValueError
             except (TypeError, ValueError):
                 errors.append("settings.default_max_upscale must be a positive number")
+
+        copies_min = 1
+        if settings.get("copies_min") not in (None, ""):
+            try:
+                copies_min = int(settings["copies_min"])
+                if copies_min < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append("settings.copies_min must be an integer >= 1")
+                copies_min = 1
+
+        if settings.get("copies_max") not in (None, ""):
+            try:
+                copies_max = int(settings["copies_max"])
+                if copies_max < copies_min:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append("settings.copies_max must be an integer and >= settings.copies_min")
 
         if not str(network.get("bind_address") or "").strip():
             errors.append("network.bind_address must not be empty")
@@ -245,3 +267,17 @@ class ConfigService:
         except (TypeError, ValueError):
             return ""
         return number if number > 0 else ""
+
+    def _normalize_copy_limits(self, copies_min: Any, copies_max: Any) -> tuple[int, int]:
+        normalized_min = self._normalize_copy_limit(copies_min, default=1, minimum=1)
+        normalized_max = self._normalize_copy_limit(copies_max, default=3, minimum=normalized_min)
+        return normalized_min, max(normalized_min, normalized_max)
+
+    def _normalize_copy_limit(self, value: Any, default: int, minimum: int) -> int:
+        if value in (None, ""):
+            return max(minimum, default)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return max(minimum, default)
+        return max(minimum, parsed)

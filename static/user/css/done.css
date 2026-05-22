@@ -229,26 +229,35 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
 
 .Pixso-paragraph-115_42 {
   position: absolute;
-  left: 159px;
-  top: 23px;
+  left: 0;
+  top: 0;
+  width: 418px;
+  height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 50px;
   font-family: "Microsoft YaHei-Bold";
   font-weight: 700;
   color: rgba(255, 255, 255, 1);
   letter-spacing: 0;
   white-space: nowrap;
+  line-height: 1;
+  z-index: 1;
 }
 
 .Pixso-group-115_37 {
   position: absolute;
-  left: 338px;
-  top: 33px;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 51px;
   height: 51px;
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  z-index: 1;
 }
 
 .Pixso-vector-115_38 {

@@ -287,6 +287,89 @@ def _get_managed_printers():
         return []
     return printer_manager.get_printers()
 
+def _capability_values(capabilities: Optional[Dict[str, Any]], *keys: str) -> list[str]:
+    if not isinstance(capabilities, dict):
+        return []
+    values: list[str] = []
+    for key in keys:
+        raw_value = capabilities.get(key)
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, dict):
+            items = raw_value.values()
+        elif isinstance(raw_value, (list, tuple, set)):
+            items = raw_value
+        else:
+            items = [raw_value]
+        for item in items:
+            text = str(item).strip()
+            if text:
+                values.append(text.lower())
+    return values
+
+def _capability_flag(capabilities: Optional[Dict[str, Any]], *keys: str) -> Optional[bool]:
+    if not isinstance(capabilities, dict):
+        return None
+    for key in keys:
+        raw_value = capabilities.get(key)
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, (int, float)) and raw_value in (0, 1):
+            return bool(raw_value)
+    return None
+
+def _capability_tristate_from_duplex(capabilities: Optional[Dict[str, Any]]) -> Optional[bool]:
+    direct = _capability_flag(capabilities, "duplex_supported", "duplex_support")
+    if direct is not None:
+        return direct
+
+    values = _capability_values(capabilities, "duplex", "duplex_mode")
+    if not values:
+        return None
+
+    positive_tokens = ("duplex", "longedge", "shortedge", "two-sided", "2-sided")
+    negative_tokens = {"none", "simplex", "single"}
+
+    if any(any(token in value for token in positive_tokens) for value in values):
+        return True
+    if any(value in negative_tokens for value in values):
+        return False
+    return None
+
+def _capability_tristate_from_color(capabilities: Optional[Dict[str, Any]]) -> Optional[bool]:
+    direct = _capability_flag(capabilities, "color_supported", "color_support")
+    if direct is not None:
+        return direct
+
+    values = _capability_values(capabilities, "color_model", "color_mode", "color")
+    if not values:
+        return None
+
+    positive_tokens = ("color", "colour", "rgb", "cmyk")
+    negative_tokens = ("gray", "grey", "grayscale", "greyscale", "mono", "monochrome", "blackandwhite", "black")
+
+    if any(any(token in value for token in positive_tokens) for value in values):
+        return True
+    if any(any(token in value for token in negative_tokens) for value in values):
+        return False
+    return None
+
+def _capability_label(value: Optional[bool]) -> str:
+    if value is True:
+        return "支持"
+    if value is False:
+        return "不支持"
+    return "未知"
+
+def _build_printer_capability_summary(capabilities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    duplex_supported = _capability_tristate_from_duplex(capabilities)
+    color_supported = _capability_tristate_from_color(capabilities)
+    return {
+        "duplex_supported": duplex_supported,
+        "color_supported": color_supported,
+        "capability_summary": f"单双面: {_capability_label(duplex_supported)}, 彩色: {_capability_label(color_supported)}",
+    }
+
 def _get_printer_by_id(printer_id: str):
     if not printer_manager:
         return None
@@ -471,6 +554,16 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
+
+def _normalize_copy_limits(settings: Optional[Dict[str, Any]] = None) -> tuple[int, int]:
+    runtime_settings = settings if isinstance(settings, dict) else _get_settings()
+    copies_min = max(1, _safe_int(runtime_settings.get("copies_min"), 1))
+    copies_max = max(copies_min, _safe_int(runtime_settings.get("copies_max"), 3))
+    return copies_min, copies_max
+
+def _clamp_copy_count(copies: Any, settings: Optional[Dict[str, Any]] = None) -> int:
+    copies_min, copies_max = _normalize_copy_limits(settings)
+    return min(copies_max, max(copies_min, _safe_int(copies, copies_min)))
 
 def _safe_float(value: Any, default: float) -> float:
     try:
@@ -987,6 +1080,7 @@ async def get_qr_code():
     default_printer_capabilities = None
     if default_printer and default_printer.get("name"):
         default_printer_capabilities = printer_manager.get_printer_capabilities(default_printer.get("name"))
+    copies_min, copies_max = _normalize_copy_limits()
     
     return {
         "success": True,
@@ -997,6 +1091,10 @@ async def get_qr_code():
         "expires_at": token_data['expires_at'],
         "default_printer_id": default_printer_id,
         "default_printer_capabilities": default_printer_capabilities,
+        "settings": {
+            "copies_min": copies_min,
+            "copies_max": copies_max,
+        },
         "session_id": session["session_id"],
     }
 
@@ -1183,7 +1281,8 @@ async def submit_print(request: Request):
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
         if not session_id or not interactive_session_manager.matches(session_id, file_id):
             return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
-        
+        options["copies"] = _clamp_copy_count(options.get("copies"))
+
         if cloud_service and cloud_service.websocket_client:
             printer_id = _ensure_default_printer()
             
@@ -1471,9 +1570,12 @@ async def get_managed_printers():
     if not printer_manager:
         return {"success": False, "message": "设备未就绪"}
     default_id = _ensure_default_printer()
-    printers = _get_managed_printers()
-    for printer in printers:
-        printer["is_default"] = printer.get("id") == default_id
+    printers = []
+    for printer in _get_managed_printers():
+        item = dict(printer)
+        item["is_default"] = item.get("id") == default_id
+        item.update(_build_printer_capability_summary(printer_manager.get_printer_capabilities(item.get("name"))))
+        printers.append(item)
     return {
         "success": True,
         "items": printers,
@@ -1489,7 +1591,13 @@ async def get_discovered_printers():
     local_printers = printer_manager.discovery.discover_local_printers()
     network_printers = printer_manager.discovery.discover_network_printers()
     all_printers = local_printers + network_printers
-    available = [p for p in all_printers if p.get("name") not in managed_names]
+    available = []
+    for printer in all_printers:
+        if printer.get("name") in managed_names:
+            continue
+        item = dict(printer)
+        item.update(_build_printer_capability_summary(printer_manager.get_printer_capabilities(item.get("name"))))
+        available.append(item)
     return {"success": True, "items": available}
 
 @admin_router.post("/printers/add")

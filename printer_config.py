@@ -50,6 +50,13 @@ class PrinterConfig:
                 # (已移除环境变量读取逻辑，完全依赖 config.json)
                 
                 config_updated = False
+                settings = config.setdefault("settings", {})
+                if "copies_min" not in settings:
+                    settings["copies_min"] = 1
+                    config_updated = True
+                if "copies_max" not in settings:
+                    settings["copies_max"] = 3
+                    config_updated = True
                 for printer in config.get("managed_printers", []):
                     if "enabled" not in printer:
                         printer["enabled"] = True
@@ -66,7 +73,10 @@ class PrinterConfig:
             print(f" [DEBUG] 配置文件不存在，创建默认配置")
             default_config = {
                 "managed_printers": [], 
-                "settings": {},
+                "settings": {
+                    "copies_min": 1,
+                    "copies_max": 3
+                },
                 "network": {
                     "bind_address": "127.0.0.1",
                     "port": 7860
