@@ -46,6 +46,10 @@ body {
   margin: 0;
   background-color: white;
 }
+
+.is-hidden {
+  display: none !important;
+}
     
 span {
   word-break: break-word;
@@ -244,6 +248,11 @@ span {
   background-image: url(../images/login__fa9f6c23f7d763cb242933f23feca7adc3521a14.png);
 }
 
+.Pixso-rectangle-3_39.is-hidden,
+.Pixso-rectangle-3_26.is-hidden {
+  display: none;
+}
+
 .Pixso-group-77_54 {
   width: 51px;
   height: 51px;
@@ -301,6 +310,7 @@ span {
   top: 668px;
   transform: translateX(-50%);
   white-space: nowrap;
+  display: none;
 }
 
 .Pixso-paragraph-3_46.status-ok {
@@ -314,6 +324,37 @@ span {
 .Pixso-group-3_28.manual-refresh-disabled {
   opacity: 0.45;
   pointer-events: none;
+}
+
+.user-toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 320px;
+  max-width: calc(100vw - 80px);
+  padding: 18px 24px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  color: rgba(35, 35, 35, 1);
+  box-shadow: 0 14px 32px rgba(61, 72, 130, 0.18);
+  font-family: "Microsoft YaHei-Regular";
+  font-size: 30px;
+  line-height: 1.35;
+  text-align: center;
+  z-index: 1000;
+}
+
+.user-toast.is-info {
+  border: 1px solid rgba(136, 160, 255, 0.35);
+}
+
+.user-toast.is-success {
+  border: 1px solid rgba(73, 187, 120, 0.4);
+}
+
+.user-toast.is-error {
+  border: 1px solid rgba(245, 106, 106, 0.38);
 }
 
 @keyframes countdown-spin {

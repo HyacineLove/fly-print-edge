@@ -25,7 +25,7 @@ class DummyConfig:
                 "heartbeat_interval": 30,
                 "node_id": "node-123",
             },
-            "settings": {},
+            "settings": {"copies_min": 1, "copies_max": 3},
             "network": {"bind_address": "127.0.0.1", "port": 7860},
             "printers": {"discovery_mode": "auto", "static_list": []},
         }
@@ -92,6 +92,8 @@ class AdminConfigApiTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["cloud"]["client_secret"], "")
         self.assertTrue(result["cloud"]["client_secret_configured"])
+        self.assertEqual(result["settings"]["copies_min"], 1)
+        self.assertEqual(result["settings"]["copies_max"], 3)
 
     def test_save_config_keeps_secret_when_blank(self):
         request = DummyRequest({
@@ -121,6 +123,18 @@ class AdminConfigApiTests(unittest.TestCase):
         payload = response.body.decode("utf-8")
         self.assertIn("network.bind_address", payload)
         self.assertIn("network.port", payload)
+
+    def test_save_config_persists_copy_limits(self):
+        request = DummyRequest({
+            "settings": {"copies_min": 2, "copies_max": 6}
+        })
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "cloud_service", DummyCloudService()):
+            response = asyncio.run(main.save_admin_config(request))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.printer_manager.config.config["settings"]["copies_min"], 2)
+        self.assertEqual(self.printer_manager.config.config["settings"]["copies_max"], 6)
 
     def test_check_register_cloud_reuses_saved_secret_without_reregistering_existing_node(self):
         request = DummyRequest({

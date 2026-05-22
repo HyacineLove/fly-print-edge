@@ -44,6 +44,11 @@ class ConfigServiceTests(unittest.TestCase):
         payload = self.service.build_public_config(raw)
         self.assertEqual(payload["settings"]["default_max_upscale"], "")
 
+    def test_build_public_config_supplies_default_copy_limits(self):
+        payload = self.service.build_public_config(self.raw_config)
+        self.assertEqual(payload["settings"]["copies_min"], 1)
+        self.assertEqual(payload["settings"]["copies_max"], 3)
+
     def test_merge_update_keeps_existing_secret_when_blank(self):
         merged = self.service.merge_update(
             self.raw_config,
@@ -68,6 +73,22 @@ class ConfigServiceTests(unittest.TestCase):
         }
         errors = self.service.validate(changed)
         self.assertNotIn("settings.default_max_upscale must be a positive number", errors)
+
+    def test_validate_rejects_copy_limit_range_with_max_less_than_min(self):
+        changed = {
+            **self.raw_config,
+            "settings": {"copies_min": 4, "copies_max": 2},
+        }
+        errors = self.service.validate(changed)
+        self.assertIn("settings.copies_max must be an integer and >= settings.copies_min", errors)
+
+    def test_validate_rejects_copy_limit_min_less_than_one(self):
+        changed = {
+            **self.raw_config,
+            "settings": {"copies_min": 0, "copies_max": 2},
+        }
+        errors = self.service.validate(changed)
+        self.assertIn("settings.copies_min must be an integer >= 1", errors)
 
     def test_save_and_apply_reports_cloud_preflight_failure(self):
         class Repo:

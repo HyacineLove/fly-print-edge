@@ -330,38 +330,46 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
 }
 
 .Pixso-rectangle-55_114 {
-  width: 100px;
+  width: 114px;
   height: 100px;
   position: absolute;
   left: 50%;
   top: 17px;
-  transform: translateX(calc(-50% + 364.5px));
+  transform: translateX(calc(-50% + 357.5px));
   border-radius: 10px 10px 10px 10px;
   background-color: rgba(244, 244, 244, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-rectangle-55_115 {
-  width: 100px;
+  width: 114px;
   height: 100px;
   position: absolute;
   left: 50%;
   top: 17px;
-  transform: translateX(calc(-50% + 243.5px));
+  transform: translateX(calc(-50% + 222.5px));
   border-radius: 10px 10px 10px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-vector-55_116 {
-  width: 100px;
+  width: 114px;
   height: 100px;
-  background-image: url(../images/preview__Vector_55_116.png);
-  background-size: 100% 100%;
-  background-repeat: no-repeat;
   position: absolute;
   left: 50%;
   top: 17px;
-  transform: translateX(calc(-50% + 122.5px));
+  transform: translateX(calc(-50% + 87.5px));
   border-radius: 10px 10px 10px 10px;
   overflow: hidden;
+  background-image: none;
+  background-color: rgba(244, 244, 244, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-paragraph-55_113 {
@@ -380,48 +388,57 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
 }
 
 .Pixso-paragraph-55_117 {
-  font-size: 36px;
+  font-size: 38px;
   font-family: "Microsoft YaHei-Regular";
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: 0em;
   color: rgba(0, 0, 0, 1);
-  width: auto;
-  height: auto;
+  width: 114px;
+  height: 100px;
   position: absolute;
-  left: 545px;
-  top: 43px;
-  white-space: pre;
-  flex-grow: 0;
+  left: 50%;
+  top: 17px;
+  transform: translateX(calc(-50% + 87.5px));
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-paragraph-55_118 {
-  font-size: 36px;
+  font-size: 38px;
   font-family: "Microsoft YaHei-Regular";
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: 0em;
   color: rgba(255, 255, 255, 1);
-  width: auto;
-  height: auto;
+  width: 114px;
+  height: 100px;
   position: absolute;
-  left: 666px;
-  top: 43px;
-  white-space: pre;
-  flex-grow: 0;
+  left: 50%;
+  top: 17px;
+  transform: translateX(calc(-50% + 222.5px));
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-paragraph-55_119 {
-  font-size: 36px;
+  font-size: 38px;
   font-family: "Microsoft YaHei-Regular";
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: 0em;
   color: rgba(0, 0, 0, 1);
-  width: auto;
-  height: auto;
+  width: 114px;
+  height: 100px;
   position: absolute;
-  left: 787px;
-  top: 43px;
-  white-space: pre;
-  flex-grow: 0;
+  left: 50%;
+  top: 17px;
+  transform: translateX(calc(-50% + 357.5px));
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .Pixso-rectangle-55_120 {
@@ -586,6 +603,11 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   transform: translateX(calc(-50% + 357.5px));
   white-space: pre;
   flex-grow: 0;
+}
+
+.is-option-disabled {
+  opacity: 0.45;
+  cursor: not-allowed !important;
 }
 
 .Pixso-paragraph-97_480 {

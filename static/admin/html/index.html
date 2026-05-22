@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -7,6 +7,14 @@
   <link rel="stylesheet" href="/static/admin/css/admin.css">
 </head>
 <body>
+  <section id="adminToast" class="admin-toast is-hidden" aria-live="polite"></section>
+  <section id="adminLoadingOverlay" class="admin-loading-overlay is-hidden" aria-live="polite">
+    <div class="admin-loading-overlay__card">
+      <div class="admin-loading-spinner" aria-hidden="true"></div>
+      <p data-role="loading-text">加载中...</p>
+    </div>
+  </section>
+
   <main class="admin-shell">
     <header class="admin-header">
       <div>
@@ -25,16 +33,11 @@
       <span id="restartHintText" class="status-pill is-hidden">部分配置需重启 Edge 后生效</span>
     </section>
 
-    <section id="errorBox" class="error-box is-hidden"></section>
-    <section id="resultBox" class="result-box is-hidden"></section>
-
     <section class="admin-layout">
       <nav class="admin-nav">
-        <button type="button" class="nav-item is-active" data-section="overview">概览</button>
-        <button type="button" class="nav-item" data-section="cloud">云端配置</button>
+        <button type="button" class="nav-item is-active" data-section="cloud">云端配置</button>
         <button type="button" class="nav-item" data-section="settings">打印默认设置</button>
         <button type="button" class="nav-item" data-section="runtime">运行设置</button>
-        <button type="button" class="nav-item" data-section="discovery">打印机发现</button>
         <button type="button" class="nav-item" data-section="printers">打印机管理</button>
       </nav>
 
@@ -42,6 +45,6 @@
     </section>
   </main>
 
-  <script src="/static/admin/main.js" defer></script>
+  <script src="/static/admin/main.js" type="module"></script>
 </body>
 </html>
