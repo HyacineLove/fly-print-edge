@@ -3,11 +3,14 @@ fly-print-cloud API客户端
 实现边缘节点注册、心跳、打印机注册等API调用
 """
 
+import logging
 import requests
 import time
 from typing import Dict, Any, List, Optional
 from cloud_auth import CloudAuthClient
 from edge_node_info import EdgeNodeInfo
+
+logger = logging.getLogger(__name__)
 
 
 class CloudAPIClient:
@@ -31,8 +34,7 @@ class CloudAPIClient:
             headers = self.auth_client.get_auth_headers()
             data = self.edge_info.get_edge_node_data()
             
-            print(f" [DEBUG] 注册边缘节点: {url}")
-            print(f" [DEBUG] 注册数据: {data}")
+            logger.debug("Registering edge node: url=%s payload_keys=%s", url, sorted(data.keys()))
             
             response = requests.post(url, json=data, headers=headers, timeout=10)
             
@@ -40,14 +42,18 @@ class CloudAPIClient:
                 result = response.json()
                 # 按照后端接口定义，node_id在data.id字段中
                 self.node_id = result['data']['id']
-                print(f" [DEBUG] 边缘节点注册成功, node_id: {self.node_id}")
+                logger.info("Edge node registered: node_id=%s", self.node_id)
                 return {"success": True, "node_id": self.node_id, "data": result}
             else:
-                print(f" [DEBUG] 边缘节点注册失败: {response.status_code} - {response.text}")
+                logger.warning(
+                    "Edge node registration failed: status=%s body=%s",
+                    response.status_code,
+                    response.text,
+                )
                 return {"success": False, "error": response.text}
                 
         except Exception as e:
-            print(f" [DEBUG] 边缘节点注册异常: {e}")
+            logger.exception("Edge node registration failed")
             return {"success": False, "error": str(e)}
     
     def register_printers(self, printers: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -59,8 +65,7 @@ class CloudAPIClient:
             url = f"{self.base_url}/api/v1/edge/{self.node_id}/printers"
             headers = self.auth_client.get_auth_headers()
             
-            print(f" [DEBUG] 逐个注册打印机: {url}")
-            print(f" [DEBUG] 打印机数量: {len(printers)}")
+            logger.debug("Registering printers: url=%s count=%s", url, len(printers))
             
             success_count = 0
             failed_printers = []
@@ -68,27 +73,32 @@ class CloudAPIClient:
             
             # 逐个注册打印机
             for i, printer in enumerate(printers):
-                print(f" [DEBUG] 注册打印机 {i+1}: {printer['name']}")
+                logger.debug("Registering printer %s/%s: %s", i + 1, len(printers), printer["name"])
                 
                 response = requests.post(url, json=printer, headers=headers, timeout=10)
                 
                 if response.status_code in [200, 201]:
                     success_count += 1
-                    print(f" [DEBUG] 打印机 {printer['name']} 注册成功")
+                    logger.debug("Printer registered: name=%s", printer["name"])
                     try:
                         resp_data = response.json()
                         if 'data' in resp_data and 'id' in resp_data['data']:
                             printer_id = resp_data['data']['id']
                             registered_printers[printer['name']] = printer_id
-                            print(f" [DEBUG] 获取到云端打印机ID: {printer_id}")
+                            logger.debug("Cloud printer id assigned: name=%s id=%s", printer["name"], printer_id)
                     except Exception as e:
-                        print(f" [DEBUG] 解析响应ID失败: {e}")
+                        logger.debug("Failed to parse registered printer id", exc_info=True)
                 else:
                     failed_printers.append({
                         "name": printer['name'],
                         "error": response.text
                     })
-                    print(f" [DEBUG] 打印机 {printer['name']} 注册失败: {response.status_code} - {response.text}")
+                    logger.warning(
+                        "Printer registration failed: name=%s status=%s body=%s",
+                        printer["name"],
+                        response.status_code,
+                        response.text,
+                    )
             
             return {
                 "success": True, 
@@ -99,7 +109,7 @@ class CloudAPIClient:
             }
                 
         except Exception as e:
-            print(f" [DEBUG] 打印机注册异常: {e}")
+            logger.exception("Printer registration failed")
             return {"success": False, "error": str(e)}
 
     def delete_printer(self, printer_id: str) -> Dict[str, Any]:
@@ -115,7 +125,7 @@ class CloudAPIClient:
                 return {"success": True}
             return {"success": False, "error": response.text}
         except Exception as e:
-            print(f" [DEBUG] 删除打印机异常: {e}")
+            logger.exception("Delete printer failed: printer_id=%s", printer_id)
             return {"success": False, "error": str(e)}
 
     def batch_update_printer_status(self, printers: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -142,14 +152,18 @@ class CloudAPIClient:
             
             data = {"printers": printers}
             
-            print(f" [DEBUG] 批量状态上报: {url}, 打印机数量: {len(printers)}")
+            logger.debug("Batch printer status update: url=%s count=%s", url, len(printers))
             
             response = requests.post(url, json=data, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 result = response.json()
                 data = result.get("data", {})
-                print(f" [DEBUG] 批量状态上报成功: 更新 {data.get('updated', 0)}, 失败 {data.get('failed', 0)}")
+                logger.debug(
+                    "Batch printer status updated: updated=%s failed=%s",
+                    data.get("updated", 0),
+                    data.get("failed", 0),
+                )
                 return {
                     "success": True,
                     "updated": data.get("updated", 0),
@@ -157,11 +171,15 @@ class CloudAPIClient:
                     "errors": data.get("errors", [])
                 }
             else:
-                print(f" [DEBUG] 批量状态上报失败: {response.status_code} - {response.text}")
+                logger.warning(
+                    "Batch printer status update failed: status=%s body=%s",
+                    response.status_code,
+                    response.text,
+                )
                 return {"success": False, "error": response.text}
                 
         except Exception as e:
-            print(f" [DEBUG] 批量状态上报异常: {e}")
+            logger.exception("Batch printer status update failed")
             return {"success": False, "error": str(e)}
     
     def get_websocket_url(self) -> str:

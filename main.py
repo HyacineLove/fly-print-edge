@@ -32,10 +32,9 @@ from cloud_service import CloudService
 from config_service import ConfigService
 from file_manager import init_file_manager, get_file_manager
 from interactive_session import InteractiveSessionManager
+from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
 
-# 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("EdgeServer")
 
 # 全局变量
@@ -88,10 +87,23 @@ app.add_middleware(
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+
+def _configure_runtime_logging_from_disk():
+    from printer_config import PrinterConfig
+
+    config_repo = PrinterConfig()
+    return configure_logging(config_repo.get_full_config())
+
 @app.on_event("startup")
 async def startup_event():
     global printer_manager, cloud_service, node_id, sse_clients, main_loop, qr_code_request_lock, config_service
-    
+
+    log_settings = _configure_runtime_logging_from_disk()
+    logger.info(
+        " Runtime logging initialized: level=%s debug=%s",
+        log_settings["level_name"],
+        log_settings["debug_logging"],
+    )
     logger.info(" Edge Server 正在启动...")
     main_loop = asyncio.get_running_loop()
     qr_code_request_lock = asyncio.Lock()
@@ -115,7 +127,11 @@ async def startup_event():
     
     # 初始化云端服务
     cloud_config = printer_manager.config.config.get("cloud", {})
-    cloud_service = CloudService(cloud_config, printer_manager)
+    cloud_service = CloudService(
+        cloud_config,
+        printer_manager,
+        interactive_job_binder=bind_interactive_cloud_job,
+    )
 
     if cloud_service:
         cloud_service.add_message_listener("preview_file", handle_cloud_message)
@@ -144,7 +160,7 @@ async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
         }
         
         client_count = len(sse_clients)
-        logger.info(f" 广播SSE事件: {event_type} -> {client_count} 客户端")
+        logger.debug(f" 广播SSE事件: {event_type} -> {client_count} 客户端")
         
         for q in sse_clients:
             try:
@@ -164,7 +180,7 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
     if message_type == "preview_file":
         accepted = interactive_session_manager.accept_preview_event(payload)
         if not accepted:
-            logger.info(" 丢弃未绑定到当前会话的 preview_file 事件")
+            logger.debug(" 丢弃未绑定到当前会话的 preview_file 事件")
             return None
         enriched = dict(message)
         enriched["data"] = accepted
@@ -173,7 +189,7 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
     if message_type == "job_status":
         accepted = interactive_session_manager.accept_job_status_event(payload)
         if not accepted:
-            logger.info(" 丢弃未绑定到当前会话的 job_status 事件")
+            logger.debug(" 丢弃未绑定到当前会话的 job_status 事件")
             return None
         enriched = dict(message)
         enriched["data"] = accepted
@@ -448,73 +464,76 @@ def _build_file_url(file_url: str):
     return f"{base_url}/{file_url}"
 
 def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Optional[str] = None):
-    print(f" [DEBUG] ===== 开始下载预览文件 =====")
-    print(f" [DEBUG] file_url={file_url}")
-    print(f" [DEBUG] file_name={file_name}")
-    print(f" [DEBUG] file_id={file_id}")
     try:
-        print(f" [DEBUG] 获取认证头...")
         headers = cloud_service.auth_client.get_auth_headers() if cloud_service and cloud_service.auth_client else {}
-        
-        # 尝试使用文件访问 token（优先级更高）
+
         file_mgr = get_file_manager()
         download_url = None
+        auth_mode = "bearer"
         file_access_token = file_mgr.consume_file_access_token(file_id) if file_mgr and file_id else None
         if file_access_token:
-            # 使用文件访问 token 作为 URL query 参数（云端要求）
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
             full_url = _build_file_url(file_url)
             parsed = urlparse(full_url)
             query_params = parse_qs(parsed.query)
-            query_params['token'] = [file_access_token]
+            query_params["token"] = [file_access_token]
             new_query = urlencode(query_params, doseq=True)
-            download_url = urlunparse((
-                parsed.scheme, parsed.netloc, parsed.path,
-                parsed.params, new_query, parsed.fragment
-            ))
-            print(f" [INFO] 使用文件访问 token: {file_access_token[:20]}...")
-            print(f" [INFO] 带token的URL: {download_url[:100]}...")
-            # 不需要 Bearer token
-            headers.pop('Authorization', None)
+            download_url = urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    parsed.params,
+                    new_query,
+                    parsed.fragment,
+                )
+            )
+            headers.pop("Authorization", None)
+            auth_mode = "file_access_token"
         else:
-            print(f" [WARNING] 未找到 file_id={file_id} 的访问 token")
-        
-        # 如果没有文件访问 token，使用默认URL
+            logger.warning("Preview file token missing: file_id=%s", file_id)
+
         if not download_url:
             download_url = _build_file_url(file_url)
-        
-        print(f" [DEBUG] 最终使用的 headers={headers}")
-        print(f" [DEBUG] 最终下载URL: {download_url}")
-        
-        print(f" [DEBUG] 解析文件扩展名...")
+
         ext = os.path.splitext(file_name or "")[1].lower() or ".bin"
-        print(f" [DEBUG] ext={ext}")
-        
-        print(f" [DEBUG] 生成临时文件路径...")
         path = get_temp_file_path(prefix="preview", suffix=ext)
-        print(f" [DEBUG] 临时路径={path}")
-        
-        print(f" [DEBUG] 发起HTTP请求...")
+        logger.debug(
+            "Downloading preview source: file_id=%s file_name=%s auth=%s url=%s path=%s headers=%s",
+            file_id,
+            file_name,
+            auth_mode,
+            download_url,
+            path,
+            headers,
+        )
+
         resp = requests.get(download_url, headers=headers, stream=True, timeout=60)
-        print(f" [DEBUG] HTTP响应: status_code={resp.status_code}")
-        
         if resp.status_code != 200:
-            print(f" [DEBUG] 下载失败")
+            logger.warning(
+                "Preview file download failed: file_id=%s status=%s",
+                file_id,
+                resp.status_code,
+            )
             return None, f"下载文件失败: {resp.status_code}"
-        
-        print(f" [DEBUG] 写入文件...")
+
         with open(path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
-        print(f" [DEBUG] 文件下载成功: {path}")
+        logger.info(
+            "Preview file downloaded: file_id=%s ext=%s auth=%s status=%s",
+            file_id,
+            ext,
+            auth_mode,
+            resp.status_code,
+        )
         return path, None
     except Exception as e:
-        import traceback
-        error_detail = traceback.format_exc()
-        print(f" [ERROR] 下载文件异常: {e}")
-        print(f" [DEBUG] 错误详情:\n{error_detail}")
+        logger.exception("Preview file download failed: file_id=%s file_name=%s", file_id, file_name)
         return None, str(e)
+
 
 def _normalize_paper_size(paper_size: Optional[str]) -> str:
     """规范化纸张名称，支持 'Letter (横向)' 等"""
@@ -1097,7 +1116,7 @@ async def events(request: Request):
     # 为当前连接创建一个专用队列
     client_queue = asyncio.Queue()
     sse_clients.append(client_queue)
-    logger.info(f" 新的SSE连接建立，当前客户端数: {len(sse_clients)}")
+    logger.debug(f" 新的SSE连接建立，当前客户端数: {len(sse_clients)}")
     
     async def event_generator():
         try:
@@ -1119,81 +1138,76 @@ async def events(request: Request):
             # 清理连接
             if client_queue in sse_clients:
                 sse_clients.remove(client_queue)
-            logger.info(f" SSE连接断开，剩余客户端数: {len(sse_clients)}")
+            logger.debug(f" SSE连接断开，剩余客户端数: {len(sse_clients)}")
                 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/api/preview")
 async def preview(request: Request):
-    print(f"\n [DEBUG] ===== 预览请求开始 =====")
     try:
         body_bytes = await request.body()
-        print(f" [DEBUG] 请求体长度: {len(body_bytes)} bytes")
-        
         body = json.loads(body_bytes)
-        
+
         session_id = body.get("session_id")
         file_id = body.get("file_id")
         file_url = body.get("file_url")
         file_name = body.get("file_name")
         file_type = body.get("file_type")
         options = _normalize_request_options(body.get("options") or {})
-        
-        print(f" [DEBUG] 参数提取: file_id={file_id}, file_type={file_type}, file_name={file_name}, option_keys={list(options.keys())}")
-        
+
         if not file_id or not file_url:
-            print(f" [DEBUG] 参数验证失败")
+            logger.warning("Preview request rejected: missing file_id or file_url")
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: file_id, file_url 必需"})
         if session_id and not interactive_session_manager.matches(session_id, file_id):
             return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
         if not printer_manager:
-            print(f" [DEBUG] 打印机管理器未就绪")
+            logger.warning("Preview request rejected: printer manager not ready")
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
 
-        print(f" [DEBUG] 检查缓存...")
         file_mgr = get_file_manager()
         cached = file_mgr.get_preview_resource(file_id) if file_mgr else None
-        print(f" [DEBUG] 缓存命中: {bool(cached)}")
-        
+        logger.debug(
+            "Preview request started: file_id=%s file_type=%s file_name=%s option_keys=%s cached=%s body_bytes=%s",
+            file_id,
+            file_type,
+            file_name,
+            sorted(options.keys()),
+            bool(cached),
+            len(body_bytes),
+        )
+
         if cached and cached.get("file_url") != file_url:
-            print(f" [DEBUG] URL变化，清理旧文件...")
+            logger.debug("Preview source URL changed: file_id=%s", file_id)
             file_mgr.release_preview_resource(file_id, reason="url_changed")
             cached = None
 
-        print(f" [DEBUG] 解析page_index...")
         try:
             page_index = int(options.get("page_index") or 0)
         except Exception:
             page_index = 0
-        print(f" [DEBUG] page_index={page_index}")
-        
+
         if page_index < 0:
             page_index = 0
-        print(f" [DEBUG] 构建cache key...")
         options_for_cache = dict(options)
         options_for_cache["page_index"] = page_index
         key = f"{file_id}:{json.dumps(options_for_cache, sort_keys=True, ensure_ascii=False)}"
-        print(f" [DEBUG] cache key长度: {len(key)}")
-        
+
         if key in preview_cache:
-            print(f" [DEBUG] 命中缓存，直接返回")
+            logger.info("Preview cache hit: file_id=%s page_index=%s", file_id, page_index)
             cached_payload = preview_cache[key]
-            # 返回时排除 timestamp 字段
             return {
-                "success": True, 
-                "preview_url": cached_payload["preview_url"], 
-                "page_count": cached_payload["page_count"], 
-                "page_index": cached_payload["page_index"]
+                "success": True,
+                "preview_url": cached_payload["preview_url"],
+                "page_count": cached_payload["page_count"],
+                "page_index": cached_payload["page_index"],
             }
 
-        print(f" [DEBUG] 检查文件路径...")
         file_path = cached.get("source_path") if cached else None
-        print(f" [DEBUG] file_path={file_path}")
         if not file_path or not os.path.exists(file_path):
-            print(f" [DEBUG] 文件不存在，开始下载...")
+            logger.debug("Preview source missing locally, downloading: file_id=%s", file_id)
             file_path, err = _download_preview_file(file_url, file_name, file_id)
             if not file_path:
-                print(f" [DEBUG] 下载失败: {err}")
+                logger.warning("Preview source download failed: file_id=%s error=%s", file_id, err)
                 return JSONResponse(status_code=500, content={"success": False, "message": err or "下载文件失败"})
             if file_mgr:
                 cached_pdf = cached.get("pdf_path") if cached else None
@@ -1201,11 +1215,12 @@ async def preview(request: Request):
                     cached_pdf = None
                 file_mgr.register_preview_resource(file_id, file_url, file_path, cached_pdf)
         else:
-            # 更新访问时间
             if file_mgr:
                 file_mgr.touch_preview_resource(file_id)
 
-        image, page_count, resolved_page_index, err = _generate_preview_image(file_id, file_path, file_name, file_type, options, page_index)
+        image, page_count, resolved_page_index, err = _generate_preview_image(
+            file_id, file_path, file_name, file_type, options, page_index
+        )
         if not image:
             return JSONResponse(status_code=500, content={"success": False, "message": err or "预览生成失败"})
 
@@ -1214,20 +1229,23 @@ async def preview(request: Request):
         encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
         data_url = f"data:image/png;base64,{encoded}"
         cache_key = f"{file_id}:{json.dumps({**options_for_cache, 'page_index': resolved_page_index}, sort_keys=True, ensure_ascii=False)}"
-        # 存储预览图时添加时间戳用于自动清理
         preview_cache[cache_key] = {
-            "preview_url": data_url, 
-            "page_count": page_count, 
+            "preview_url": data_url,
+            "page_count": page_count,
             "page_index": resolved_page_index,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
+        logger.info(
+            "Preview generated: file_id=%s page_index=%s page_count=%s",
+            file_id,
+            resolved_page_index,
+            page_count,
+        )
         return {"success": True, "preview_url": data_url, "page_count": page_count, "page_index": resolved_page_index}
     except Exception as e:
-        import traceback
-        error_detail = traceback.format_exc()
-        print(f" [ERROR] 预览接口异常: {e}")
-        print(f" [DEBUG] 错误详情:\n{error_detail}")
+        logger.exception("Preview request failed")
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
 
 @app.post("/api/print")
 async def submit_print(request: Request):
@@ -1684,10 +1702,18 @@ app.include_router(admin_router)
 
 if __name__ == "__main__":
     from printer_config import PrinterConfig
-    config = PrinterConfig().config
+    config_repo = PrinterConfig()
+    log_settings = configure_logging(config_repo.get_full_config())
+    config = config_repo.config
     network_cfg = config.get("network", {})
     bind_address = network_cfg.get("bind_address", "127.0.0.1")
     port = network_cfg.get("port", 7860)
     
     logger.info(f" 启动服务: {bind_address}:{port}")
-    uvicorn.run("main:app", host=bind_address, port=port, reload=False)
+    uvicorn.run(
+        app,
+        host=bind_address,
+        port=port,
+        reload=False,
+        access_log=log_settings["access_log"],
+    )

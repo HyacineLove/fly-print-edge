@@ -3,11 +3,14 @@ Windows打印机实现
 包含所有Windows平台的打印机操作
 """
 
+import logging
 import platform
 import os
 import json
 import shutil
 from typing import List, Dict, Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Windows特定导入
 if platform.system() == "Windows":
@@ -26,7 +29,7 @@ if platform.system() == "Windows":
         WMI_AVAILABLE = True
     except ImportError:
         WMI_AVAILABLE = False
-        print(" [WARNING] WMI模块不可用，将使用轮询方式监控打印任务")
+        logger.warning("WMI module unavailable; falling back to polling for print jobs")
 else:
     WIN32_AVAILABLE = False
     WMI_AVAILABLE = False
@@ -39,7 +42,7 @@ class WindowsEnterprisePrinter:
         self.available = WIN32_AVAILABLE
         self._wmi_query_state: Dict[str, str] = {}
         if not self.available:
-            print(" [WARNING] Windows打印API不可用，请安装pywin32")
+            logger.warning("Windows print API unavailable; install pywin32")
     
     def discover_local_printers(self) -> List[Dict]:
         """发现本地已安装的打印机"""
@@ -294,24 +297,24 @@ class WindowsEnterprisePrinter:
         if print_options:
             user_paper_size = print_options.get('paper_size') or print_options.get('page_size')
             if user_paper_size:
-                print(f" [INFO] 使用用户指定的纸张：{user_paper_size}")
+                logger.debug("Using user-selected paper size: %s", user_paper_size)
                 return str(user_paper_size).strip()
         
         # 根据文件类型自动检测
         if ext == '.pdf':
             detected = self._detect_pdf_page_size(file_path)
             if detected:
-                print(f" [INFO] PDF 自动检测纸张：{detected}")
+                logger.debug("Auto-detected PDF paper size: %s", detected)
                 return detected
         elif ext in ['.doc', '.docx']:
             detected = self._detect_word_document_size(file_path)
             if detected:
-                print(f" [INFO] Word 文档自动检测纸张：{detected}")
+                logger.debug("Auto-detected Word paper size: %s", detected)
                 return detected
         
         # 兜底：返回默认设置
         default_size = self._get_setting("default_paper_size") or "A4"
-        print(f" [INFO] 使用默认纸张：{default_size}")
+        logger.debug("Using default paper size: %s", default_size)
         return default_size
     
     def _resolve_image_layout_options(self, print_options: Optional[Dict[str, Any]] = None, file_path: Optional[str] = None) -> Dict[str, Any]:
@@ -664,11 +667,11 @@ class WindowsEnterprisePrinter:
                 
                 time.sleep(0.1)
             
-            print(f" [WARNING] 在{max_wait}秒内未能从打印队列获取job_id")
+            logger.warning("Did not obtain job_id from print queue within %.1fs", max_wait)
             return None
             
         except Exception as e:
-            print(f" [ERROR] 获取最新job_id失败: {e}")
+            logger.exception("Failed to get latest job_id from print queue")
             return None
     
     def _get_job_status_text(self, status: int) -> str:
@@ -710,12 +713,12 @@ class WindowsEnterprisePrinter:
             try:
                 printer_handle = win32print.OpenPrinter(printer_name)
                 win32print.ClosePrinter(printer_handle)
-                print(f" [INFO] 检测到系统已安装打印机: {printer_name}")
+                logger.info("System printer available: %s", printer_name)
             except Exception:
-                print(f" [INFO] 打印机未在系统中安装: {printer_name}")
+                logger.warning("System printer missing: %s", printer_name)
                 return {"success": False, "message": f"打印机 {printer_name} 未安装到Windows系统，无法提交到打印队列"}
             
-            print(f" [INFO] 使用系统打印（支持打印参数）")
+            logger.debug("Using system print path with print options support")
             
             # 检查文件类型（系统打印路径）
             file_ext = os.path.splitext(file_path)[1].lower()
@@ -734,7 +737,7 @@ class WindowsEnterprisePrinter:
                 return self._print_raw_file(printer_name, file_path, job_name, print_options)
                 
         except Exception as e:
-            print(f"提交打印任务失败: {e}")
+            logger.exception("Submitting print job failed")
             return {"success": False, "message": f"提交打印任务失败: {e}"}
 
     def _print_word_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
@@ -1515,10 +1518,10 @@ class WindowsEnterprisePrinter:
                                         img_height_inch = img.height / 96.0
                                         detected_size = self._identify_paper_size(img_width_inch, img_height_inch)
                                         if detected_size:
-                                            print(f" [INFO] 图像自动检测纸张：{detected_size}")
+                                            logger.debug("Auto-detected image paper size: %s", detected_size)
                                             paper_size = detected_size
                                 except Exception as e:
-                                    print(f" [WARN] 检测图像尺寸失败：{e}")
+                                    logger.debug("Image size detection failed", exc_info=True)
                         
                         if paper_size and paper_size != '默认':
                             paper_size_map = {
@@ -1586,7 +1589,7 @@ class WindowsEnterprisePrinter:
                                 pass
                             
                     except Exception as e:
-                        print(f"设置打印选项失败: {e}")
+                        logger.debug("Applying image print options failed", exc_info=True)
                         devmode = None
                 
                 # 创建打印机设备上下文
@@ -1639,13 +1642,39 @@ class WindowsEnterprisePrinter:
                 scale_mode = layout_options.get("scale_mode", "fit")
                 max_upscale = self._safe_float(layout_options.get("max_upscale"), 3.0)
                 if scale_mode == "actual":
-                    print(f" [INFO] 图片打印模式=actual: {img_width}x{img_height} -> {new_width}x{new_height}")
+                    logger.debug(
+                        "Image print scaling: mode=actual src=%sx%s dst=%sx%s",
+                        img_width,
+                        img_height,
+                        new_width,
+                        new_height,
+                    )
                 elif scale_mode == "fill":
-                    print(f" [INFO] 图片打印模式=fill, max_upscale={max_upscale}: {img_width}x{img_height} -> {new_width}x{new_height}")
+                    logger.debug(
+                        "Image print scaling: mode=fill max_upscale=%s src=%sx%s dst=%sx%s",
+                        max_upscale,
+                        img_width,
+                        img_height,
+                        new_width,
+                        new_height,
+                    )
                 elif scale < 1.0:
-                    print(f" [INFO] 图片打印模式=fit(缩小): {img_width}x{img_height} -> {new_width}x{new_height}")
+                    logger.debug(
+                        "Image print scaling: mode=fit-shrink src=%sx%s dst=%sx%s",
+                        img_width,
+                        img_height,
+                        new_width,
+                        new_height,
+                    )
                 else:
-                    print(f" [INFO] 图片打印模式=fit, max_upscale={max_upscale}: {img_width}x{img_height} -> {new_width}x{new_height}")
+                    logger.debug(
+                        "Image print scaling: mode=fit max_upscale=%s src=%sx%s dst=%sx%s",
+                        max_upscale,
+                        img_width,
+                        img_height,
+                        new_width,
+                        new_height,
+                    )
                 
                 # 加载BMP文件为位图并绘制
                 hbmp = win32gui.LoadImage(
@@ -1695,12 +1724,12 @@ class WindowsEnterprisePrinter:
                 job_id = self._get_latest_job_id(printer_name, job_name or os.path.basename(file_path))
                 
                 if job_id:
-                    print(f" [INFO] 图片打印成功，获取到任务ID: {job_id}")
+                    logger.info("Image print submitted with job_id=%s", job_id)
                 else:
-                    print(f" [WARNING] 图片打印成功但无法获取任务ID")
+                    logger.warning("Image print submitted but no job_id was returned")
                 
             except Exception as print_error:
-                print(f"打印过程失败: {print_error}")
+                logger.exception("Image print process failed")
                 if printer_handle:
                     try:
                         win32print.ClosePrinter(printer_handle)
@@ -1724,7 +1753,7 @@ class WindowsEnterprisePrinter:
             }
             
         except Exception as e:
-            print(f"图片打印失败: {e}")
+            logger.exception("Image printing failed")
             return {"success": False, "message": f"图片打印失败: {e}"}
     
     def get_printer_capabilities(self, printer_name: str, parser_manager=None) -> Dict:
@@ -1911,7 +1940,11 @@ class WindowsEnterprisePrinter:
             )
             if result.returncode != 0:
                 if self._wmi_query_state.get(printer_name) != "failed":
-                    print(f" [WARNING] WMI状态查询失败: {printer_name} (returncode={result.returncode})")
+                    logger.warning(
+                        "WMI printer status query failed: printer=%s returncode=%s",
+                        printer_name,
+                        result.returncode,
+                    )
                     self._wmi_query_state[printer_name] = "failed"
                 return None
             work_offline = None
@@ -1944,7 +1977,7 @@ class WindowsEnterprisePrinter:
                 status_text = "错误"
 
             if self._wmi_query_state.get(printer_name) != "ok":
-                print(f" [INFO] WMI状态查询可用: {printer_name}")
+                logger.debug("WMI printer status query available: printer=%s", printer_name)
                 self._wmi_query_state[printer_name] = "ok"
             return {
                 "status_text": status_text,
@@ -1956,7 +1989,7 @@ class WindowsEnterprisePrinter:
             }
         except Exception as e:
             if self._wmi_query_state.get(printer_name) != "failed":
-                print(f" [WARNING] WMI状态查询异常: {printer_name} ({e})")
+                logger.warning("WMI printer status query exception: printer=%s error=%s", printer_name, e)
                 self._wmi_query_state[printer_name] = "failed"
             return None
     

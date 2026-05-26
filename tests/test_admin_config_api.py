@@ -25,7 +25,7 @@ class DummyConfig:
                 "heartbeat_interval": 30,
                 "node_id": "node-123",
             },
-            "settings": {"copies_min": 1, "copies_max": 3},
+            "settings": {"copies_min": 1, "copies_max": 3, "log_level": "INFO", "debug_logging": False},
             "network": {"bind_address": "127.0.0.1", "port": 7860},
             "printers": {"discovery_mode": "auto", "static_list": []},
         }
@@ -94,6 +94,8 @@ class AdminConfigApiTests(unittest.TestCase):
         self.assertTrue(result["cloud"]["client_secret_configured"])
         self.assertEqual(result["settings"]["copies_min"], 1)
         self.assertEqual(result["settings"]["copies_max"], 3)
+        self.assertEqual(result["settings"]["log_level"], "INFO")
+        self.assertEqual(result["settings"]["debug_logging"], False)
 
     def test_save_config_keeps_secret_when_blank(self):
         request = DummyRequest({
