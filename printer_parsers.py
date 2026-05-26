@@ -3,7 +3,10 @@
 支持多种品牌打印机的参数解析
 """
 
+import logging
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class PrinterParameterParser:
@@ -52,7 +55,7 @@ class HitiParser(PrinterParameterParser):
     
     def parse(self, output: str) -> Dict[str, Any]:
         """解析Hiti打印机的参数"""
-        print(f" [DEBUG] 使用HitiParser解析照片打印机参数")
+        logger.debug("Using HitiParser for printer capabilities")
         capabilities = {
             "resolution": ["Fast", "Normal", "Best"],
             "page_size": ["A4", "Letter", "Legal"],
@@ -67,7 +70,7 @@ class HitiParser(PrinterParameterParser):
                 if not line:
                     continue
                 
-                print(f" [DEBUG] Hiti解析行: {line}")
+                logger.debug("Hiti option line: %s", line)
                 option_name, clean_values = self.parse_line(line)
                 
                 if not option_name or not clean_values:
@@ -78,23 +81,23 @@ class HitiParser(PrinterParameterParser):
                 # Hiti P525L专用参数映射
                 if 'hpoutputquality' in option_lower or 'printquality' in option_lower:
                     capabilities["resolution"] = clean_values
-                    print(f" [DEBUG] Hiti打印质量: {clean_values}")
+                    logger.debug("Hiti resolution options: %s", clean_values)
                 elif 'pagesize' in option_lower or 'media size' in option_lower:
                     capabilities["page_size"] = clean_values
-                    print(f" [DEBUG] Hiti纸张大小: {clean_values}")
+                    logger.debug("Hiti page size options: %s", clean_values)
                 elif 'hpcoloroutput' in option_lower or 'colormode' in option_lower:
                     capabilities["color_model"] = clean_values
-                    print(f" [DEBUG] Hiti色彩模式: {clean_values}")
+                    logger.debug("Hiti color options: %s", clean_values)
                 elif 'mediatype' in option_lower or 'papertype' in option_lower:
                     capabilities["media_type"] = clean_values
-                    print(f" [DEBUG] Hiti纸张类型: {clean_values}")
+                    logger.debug("Hiti media type options: %s", clean_values)
                 elif 'hppapersource' in option_lower:
                     # Hiti特有的纸张来源（卷纸/手动）
                     capabilities["paper_source"] = clean_values
-                    print(f" [DEBUG] Hiti纸张来源: {clean_values}")
+                    logger.debug("Hiti paper source options: %s", clean_values)
                     
         except Exception as e:
-            print(f" [DEBUG] HitiParser解析出错: {e}")
+            logger.debug("HitiParser failed", exc_info=True)
         
         return capabilities
 
@@ -111,7 +114,7 @@ class HPParser(PrinterParameterParser):
     
     def parse(self, output: str) -> Dict[str, Any]:
         """解析HP打印机的参数"""
-        print(f" [DEBUG] 使用HPParser解析HP LaserJet打印机参数")
+        logger.debug("Using HPParser for printer capabilities")
         capabilities = {
             "resolution": ["300dpi", "600dpi", "1200dpi"],
             "page_size": ["A4", "Letter", "Legal"],
@@ -126,7 +129,7 @@ class HPParser(PrinterParameterParser):
                 if not line:
                     continue
                 
-                print(f" [DEBUG] HP解析行: {line}")
+                logger.debug("HP option line: %s", line)
                 option_name, clean_values = self.parse_line(line)
                 
                 if not option_name or not clean_values:
@@ -137,22 +140,22 @@ class HPParser(PrinterParameterParser):
                 # HP打印机参数映射
                 if 'resolution' in option_lower:
                     capabilities["resolution"] = clean_values
-                    print(f" [DEBUG] HP分辨率: {clean_values}")
+                    logger.debug("HP resolution options: %s", clean_values)
                 elif 'pagesize' in option_lower or 'papersize' in option_lower:
                     capabilities["page_size"] = clean_values
-                    print(f" [DEBUG] HP纸张大小: {clean_values}")
+                    logger.debug("HP page size options: %s", clean_values)
                 elif 'duplex' in option_lower:
                     capabilities["duplex"] = clean_values
-                    print(f" [DEBUG] HP双面打印: {clean_values}")
+                    logger.debug("HP duplex options: %s", clean_values)
                 elif 'colormodel' in option_lower:
                     capabilities["color_model"] = clean_values
-                    print(f" [DEBUG] HP颜色模式: {clean_values}")
+                    logger.debug("HP color options: %s", clean_values)
                 elif 'mediatype' in option_lower:
                     capabilities["media_type"] = clean_values
-                    print(f" [DEBUG] HP介质类型: {clean_values}")
+                    logger.debug("HP media type options: %s", clean_values)
                     
         except Exception as e:
-            print(f" [DEBUG] HPParser解析出错: {e}")
+            logger.debug("HPParser failed", exc_info=True)
         
         return capabilities
 
@@ -169,7 +172,7 @@ class GenericCUPSParser(PrinterParameterParser):
     
     def parse(self, output: str) -> Dict[str, Any]:
         """通用CUPS参数解析（保留原有逻辑）"""
-        print(f" [DEBUG] 使用GenericCUPSParser解析通用CUPS参数")
+        logger.debug("Using GenericCUPSParser for printer capabilities")
         capabilities = {
             "resolution": ["300dpi", "600dpi", "1200dpi"],
             "page_size": ["A4", "Letter", "Legal"],
@@ -184,7 +187,7 @@ class GenericCUPSParser(PrinterParameterParser):
                 if not line:
                     continue
                 
-                print(f" [DEBUG] 通用解析行: {line}")
+                logger.debug("Generic option line: %s", line)
                 option_name, clean_values = self.parse_line(line)
                 
                 if not option_name or not clean_values:
@@ -195,22 +198,22 @@ class GenericCUPSParser(PrinterParameterParser):
                 # 通用参数映射（原有逻辑）
                 if 'resolution' in option_lower or 'printquality' in option_lower:
                     capabilities["resolution"] = clean_values
-                    print(f" [DEBUG] 通用分辨率/质量: {clean_values}")
+                    logger.debug("Generic resolution options: %s", clean_values)
                 elif 'pagesize' in option_lower or 'papersize' in option_lower or 'media size' in option_lower:
                     capabilities["page_size"] = clean_values
-                    print(f" [DEBUG] 通用纸张大小: {clean_values}")
+                    logger.debug("Generic page size options: %s", clean_values)
                 elif 'duplex' in option_lower:
                     capabilities["duplex"] = clean_values
-                    print(f" [DEBUG] 通用双面打印: {clean_values}")
+                    logger.debug("Generic duplex options: %s", clean_values)
                 elif 'colormodel' in option_lower or 'colormode' in option_lower or 'output mode' in option_lower:
                     capabilities["color_model"] = clean_values
-                    print(f" [DEBUG] 通用颜色模式: {clean_values}")
+                    logger.debug("Generic color options: %s", clean_values)
                 elif 'mediatype' in option_lower or 'media type' in option_lower:
                     capabilities["media_type"] = clean_values
-                    print(f" [DEBUG] 通用介质类型: {clean_values}")
+                    logger.debug("Generic media type options: %s", clean_values)
                     
         except Exception as e:
-            print(f" [DEBUG] GenericCUPSParser解析出错: {e}")
+            logger.debug("GenericCUPSParser failed", exc_info=True)
         
         return capabilities
 
@@ -227,20 +230,20 @@ class PrinterParameterParserManager:
         ]
         # 按优先级排序
         self.parsers.sort(key=lambda p: p.get_priority())
-        print(f" [DEBUG] 初始化解析器管理器，共{len(self.parsers)}个解析器")
+        logger.debug("Printer parser manager initialized: parser_count=%s", len(self.parsers))
     
     def get_capabilities(self, printer_name: str, lpoptions_output: str) -> Dict[str, Any]:
         """获取打印机参数，自动选择合适的解析器"""
-        print(f" [DEBUG] 为打印机 '{printer_name}' 选择解析器")
+        logger.debug("Selecting parser for printer: %s", printer_name)
         
         for parser in self.parsers:
             if parser.can_handle(printer_name, lpoptions_output):
                 parser_name = parser.__class__.__name__
-                print(f" [DEBUG] 选择解析器: {parser_name}")
+                logger.debug("Selected parser: %s", parser_name)
                 return parser.parse(lpoptions_output)
         
         # 理论上不会到这里，因为GenericCUPSParser总是能处理
-        print(f" [DEBUG] 没有找到合适的解析器，使用默认参数")
+        logger.debug("No specialized parser matched; using fallback defaults")
         return {
             "resolution": ["300dpi", "600dpi", "1200dpi"],
             "page_size": ["A4", "Letter", "Legal"],

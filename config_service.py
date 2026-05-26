@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import requests
 
 from cloud_auth import CloudAuthClient
+from logging_utils import VALID_LOG_LEVELS
 
 
 class ConfigService:
@@ -43,6 +44,10 @@ class ConfigService:
             settings.get("copies_min"),
             settings.get("copies_max"),
         )
+        settings["log_level"] = str(settings.get("log_level") or "INFO").strip().upper()
+        if settings["log_level"] not in VALID_LOG_LEVELS:
+            settings["log_level"] = "INFO"
+        settings["debug_logging"] = self._normalize_bool(settings.get("debug_logging"))
         data.setdefault("network", {"bind_address": "127.0.0.1", "port": 7860})
         data.setdefault("printers", {"discovery_mode": "auto", "static_list": []})
         data["meta"] = {
@@ -122,6 +127,12 @@ class ConfigService:
                     raise ValueError
             except (TypeError, ValueError):
                 errors.append("settings.default_max_upscale must be a positive number")
+
+        if settings.get("log_level") not in (None, "", *VALID_LOG_LEVELS):
+            errors.append("settings.log_level must be DEBUG, INFO, WARNING, or ERROR")
+
+        if settings.get("debug_logging") not in (None, "", True, False):
+            errors.append("settings.debug_logging must be a boolean")
 
         copies_min = 1
         if settings.get("copies_min") not in (None, ""):
@@ -258,6 +269,13 @@ class ConfigService:
     def _is_valid_url(self, value: str) -> bool:
         parsed = urlparse(value)
         return bool(parsed.scheme and parsed.netloc)
+
+    def _normalize_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value in (None, ""):
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _normalize_optional_positive_number(self, value: Any) -> Any:
         if value in (None, ""):

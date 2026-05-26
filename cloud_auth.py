@@ -3,10 +3,13 @@ fly-print-cloud OAuth2认证客户端
 实现Client Credentials流程获取access token
 """
 
+import logging
 import requests
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class CloudAuthClient:
@@ -37,7 +40,7 @@ class CloudAuthClient:
     def _refresh_token(self) -> Optional[str]:
         """刷新access token"""
         try:
-            print(f" [DEBUG] 请求OAuth2 token: {self.auth_url}")
+            logger.debug("Requesting OAuth2 token: url=%s", self.auth_url)
             
             data = {
                 'grant_type': 'client_credentials',
@@ -61,14 +64,18 @@ class CloudAuthClient:
                 
                 self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
                 
-                print(f" [DEBUG] OAuth2 token获取成功，过期时间: {self.token_expires_at}")
+                logger.debug("OAuth2 token refreshed: expires_at=%s", self.token_expires_at)
                 return self.access_token
             else:
-                print(f" [DEBUG] OAuth2 token获取失败: {response.status_code} - {response.text}")
+                logger.warning(
+                    "OAuth2 token request failed: status=%s body=%s",
+                    response.status_code,
+                    response.text,
+                )
                 return None
                 
         except Exception as e:
-            print(f" [DEBUG] OAuth2认证异常: {e}")
+            logger.exception("OAuth2 authentication failed")
             return None
     
     def get_auth_headers(self) -> Dict[str, str]:

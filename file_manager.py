@@ -6,9 +6,11 @@
 import os
 import time
 import threading
+import logging
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
+logger = logging.getLogger(__name__)
 
 class FileManager:
     """文件生命周期管理器"""
@@ -51,25 +53,25 @@ class FileManager:
         self.running = False
         self.cleanup_thread: Optional[threading.Thread] = None
         
-        print(f" [FileManager] 初始化: 清理间隔={cleanup_interval}s, 文件TTL={file_ttl}s")
+        logger.info("FileManager initialized: cleanup_interval=%ss file_ttl=%ss", cleanup_interval, file_ttl)
     
     def start(self):
         """启动后台清理线程"""
         if self.running:
-            print(" [FileManager] 清理线程已在运行")
+            logger.debug("FileManager cleanup thread already running")
             return
         
         self.running = True
         self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
         self.cleanup_thread.start()
-        print(" [FileManager] 后台清理线程已启动")
+        logger.debug("FileManager cleanup thread started")
     
     def stop(self):
         """停止后台清理线程"""
         self.running = False
         if self.cleanup_thread:
             self.cleanup_thread.join(timeout=5)
-        print(" [FileManager] 后台清理线程已停止")
+        logger.debug("FileManager cleanup thread stopped")
     
     def _cleanup_loop(self):
         """后台清理循环"""
@@ -78,8 +80,8 @@ class FileManager:
                 time.sleep(self.cleanup_interval)
                 if self.running:
                     self.cleanup_expired_files()
-            except Exception as e:
-                print(f" [FileManager] 清理循环异常: {e}")
+            except Exception:
+                logger.exception("FileManager cleanup loop failed")
     
     def register_preview_resource(self, file_id: str, file_url: str, source_path: str, pdf_path: Optional[str] = None):
         """注册或更新预览资源。"""
@@ -92,7 +94,7 @@ class FileManager:
                 "created_at": now,
                 "last_access": now
             }
-            print(f" [FileManager] 注册预览文件: {file_id} -> {os.path.basename(source_path)}")
+            logger.debug("Registered preview resource: file_id=%s file=%s", file_id, os.path.basename(source_path))
     
     def register_preview_file(self, file_id: str, file_path: str, pdf_path: Optional[str] = None):
         """兼容旧接口。"""
@@ -134,18 +136,18 @@ class FileManager:
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                print(f" [FileManager] [{reason}] 删除预览文件: {os.path.basename(file_path)}")
+                logger.debug("Released preview source file: file_id=%s reason=%s file=%s", file_id, reason, os.path.basename(file_path))
             except Exception as e:
-                print(f" [FileManager] 删除文件失败: {file_path}, 错误: {e}")
+                logger.warning("Failed to delete preview source file: file=%s error=%s", file_path, e)
                 success = False
 
         pdf_path = file_info.get("pdf_path")
         if pdf_path and os.path.exists(pdf_path):
             try:
                 os.remove(pdf_path)
-                print(f" [FileManager] [{reason}] 删除PDF文件: {os.path.basename(pdf_path)}")
+                logger.debug("Released preview pdf file: file_id=%s reason=%s file=%s", file_id, reason, os.path.basename(pdf_path))
             except Exception as e:
-                print(f" [FileManager] 删除PDF失败: {pdf_path}, 错误: {e}")
+                logger.warning("Failed to delete preview pdf file: file=%s error=%s", pdf_path, e)
                 success = False
 
         self._clear_preview_cache_entries(file_id)
@@ -174,7 +176,7 @@ class FileManager:
                     expired_files.append(file_id)
 
         if expired_files:
-            print(f" [FileManager] 发现 {len(expired_files)} 个过期文件，开始清理...")
+            logger.info("Cleaning expired preview resources: count=%s", len(expired_files))
             for file_id in expired_files:
                 self.release_preview_resource(file_id, reason="expired")
 
@@ -196,7 +198,7 @@ class FileManager:
         if expired_keys:
             for key in expired_keys:
                 self.preview_cache.pop(key, None)
-            print(f" [FileManager] 清理 {len(expired_keys)} 个过期预览图缓存")
+            logger.info("Cleaning expired preview cache entries: count=%s", len(expired_keys))
 
     def cleanup_all_preview_files(self):
         """清理所有预览文件（关闭时调用）"""
@@ -204,7 +206,7 @@ class FileManager:
             file_ids = list(self.preview_files.keys())
 
         if file_ids:
-            print(f" [FileManager] 清理所有预览文件: {len(file_ids)} 个")
+            logger.info("Cleaning all preview resources during shutdown: count=%s", len(file_ids))
             for file_id in file_ids:
                 self.release_preview_resource(file_id, reason="shutdown")
 
@@ -260,9 +262,9 @@ class FileManager:
             if file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
-                    print(f" [FileManager] [{reason}] 删除打印文件: {os.path.basename(file_path)}")
+                    logger.info("Released print artifact: artifact_key=%s reason=%s file=%s", artifact_key, reason, os.path.basename(file_path))
                 except Exception as e:
-                    print(f" [FileManager] 删除文件失败: {file_path}, 错误: {e}")
+                    logger.warning("Failed to delete print artifact: file=%s error=%s", file_path, e)
                     success = False
         return success
 

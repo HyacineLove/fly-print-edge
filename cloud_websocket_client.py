@@ -8,12 +8,15 @@ import websockets
 import json
 import threading
 import time
+import logging
 import requests
 import os
 import base64
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
 from file_manager import get_file_manager
+
+logger = logging.getLogger(__name__)
 
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
@@ -51,24 +54,24 @@ class CloudWebSocketClient:
         """分发本地产生的消息到处理器"""
         if message_type in self.message_handlers:
             handlers = self.message_handlers[message_type]
-            # print(f" [DEBUG] 本地分发 {len(handlers)} 个处理器处理 {message_type}")
+            # logger.debug(f"本地分发 {len(handlers)} 个处理器处理 {message_type}")
             # 在主线程或当前线程直接执行，因为通常是UI更新
             for handler in handlers:
                 try:
                     handler(data)
                 except Exception as e:
-                    print(f" [ERROR] 处理本地消息异常: {e}")
+                    logger.error(f"处理本地消息异常: {e}")
     
     def start(self):
         """启动WebSocket客户端"""
         if self.running:
-            print(" [WARNING] WebSocket客户端已经在运行")
+            logger.warning("WebSocket客户端已经在运行")
             return
         
         self.running = True
         self.thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self.thread.start()
-        print(" [INFO] WebSocket客户端已启动")
+        logger.info("WebSocket客户端已启动")
     
     def stop(self):
         """停止WebSocket客户端"""
@@ -80,13 +83,13 @@ class CloudWebSocketClient:
                 future = asyncio.run_coroutine_threadsafe(self.websocket.close(), self.loop)
                 future.result(timeout=3)
             except Exception as e:
-                print(f" [DEBUG] 停止WebSocket时关闭连接失败: {e}")
+                logger.debug(f"停止WebSocket时关闭连接失败: {e}")
 
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
 
         self.websocket = None
-        print(" [INFO] WebSocket客户端已停止")
+        logger.info("WebSocket客户端已停止")
     
     def _extract_http_status(self, exc: Exception) -> Optional[int]:
         status = getattr(exc, "status_code", None)
@@ -107,7 +110,7 @@ class CloudWebSocketClient:
             try:
                 self.node_missing_handler(detail)
             except Exception as e:
-                print(f" [ERROR] 鑺傜偣澶辫仈鍥炶皟寮傚父: {e}")
+                logger.error(f"鑺傜偣澶辫仈鍥炶皟寮傚父: {e}")
 
     def _start_cleanup_task(self):
         """启动定期清理过期任务记录的后台线程"""
@@ -117,7 +120,7 @@ class CloudWebSocketClient:
                     time.sleep(300)  # 每5分钟清理一次
                     self._cleanup_completed_jobs()
                 except Exception as e:
-                    print(f" [ERROR] 清理已完成任务缓存异常: {e}")
+                    logger.error(f"清理已完成任务缓存异常: {e}")
         
         cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_thread.start()
@@ -132,12 +135,12 @@ class CloudWebSocketClient:
             del self.completed_jobs[job_id]
         
         if expired_jobs:
-            print(f" [INFO] 清理 {len(expired_jobs)} 个过期任务记录")
+            logger.info(f"清理 {len(expired_jobs)} 个过期任务记录")
     
     def _mark_job_completed(self, job_id: str):
         """标记任务为已完成"""
         self.completed_jobs[job_id] = time.time()
-        print(f" [INFO] 任务已标记为完成: {job_id} (缓存中共 {len(self.completed_jobs)} 个)")
+        logger.debug(f"任务已标记为完成: {job_id} (缓存中共 {len(self.completed_jobs)} 个)")
     
     def _is_job_completed(self, job_id: str) -> bool:
         """检查任务是否已完成"""
@@ -151,7 +154,7 @@ class CloudWebSocketClient:
         try:
             loop.run_until_complete(self._connect_and_listen())
         except Exception as e:
-            print(f" [ERROR] WebSocket异步循环异常: {e}")
+            logger.error(f"WebSocket异步循环异常: {e}")
         finally:
             loop.close()
             self.loop = None
@@ -160,12 +163,12 @@ class CloudWebSocketClient:
         """连接WebSocket并监听消息"""
         while self.running:
             try:
-                print(f" [INFO] 连接WebSocket: {self.websocket_url}")
+                logger.info(f"连接WebSocket: {self.websocket_url}")
                 
                 # 获取认证头
                 token = self.auth_client.get_access_token()
                 if not token:
-                    print(" [ERROR] 无法获取access token，等待重试")
+                    logger.error("无法获取access token，等待重试")
                     self.connected = False
                     await asyncio.sleep(self.reconnect_interval)
                     continue
@@ -187,14 +190,14 @@ class CloudWebSocketClient:
                     self.last_http_status = None
                     self.last_error_message = None
                     self.node_missing = False
-                    print(" [INFO] WebSocket连接成功")
+                    logger.info("WebSocket连接成功")
                     
                     # 监听消息
                     async for message in websocket:
                         try:
                             await self._handle_message(message)
                         except Exception as e:
-                            print(f" [ERROR] 处理WebSocket消息异常: {e}")
+                            logger.error(f"处理WebSocket消息异常: {e}")
                     self.websocket = None
                     self.connected = False
                             
@@ -202,7 +205,7 @@ class CloudWebSocketClient:
                 self.connected = False
                 self.websocket = None
                 self.last_error_message = str(e)
-                print(f" [WARNING] WebSocket连接关闭: {e}")
+                logger.warning(f"WebSocket连接关闭: {e}")
             except Exception as e:
                 self.connected = False
                 self.websocket = None
@@ -210,10 +213,10 @@ class CloudWebSocketClient:
                 self.last_error_message = str(e)
                 if self.last_http_status == 404:
                     self._notify_node_missing("websocket handshake returned 404")
-                print(f" [ERROR] WebSocket连接异常: {e}")
+                logger.error(f"WebSocket连接异常: {e}")
             
             if self.running:
-                print(f" [INFO] {self.reconnect_interval}秒后重连WebSocket")
+                logger.info(f"{self.reconnect_interval}秒后重连WebSocket")
                 await asyncio.sleep(self.reconnect_interval)
     
     async def _handle_message(self, message: str):
@@ -235,21 +238,21 @@ class CloudWebSocketClient:
                 }
                 # 不阻塞后续处理，直接发送
                 await self._send_message(ack_payload)
-                # print(f" [DEBUG] 已自动回复 ACK: {data['msg_id']}")
+                # logger.debug(f"已自动回复 ACK: {data['msg_id']}")
 
             if message_type == "preview_file":
-                print(" [INFO] 收到预览文件消息")
+                logger.debug("收到预览文件消息")
             
             # 处理服务端关闭通知（server_close）
             if message_type == "server_close":
                 close_data = data.get("data") or {}
                 reason = close_data.get("reason") or "unknown"
                 msg = close_data.get("message") or ""
-                print(f" [INFO] 收到服务端关闭通知: reason={reason}, message={msg}")
+                logger.info(f"收到服务端关闭通知: reason={reason}, message={msg}")
                 
                 # 节点被删除时，按照协议要求：不要自动重连，等待手动重新注册
                 if reason == "node_deleted":
-                    print(" [INFO] 节点已被删除，将停止WebSocket重连，等待手动重新注册")
+                    logger.info("节点已被删除，将停止WebSocket重连，等待手动重新注册")
                     # 通过本地消息分发，将事件通知到前端（SSE）
                     local_msg = {
                         "type": "cloud_error",
@@ -271,12 +274,12 @@ class CloudWebSocketClient:
                     # 在线程池中执行处理器，避免阻塞WebSocket
                     await loop.run_in_executor(None, handler, data)
             else:
-                print(f" [WARNING] 未找到消息类型处理器: {message_type}")
+                logger.warning(f"未找到消息类型处理器: {message_type}")
                 
         except json.JSONDecodeError as e:
-            print(f" [ERROR] WebSocket消息JSON解析失败: {e}")
+            logger.error(f"WebSocket消息JSON解析失败: {e}")
         except Exception as e:
-            print(f" [ERROR] 处理WebSocket消息异常: {e}")
+            logger.error(f"处理WebSocket消息异常: {e}")
     
     async def _send_message(self, data: Dict[str, Any]) -> bool:
         """发送消息到WebSocket"""
@@ -287,13 +290,13 @@ class CloudWebSocketClient:
             await self.websocket.send(message)
             return True
         except Exception as e:
-            print(f" [ERROR] 发送WebSocket消息失败: {e}")
+            logger.error(f"发送WebSocket消息失败: {e}")
             return False
 
     async def send_message(self, data: Dict[str, Any]) -> bool:
         """异步发送消息 (可从任何循环调用)"""
         if not self.loop or not self.loop.is_running():
-            print(" [WARNING] WebSocket事件循环未运行，无法发送消息")
+            logger.warning("WebSocket事件循环未运行，无法发送消息")
             return False
             
         try:
@@ -312,13 +315,13 @@ class CloudWebSocketClient:
                 # 等待结果（这里需要包装成 awaitable）
                 return await asyncio.wrap_future(future)
         except Exception as e:
-            print(f" [ERROR] 异步发送消息异常: {e}")
+            logger.error(f"异步发送消息异常: {e}")
             return False
 
     def send_message_sync(self, data: Dict[str, Any]) -> bool:
         """同步发送消息（在其他线程中调用）"""
         if not self.loop or not self.loop.is_running():
-            print(" [WARNING] WebSocket事件循环未运行，无法发送消息")
+            logger.warning("WebSocket事件循环未运行，无法发送消息")
             return False
             
         try:
@@ -329,14 +332,14 @@ class CloudWebSocketClient:
             try:
                 return bool(future.result(timeout=5))
             except asyncio.TimeoutError:
-                print(f" [ERROR] 同步发送WebSocket消息超时: {data.get('type')}")
+                logger.error(f"同步发送WebSocket消息超时: {data.get('type')}")
                 return False
             except Exception as e:
-                print(f" [ERROR] 同步发送WebSocket消息执行失败: {e}")
+                logger.error(f"同步发送WebSocket消息执行失败: {e}")
                 return False
                 
         except Exception as e:
-            print(f" [ERROR] 同步发送WebSocket消息失败: {e}")
+            logger.error(f"同步发送WebSocket消息失败: {e}")
             return False
 
     def submit_print_params(self, node_id: str, file_id: str, printer_id: str, options: Dict[str, Any]):
@@ -407,13 +410,14 @@ class CloudWebSocketClient:
 class PrintJobHandler:
     """打印任务处理器"""
     
-    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None, status_reporter=None):
+    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None, status_reporter=None, interactive_job_binder=None):
         self.printer_manager = printer_manager
         self.api_client = api_client
         self.websocket_client = websocket_client
         self.auth_client = auth_client
         self.node_id = node_id
         self.status_reporter = status_reporter  # 打印机状态上报器
+        self.interactive_job_binder = interactive_job_binder
         self.upload_token_callback = None  # 上传凭证成功回调
         self.upload_token_error_callback = None  # 上传凭证错误回调
         self.last_upload_token = None  # 缓存最近的上传凭证
@@ -437,9 +441,9 @@ class PrintJobHandler:
             error_message = data.get("message", "未知错误")
             printer_id = data.get("printer_id")
             
-            print(f" [ERROR] 收到云端错误: [{error_code}] {error_message}")
+            logger.error(f"收到云端错误: [{error_code}] {error_message}")
             if printer_id:
-                print(f"  └─ 相关打印机: {printer_id}")
+                logger.debug(f"  └─ 相关打印机: {printer_id}")
             
             # 检查是否是上传凭证请求的错误响应
             # 上传凭证相关的错误码：node_disabled, node_not_found, printer_disabled, printer_not_found, printer_not_belong_to_node
@@ -453,7 +457,7 @@ class PrintJobHandler:
                 # 调用上传凭证错误回调
                 if self.upload_token_error_callback and callable(self.upload_token_error_callback):
                     self.upload_token_error_callback(error_code, error_message)
-                    print(f"  └─ 已触发上传凭证错误回调")
+                    logger.debug(f"  └─ 已触发上传凭证错误回调")
             
             # 分发错误消息到本地（SSE通知前端）
             if self.websocket_client:
@@ -471,7 +475,7 @@ class PrintJobHandler:
             # 打印机禁用状态已由云端统一管理，不再同步到本地
                     
         except Exception as e:
-            print(f" [ERROR] 处理错误消息异常: {e}")
+            logger.error(f"处理错误消息异常: {e}")
     
     def handle_upload_token(self, message: Dict[str, Any]):
         """处理上传凭证响应
@@ -495,7 +499,7 @@ class PrintJobHandler:
             upload_url = data.get("upload_url")  # API端点
             web_url = data.get("web_url")  # Web页面（优先使用）
             
-            print(f" [INFO] 收到上传凭证，过期时间: {expires_at}")
+            logger.info(f"收到上传凭证，过期时间: {expires_at}")
             
             # 缓存凭证（优先使用 web_url，如果不存在则使用 upload_url）
             self.last_upload_token = {
@@ -509,7 +513,7 @@ class PrintJobHandler:
                 self.upload_token_callback(token, expires_at, web_url if web_url else upload_url)
                 
         except Exception as e:
-            print(f" [ERROR] 处理上传凭证异常: {e}")
+            logger.error(f"处理上传凭证异常: {e}")
     
     def handle_preview_file(self, message: Dict[str, Any]):
         """处理文件预览请求
@@ -527,33 +531,33 @@ class PrintJobHandler:
             file_access_token = data.get("file_access_token")
             file_access_token_expires_at = data.get("file_access_token_expires_at")
 
-            print(f" [INFO] 收到文件预览请求: {file_name} (ID: {file_id})")
+            logger.info(f"收到文件预览请求: {file_name} (ID: {file_id})")
 
             # 检查必需参数（根据云端API文档）
             if not all([file_url, file_id]):
-                print(f" [WARNING] 预览请求参数不完整: file_url={file_url}, file_id={file_id}")
+                logger.warning(f"预览请求参数不完整: file_url={file_url}, file_id={file_id}")
                 return
 
-            print(f" [INFO] 文件预览链接: {file_url}")
-            print(f" [INFO] 文件信息: 类型={file_type}, 大小={file_size} bytes")
+            logger.debug(f"文件预览链接: {file_url}")
+            logger.debug(f"文件信息: 类型={file_type}, 大小={file_size} bytes")
             
             # 保存文件访问 token 到全局字典（使用 main.py 中的全局变量）
             if file_access_token:
                 file_mgr = get_file_manager()
                 if file_mgr:
                     file_mgr.store_file_access_token(file_id, file_access_token, file_access_token_expires_at)
-                    print(f" [INFO] 保存文件访问 token 到统一管理器，过期时间: {file_access_token_expires_at}")
+                    logger.debug(f"保存文件访问 token 到统一管理器，过期时间: {file_access_token_expires_at}")
                 else:
-                    print(" [WARNING] FileManager 未初始化，无法缓存文件访问 token")
+                    logger.warning("FileManager 未初始化，无法缓存文件访问 token")
             else:
-                print(f" [WARNING] 未收到文件访问 token")
+                logger.warning(f"未收到文件访问 token")
             
             # 消息转发由 main.py 中的 handle_cloud_message 统一处理
             # 不需要在这里再次调用 dispatch_local_message
-            print(f" [INFO] 预览消息将由 SSE 转发器自动推送到前端")
+            logger.debug(f"预览消息将由 SSE 转发器自动推送到前端")
 
         except Exception as e:
-            print(f" [ERROR] 处理文件预览请求异常: {e}")
+            logger.error(f"处理文件预览请求异常: {e}")
 
     def handle_print_job(self, message: Dict[str, Any]):
         """处理打印任务消息"""
@@ -571,23 +575,23 @@ class PrintJobHandler:
             if not isinstance(print_options, dict):
                 print_options = {}
             
-            print(f" [INFO] 处理云端打印任务: {job_name} (ID: {job_id})")
+            logger.info(f"处理云端打印任务: {job_name} (ID: {job_id})")
             
             if not all([job_id, printer_name, file_url]):
-                print(" [WARNING] 打印任务参数不完整")
+                logger.warning("打印任务参数不完整")
                 return
 
             try:
-                import main
-                bound_session_id = main.bind_interactive_cloud_job(file_url, job_id)
-                if bound_session_id:
-                    print(f" [INFO] 已将云端任务绑定到当前交互会话: {bound_session_id}")
+                if callable(self.interactive_job_binder):
+                    bound_session_id = self.interactive_job_binder(file_url, job_id)
+                    if bound_session_id:
+                        logger.debug(f"已将云端任务绑定到当前交互会话: {bound_session_id}")
             except Exception as bind_error:
-                print(f" [WARNING] 绑定交互会话失败: {bind_error}")
+                logger.warning(f"绑定交互会话失败: {bind_error}")
             
             # 【去重检查】如果任务已经完成过，直接上报成功，不重复打印
             if self.websocket_client and self.websocket_client._is_job_completed(job_id):
-                print(f" [INFO] 任务 {job_id} 已完成过，跳过重复打印，直接上报成功状态")
+                logger.info(f"任务 {job_id} 已完成过，跳过重复打印，直接上报成功状态")
                 self._report_job_success(job_id, printer_id)
                 return
             
@@ -637,7 +641,7 @@ class PrintJobHandler:
             )
             
             if result.get("success"):
-                print(f" [INFO] 云端打印任务提交成功: {job_id}")
+                logger.info(f"云端打印任务提交成功: {job_id}")
                 # 立即上报打印机状态（任务开始）
                 if self.status_reporter:
                     self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -645,11 +649,11 @@ class PrintJobHandler:
                 self._monitor_job_completion(job_id, printer_name, result.get("job_id"), printer_id)
             else:
                 error_msg = result.get("message", "未知错误")
-                print(f" [ERROR] 云端打印任务提交失败: {error_msg}")
+                logger.error(f"云端打印任务提交失败: {error_msg}")
                 self._report_job_failure(job_id, error_msg)
                 
         except Exception as e:
-            print(f" [ERROR] 处理云端打印任务异常: {e}")
+            logger.error(f"处理云端打印任务异常: {e}")
             # 统一方法已经处理了异常清理
             self._report_job_failure(data.get("job_id"), str(e))
     
@@ -683,7 +687,7 @@ class PrintJobHandler:
             
             # S3签名URL不能带认证头
             if 'X-Amz-Algorithm' in file_url and 'X-Amz-Signature' in file_url:
-                print(" [INFO] 检测到S3签名URL，使用直连下载")
+                logger.debug("检测到S3签名URL，使用直连下载")
             # 优先使用file_access_token（API文档推荐方式）
             elif file_access_token:
                 # 将token作为查询参数添加到URL
@@ -695,20 +699,20 @@ class PrintJobHandler:
                     parsed.scheme, parsed.netloc, parsed.path,
                     parsed.params, new_query, parsed.fragment
                 ))
-                print(" [INFO] 使用file_access_token下载文件")
+                logger.debug("使用file_access_token下载文件")
             else:
                 # 回退到Bearer Token认证
                 if self.api_client and self.api_client.auth_client:
                     headers = self.api_client.auth_client.get_auth_headers()
-                    print(" [INFO] 使用Bearer Token下载文件")
+                    logger.debug("使用Bearer Token下载文件")
                 else:
-                    print(f" [WARNING] 无可用认证方式，尝试直接下载")
+                    logger.warning(f"无可用认证方式，尝试直接下载")
 
-            print(f" [INFO] 下载打印文件: {file_url}")
+            logger.info(f"下载打印文件: {file_url}")
             
             response = requests.get(download_url, headers=headers, timeout=30)
             if response.status_code != 200:
-                print(f" [ERROR] 响应内容: {response.text[:500]}")  # 打印前500字符的错误信息
+                logger.error(f"响应内容: {response.text[:500]}")  # 打印前500字符的错误信息
             
             if response.status_code == 200:
                 # 使用 portable temp 目录
@@ -742,17 +746,17 @@ class PrintJobHandler:
                 with open(temp_file_path, 'wb') as f:
                     f.write(response.content)
                 
-                print(f" [INFO] 文件下载成功: {temp_file_path}")
+                logger.info(f"文件下载成功: {temp_file_path}")
                 file_mgr = get_file_manager()
                 if file_mgr:
                     file_mgr.register_print_artifact(job_id, temp_file_path)
                 return temp_file_path
             else:
-                print(f" [ERROR] 文件下载失败: {response.status_code}")
+                logger.error(f"文件下载失败: {response.status_code}")
                 return None
                 
         except Exception as e:
-            print(f" [ERROR] 下载打印文件异常: {e}")
+            logger.error(f"下载打印文件异常: {e}")
             return None
     
     def _monitor_job_completion(self, cloud_job_id: str, printer_name: str, local_job_id: str, printer_id: str = None):
@@ -812,7 +816,7 @@ class PrintJobHandler:
             try:
                 if not local_job_id:
                     # 没有job_id，通过轮询打印机队列状态判断是否完成
-                    print(f"[WARN] 未获取到job_id，改为队列轮询监控: {cloud_job_id}")
+                    logger.warning(f"未获取到job_id，改为队列轮询监控: {cloud_job_id}")
                     
                     max_wait_time = 120  # 最大等待2分钟
                     check_interval = 1   # 每1秒检查一次
@@ -828,7 +832,7 @@ class PrintJobHandler:
                         if has_error:
                             raw_codes = format_printer_status_codes(printer_detail)
                             err_msg = f"打印机异常({reason}): {printer_status} | 原始状态码: {raw_codes}"
-                            print(f"[ERROR] {err_msg} | 任务: {cloud_job_id}")
+                            logger.error(f"{err_msg} | 任务: {cloud_job_id}")
                             self._report_job_failure(cloud_job_id, err_msg)
                             if self.status_reporter and printer_id:
                                 self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -843,7 +847,7 @@ class PrintJobHandler:
                                 has_error, reason = detect_error_from_status(q_status)
                                 if has_error:
                                     err_msg = f"打印任务异常({reason}): {q_status}"
-                                    print(f"[ERROR] {err_msg} | 任务: {cloud_job_id}")
+                                    logger.error(f"{err_msg} | 任务: {cloud_job_id}")
                                     self._report_job_failure(cloud_job_id, err_msg)
                                     if self.status_reporter and printer_id:
                                         self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -851,12 +855,12 @@ class PrintJobHandler:
 
                             jobs_count = len(queue_jobs)
                             if waited_time % 10 == 0:
-                                print(f"[INFO] 打印机队列中仍有 {jobs_count} 个任务: {cloud_job_id}")
+                                logger.debug(f"打印机队列中仍有 {jobs_count} 个任务: {cloud_job_id}")
                             time.sleep(check_interval)
                             waited_time += check_interval
                         else:
                             # 队列为空，任务完成
-                            print(f"[INFO] 打印机队列为空，任务完成: {cloud_job_id}")
+                            logger.info(f"打印机队列为空，任务完成: {cloud_job_id}")
                             self._report_job_success(cloud_job_id, printer_id)
                             if self.status_reporter and printer_id:
                                 self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -864,7 +868,7 @@ class PrintJobHandler:
                     
                     # 超时按失败处理，避免打印异常被误判为成功
                     err_msg = f"打印任务监控超时({max_wait_time}s)，未确认完成"
-                    print(f"[WARN] {err_msg}: {cloud_job_id}")
+                    logger.warning(f"{err_msg}: {cloud_job_id}")
                     self._report_job_failure(cloud_job_id, err_msg)
                     if self.status_reporter and printer_id:
                         self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -874,7 +878,7 @@ class PrintJobHandler:
                 check_interval = 1   # 每1秒检查一次
                 waited_time = 0
                 
-                print(f"[INFO] 开始监控任务完成: {cloud_job_id} (本地任务ID: {local_job_id})")
+                logger.info(f"开始监控任务完成: {cloud_job_id} (本地任务ID: {local_job_id})")
                 
                 while waited_time < max_wait_time:
                     time.sleep(check_interval)
@@ -886,7 +890,7 @@ class PrintJobHandler:
                     if has_error:
                         raw_codes = format_printer_status_codes(printer_detail)
                         err_msg = f"打印机异常({reason}): {printer_status} | 原始状态码: {raw_codes}"
-                        print(f"[ERROR] {err_msg} | 任务: {cloud_job_id}")
+                        logger.error(f"{err_msg} | 任务: {cloud_job_id}")
                         self._report_job_failure(cloud_job_id, err_msg)
                         if self.status_reporter and printer_id:
                             self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -901,7 +905,7 @@ class PrintJobHandler:
                         has_error, reason = detect_error_from_status(current_status)
                         if has_error:
                             err_msg = f"打印任务异常({reason}): {current_status}"
-                            print(f"[ERROR] {err_msg} | 任务: {cloud_job_id}")
+                            logger.error(f"{err_msg} | 任务: {cloud_job_id}")
                             self._report_job_failure(cloud_job_id, err_msg)
                             if self.status_reporter and printer_id:
                                 self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
@@ -909,7 +913,7 @@ class PrintJobHandler:
                     
                     # 如果任务不存在（完成或失败）
                     if not job_status.get("exists", True):
-                        print(f"[INFO] 任务已从队列中移除（已完成）: {cloud_job_id}")
+                        logger.info(f"任务已从队列中移除（已完成）: {cloud_job_id}")
                         self._report_job_success(cloud_job_id, printer_id)
                         # 任务完成后立即上报打印机状态
                         if self.status_reporter and printer_id:
@@ -921,18 +925,18 @@ class PrintJobHandler:
                         current_status = job_status.get('status', 'unknown')
                         pages_printed = job_status.get('pages_printed', 0)
                         total_pages = job_status.get('total_pages', 0)
-                        print(f"[INFO] 任务处理中: {cloud_job_id} | 状态: {current_status} | 页数: {pages_printed}/{total_pages}")
+                        logger.debug(f"任务处理中: {cloud_job_id} | 状态: {current_status} | 页数: {pages_printed}/{total_pages}")
                 
                 # 超时按失败处理，避免误判成功
                 err_msg = f"打印任务监控超时({max_wait_time}s)，未确认完成"
-                print(f"[WARN] {err_msg}: {cloud_job_id}")
+                logger.warning(f"{err_msg}: {cloud_job_id}")
                 self._report_job_failure(cloud_job_id, err_msg)
                 # 任务完成后立即上报打印机状态
                 if self.status_reporter and printer_id:
                     self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                 
             except Exception as e:
-                print(f"[ERROR] 监控任务完成异常: {e}")
+                logger.error(f"监控任务完成异常: {e}")
                 # 异常按失败处理，避免掩盖真实问题
                 self._report_job_failure(cloud_job_id, f"监控任务异常: {e}")
                 # 异常后也要上报打印机状态
@@ -966,10 +970,10 @@ class PrintJobHandler:
                 
                 if self.websocket_client:
                     self.websocket_client.send_message_sync(message)
-                    print(f" [INFO] 任务状态({status})已通过WebSocket上报: {job_id}")
+                    logger.debug(f"任务状态({status})已通过WebSocket上报: {job_id}")
                 
             except Exception as e:
-                print(f" [ERROR] 报告任务状态异常: {e}")
+                logger.error(f"报告任务状态异常: {e}")
 
     def _report_job_success(self, job_id: str, printer_id: str = None):
         """通过WebSocket报告任务成功
@@ -1001,12 +1005,12 @@ class PrintJobHandler:
                 # 1. 通过WebSocket发送给Cloud
                 if self.websocket_client:
                     self.websocket_client.send_message_sync(message)
-                    print(f" [INFO] 任务成功状态已通过WebSocket上报: {job_id}")
+                    logger.info(f"任务成功状态已通过WebSocket上报: {job_id}")
                     
                     # 【关键】标记任务为已完成，防止重复执行
                     self.websocket_client._mark_job_completed(job_id)
                 else:
-                    print(f" [WARNING] WebSocket连接不可用，无法上报任务状态: {job_id}")
+                    logger.warning(f"WebSocket连接不可用，无法上报任务状态: {job_id}")
                 
                 # 2. 分发本地消息给前端 (SSE)
                 if self.websocket_client:
@@ -1017,10 +1021,10 @@ class PrintJobHandler:
                         "data": job_data
                     }
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
-                    print(f" [INFO] 任务成功状态已分发到本地处理器 (SSE)")
+                    logger.debug(f"任务成功状态已分发到本地处理器 (SSE)")
 
             except Exception as e:
-                print(f" [ERROR] 报告任务成功异常: {e}")
+                logger.error(f"报告任务成功异常: {e}")
     
     def _report_job_failure(self, job_id: str, error_message: str):
         """通过WebSocket报告任务失败"""
@@ -1046,9 +1050,9 @@ class PrintJobHandler:
                 # 1. 通过WebSocket发送给Cloud
                 if self.websocket_client:
                     self.websocket_client.send_message_sync(message)
-                    print(f" [INFO] 任务失败状态已通过WebSocket上报: {job_id}")
+                    logger.info(f"任务失败状态已通过WebSocket上报: {job_id}")
                 else:
-                    print(f" [WARNING] WebSocket连接不可用，无法上报任务状态: {job_id}")
+                    logger.warning(f"WebSocket连接不可用，无法上报任务状态: {job_id}")
                 
                 # 2. 分发本地消息给前端 (SSE)
                 if self.websocket_client:
@@ -1057,7 +1061,7 @@ class PrintJobHandler:
                         "data": job_data
                     }
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
-                    print(f" [INFO] 任务失败状态已分发到本地处理器 (SSE)")
+                    logger.debug(f"任务失败状态已分发到本地处理器 (SSE)")
 
             except Exception as e:
-                print(f" [ERROR] 报告任务失败异常: {e}")
+                logger.error(f"报告任务失败异常: {e}")

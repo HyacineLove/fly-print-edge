@@ -4,10 +4,13 @@ fly-print-cloud 心跳服务
 通过WebSocket发送心跳消息
 """
 
+import logging
 import threading
 import time
 import psutil
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class HeartbeatService:
@@ -35,21 +38,21 @@ class HeartbeatService:
     def start(self):
         """启动心跳服务"""
         if self.running:
-            print(" [DEBUG] 心跳服务已经在运行")
+            logger.debug("Heartbeat service already running")
             return
         
         self.running = True
         self.heartbeat_failures = 0
         self.thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.thread.start()
-        print(f" [DEBUG] 心跳服务已启动，间隔: {self.interval}秒")
+        logger.debug("Heartbeat service started: interval=%ss", self.interval)
     
     def stop(self):
         """停止心跳服务"""
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        print(" [DEBUG] 心跳服务已停止")
+        logger.debug("Heartbeat service stopped")
     
     def _heartbeat_loop(self):
         """心跳循环"""
@@ -63,15 +66,19 @@ class HeartbeatService:
                     self.last_heartbeat_time = time.time()
                 else:
                     self.heartbeat_failures += 1
-                    print(f" [DEBUG] 心跳失败次数: {self.heartbeat_failures}/{self.max_failures}")
+                    logger.debug(
+                        "Heartbeat failure count: %s/%s",
+                        self.heartbeat_failures,
+                        self.max_failures,
+                    )
                 
                 # 如果连续失败次数过多，可以触发重连或其他恢复机制
                 if self.heartbeat_failures >= self.max_failures:
-                    print(" [DEBUG] 心跳连续失败，可能需要重新注册节点")
+                    logger.warning("Heartbeat repeatedly failed; node may need re-registration")
                     # 这里可以添加重新注册逻辑或者通知主程序
                 
-            except Exception as e:
-                print(f" [DEBUG] 心跳循环异常: {e}")
+            except Exception:
+                logger.exception("Heartbeat loop failed")
                 self.heartbeat_failures += 1
             
             # 等待下次心跳
@@ -82,7 +89,7 @@ class HeartbeatService:
         try:
             # 检查WebSocket是否可用
             if not self.websocket_client or not self.websocket_client.running:
-                print(" [DEBUG] WebSocket未连接，跳过心跳发送")
+                logger.debug("Skipping heartbeat because websocket is unavailable")
                 return False
             
             # 收集系统状态信息
@@ -92,12 +99,12 @@ class HeartbeatService:
             result = self.websocket_client.send_heartbeat(self.node_id, system_info)
             
             if result:
-                print(f" [DEBUG] 心跳发送成功 (WebSocket)")
+                logger.debug("Heartbeat sent over websocket")
             
             return result
             
-        except Exception as e:
-            print(f" [DEBUG] 发送心跳异常: {e}")
+        except Exception:
+            logger.exception("Heartbeat send failed")
             return False
     
     def _collect_system_info(self) -> Dict[str, Any]:
@@ -137,8 +144,8 @@ class HeartbeatService:
                 "latency": latency
             }
             
-        except Exception as e:
-            print(f" [DEBUG] 收集系统信息异常: {e}")
+        except Exception:
+            logger.exception("Collecting heartbeat system info failed")
             return {
                 "cpu_usage": 0.0,
                 "memory_usage": 0.0,
@@ -176,8 +183,8 @@ class HeartbeatService:
             
             # 计算毫秒延迟
             return int((end_time - start_time) * 1000)
-        except Exception as e:
-            print(f" [DEBUG] 测量延迟失败: {e}")
+        except Exception:
+            logger.debug("Latency probe failed", exc_info=True)
             return -1
     
     def get_status(self) -> Dict[str, Any]:
@@ -197,7 +204,7 @@ class HeartbeatService:
                 return {"success": False, "message": "base_url 未配置"}
                 
             url = f"{self.base_url}/api/v1/health"
-            print(f" [DEBUG] 发送HTTP心跳: {url}")
+            logger.debug("Sending HTTP heartbeat: url=%s", url)
             
             response = requests.get(url, timeout=5)
             
@@ -208,5 +215,5 @@ class HeartbeatService:
                 return {"success": False, "message": f"HTTP {response.status_code}"}
                 
         except Exception as e:
-            print(f" [DEBUG] 发送HTTP心跳异常: {e}")
+            logger.exception("HTTP heartbeat failed")
             return {"success": False, "message": str(e)}

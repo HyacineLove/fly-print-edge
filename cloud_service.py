@@ -3,6 +3,7 @@ fly-print-cloud 云端服务集成模块
 整合所有云端功能：认证、注册、心跳、WebSocket等
 """
 
+import logging
 import time
 import threading
 from typing import Dict, Any, Optional
@@ -12,13 +13,16 @@ from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
 from cloud_heartbeat_service import HeartbeatService
 from edge_node_info import EdgeNodeInfo
 
+logger = logging.getLogger(__name__)
+
 
 class CloudService:
     """Cloud service coordinator."""
 
-    def __init__(self, config: Dict[str, Any], printer_manager=None):
+    def __init__(self, config: Dict[str, Any], printer_manager=None, interactive_job_binder=None):
         self.config = dict(config or {})
         self.printer_manager = printer_manager
+        self.interactive_job_binder = interactive_job_binder
 
         self.auth_client = None
         self.api_client = None
@@ -77,9 +81,9 @@ class CloudService:
         try:
             self._persist_node_id()
         except Exception as exc:
-            print(f" [DEBUG] 清理失效 node_id 失败: {exc}")
+            logger.debug("Failed to persist cleared node_id", exc_info=True)
 
-        print(f" [WARNING] 云端节点不存在，已清理本地 node_id: {stale_node_id}")
+        logger.warning("Remote node missing; local node_id cleared: node_id=%s", stale_node_id)
 
     def _initialize_components(self):
         """Initialize cloud clients from the current configuration."""
@@ -95,7 +99,7 @@ class CloudService:
             return {"success": False, "message": self.last_error}
 
         try:
-            print(" [DEBUG] Initializing cloud service components...")
+            logger.debug("Initializing cloud service components")
             self.auth_client = CloudAuthClient(
                 auth_url=self.config["auth_url"],
                 client_id=self.config["client_id"],
@@ -117,19 +121,20 @@ class CloudService:
                     websocket_client=self.websocket_client,
                     auth_client=self.auth_client,
                     node_id=self.node_id,
+                    interactive_job_binder=self.interactive_job_binder,
                 )
 
             self.last_error = None
             return {"success": True}
         except Exception as exc:
-            print(f" [DEBUG] Cloud service init failed: {exc}")
+            logger.exception("Cloud service initialization failed")
             self.last_error = str(exc)
             return {"success": False, "message": str(exc)}
 
     def start(self) -> Dict[str, Any]:
         """Bring the cloud runtime online for the current node state."""
         try:
-            print(" [DEBUG] Starting cloud service...")
+            logger.debug("Starting cloud service")
 
             if not self.auth_client or not self.api_client or not self.print_job_handler:
                 init_result = self._initialize_components()
@@ -163,9 +168,9 @@ class CloudService:
                         base_url=self.config.get("base_url"),
                     )
                     self.heartbeat_service.start()
-                    print(" [DEBUG] Heartbeat service started (WebSocket mode)")
+                    logger.debug("Heartbeat service started in websocket mode")
             else:
-                print(" [WARNING] WebSocket unavailable, skipping heartbeat startup")
+                logger.warning("WebSocket unavailable; skipping heartbeat startup")
 
             if self.websocket_client and self.node_id:
                 if (
@@ -185,7 +190,7 @@ class CloudService:
                     self.status_reporter.start()
                     if self.print_job_handler:
                         self.print_job_handler.status_reporter = self.status_reporter
-                    print(" [DEBUG] Printer status reporter started")
+                    logger.debug("Printer status reporter started")
 
             self.last_error = None
             return {
@@ -196,13 +201,13 @@ class CloudService:
                 "connected": bool(self.websocket_client and self.websocket_client.connected),
             }
         except Exception as exc:
-            print(f" [DEBUG] Cloud service start failed: {exc}")
+            logger.exception("Cloud service start failed")
             self.last_error = str(exc)
             return {"success": False, "message": str(exc)}
 
     def stop(self):
         """Stop active cloud runtime components."""
-        print(" [DEBUG] Stopping cloud service...")
+        logger.debug("Stopping cloud service")
 
         if self.heartbeat_service:
             self.heartbeat_service.stop()
@@ -285,7 +290,7 @@ class CloudService:
     def _register_node(self) -> Dict[str, Any]:
         """注册边缘节点"""
         try:
-            print(" [DEBUG] 注册边缘节点...")
+            logger.debug("Registering edge node")
             
             node_name = self.config.get("node_name") or None
             location = self.config.get("location") or None
@@ -302,7 +307,7 @@ class CloudService:
                     self.config["node_id"] = self.node_id
                     self._persist_node_id()
                 except Exception as e:
-                    print(f" [DEBUG] 缓存 node_id 到配置失败: {e}")
+                    logger.debug("Failed to persist node_id into config", exc_info=True)
                 
                 # 更新PrintJobHandler的node_id
                 if self.print_job_handler:
@@ -312,14 +317,14 @@ class CloudService:
                 if self.api_client:
                     self.api_client.node_id = self.node_id
                     
-                print(f" [DEBUG] 边缘节点注册成功: {self.node_id}")
+                logger.info("Edge node registration completed: node_id=%s", self.node_id)
                 return {"success": True, "node_id": self.node_id}
             else:
-                print(f" [DEBUG] 边缘节点注册失败: {result.get('error')}")
+                logger.warning("Edge node registration failed: %s", result.get("error"))
                 return {"success": False, "message": result.get("error")}
                 
         except Exception as e:
-            print(f" [DEBUG] 边缘节点注册异常: {e}")
+            logger.exception("Edge node registration failed")
             return {"success": False, "message": str(e)}
     
     def _register_current_printers(self):
@@ -328,13 +333,13 @@ class CloudService:
             if not self.printer_manager:
                 return
             
-            print(" [DEBUG] 注册当前管理的打印机...")
+            logger.debug("Registering managed printers")
             
             # 获取当前管理的打印机
             managed_printers = self.printer_manager.config.get_managed_printers()
             
             if not managed_printers:
-                print(" [DEBUG] 没有管理的打印机需要注册")
+                logger.debug("No managed printers need registration")
                 return
             
             # 获取打印机详细信息，仅为未在云端注册的打印机构造注册数据
@@ -346,7 +351,7 @@ class CloudService:
                 
                 # 如果本地标记已经注册到云端，则跳过
                 if printer.get("cloud_registered"):
-                    print(f" [DEBUG] 打印机 {printer_name} 已标记为云端注册，跳过")
+                    logger.debug("Skipping already cloud-registered printer: %s", printer_name)
                     continue
                 
                 # 获取打印机状态、能力和端口信息
@@ -378,49 +383,49 @@ class CloudService:
                 printer_data.append(printer_info)
             
             if not printer_data:
-                print(" [DEBUG] 没有需要新注册的打印机，全部已在云端")
+                logger.debug("No new managed printers need cloud registration")
                 return
             
             # 注册到云端
             result = self.api_client.register_printers(printer_data)
             
             if result["success"]:
-                print(f" [DEBUG] 打印机注册成功，数量: {len(printer_data)}")
+                logger.info("Managed printers registered: count=%s", len(printer_data))
                 
                 # 更新本地打印机ID
                 registered_printers = result.get("registered_printers", {})
                 if registered_printers and self.printer_manager:
-                    print(f" [DEBUG] 同步云端打印机ID到本地配置...")
+                    logger.debug("Syncing cloud printer ids back to local config")
                     update_count = 0
                     for name, cloud_id in registered_printers.items():
                         if self.printer_manager.config.update_printer_id(name, cloud_id):
                             update_count += 1
                     
                     if update_count > 0:
-                        print(f" [DEBUG] 已更新 {update_count} 个打印机的云端ID")
+                        logger.debug("Updated cloud printer ids in local config: count=%s", update_count)
             else:
-                print(f" [DEBUG] 打印机注册失败: {result.get('error')}")
+                logger.warning("Managed printer registration failed: %s", result.get("error"))
                 
         except Exception as e:
-            print(f" [DEBUG] 注册打印机异常: {e}")
+            logger.exception("Managed printer registration failed")
     
     def _start_websocket(self):
         """启动WebSocket客户端"""
         try:
             if not self.registered:
-                print(" [DEBUG] 节点未注册，跳过WebSocket连接")
+                logger.debug("Skipping websocket startup because node is not registered")
                 return
 
             if self.websocket_client and self.websocket_client.running:
-                print(" [DEBUG] WebSocket client already running, reuse existing connection")
+                logger.debug("WebSocket client already running; reusing existing connection")
                 return
             
-            print(" [DEBUG] 启动WebSocket客户端...")
+            logger.debug("Starting websocket client")
             
             # 获取WebSocket URL
             ws_url = self.api_client.get_websocket_url()
             if not ws_url:
-                print(" [DEBUG] 无法获取WebSocket URL")
+                logger.warning("WebSocket URL unavailable")
                 return
             
             # 初始化WebSocket客户端
@@ -455,14 +460,14 @@ class CloudService:
                 for msg_type, handler in self.pending_listeners:
                     self.websocket_client.add_message_handler(msg_type, handler)
             
-            print(" [DEBUG] WebSocket客户端启动成功")
+            logger.debug("WebSocket client started")
             
         except Exception as e:
-            print(f" [DEBUG] WebSocket客户端启动失败: {e}")
+            logger.exception("WebSocket client start failed")
     
     def add_message_listener(self, message_type: str, handler):
         """添加消息监听器"""
-        print(f" [DEBUG] CloudService添加消息监听器: {message_type}")
+        logger.debug("Registering cloud message listener: %s", message_type)
         if not hasattr(self, 'pending_listeners'):
             self.pending_listeners = []
 
@@ -471,10 +476,10 @@ class CloudService:
             self.pending_listeners.append(listener)
 
         if self.websocket_client:
-            print(f"  ↳ 直接添加到WebSocket客户端")
+            logger.debug("Attached listener directly to websocket client")
             self.websocket_client.add_message_handler(message_type, handler)
         else:
-            print(f"  ↳ WebSocket未就绪，加入待处理列表")
+            logger.debug("Queued listener until websocket client is ready")
 
     def submit_print_params(self, file_id: str, printer_id: str, options: Dict[str, Any]):
         """提交打印参数
@@ -487,7 +492,7 @@ class CloudService:
         if self.websocket_client and self.node_id:
             self.websocket_client.submit_print_params(self.node_id, file_id, printer_id, options)
         else:
-            print(" [DEBUG] WebSocket未连接或节点未注册，无法提交打印参数")
+            logger.debug("Skipping print param submit because websocket or node is unavailable")
 
     def get_status(self) -> Dict[str, Any]:
         """Return current cloud runtime state."""
@@ -549,7 +554,7 @@ class CloudService:
             return result
             
         except Exception as e:
-            print(f" [DEBUG] 注册打印机异常: {e}")
+            logger.exception("Register printer failed")
             return {"success": False, "message": str(e)}
 
     def register_managed_printer(self, managed_printer: Dict[str, Any]) -> Dict[str, Any]:
@@ -618,7 +623,7 @@ class CloudService:
                 return {"success": False, "message": result.get("error") or "注册失败"}
             
         except Exception as e:
-            print(f" [DEBUG] 注册打印机异常: {e}")
+            logger.exception("Register managed printer failed")
             return {"success": False, "message": str(e)}
 
     def delete_printer_from_cloud(self, printer_id: str) -> Dict[str, Any]:
@@ -664,7 +669,7 @@ class PrinterStatusReporter:
             try:
                 self.node_missing_handler(str(error_text or "printer status report node not found"))
             except Exception as e:
-                print(f" [ERROR] 节点缺失回调异常: {e}")
+                logger.exception("Node missing callback failed")
     
     def start(self):
         """启动状态上报服务"""
@@ -674,12 +679,12 @@ class PrinterStatusReporter:
         self.running = True
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
-        print(" [DEBUG] 打印机状态上报服务已启动")
+        logger.debug("Printer status reporter loop started")
     
     def stop(self):
         """停止状态上报服务"""
         self.running = False
-        print(" [DEBUG] 打印机状态上报服务已停止")
+        logger.debug("Printer status reporter loop stopped")
     
     def force_report_printer(self, printer_id: str = None, printer_name: str = None):
         """立即上报指定打印机的状态（用于打印任务开始/结束时）
@@ -705,7 +710,7 @@ class PrinterStatusReporter:
                     break
             
             if not target_printer:
-                print(f" [DEBUG] 未找到打印机: id={printer_id}, name={printer_name}")
+                logger.debug("Printer not found for forced status report: id=%s name=%s", printer_id, printer_name)
                 return
             
             p_id = target_printer.get("id")
@@ -732,14 +737,14 @@ class PrinterStatusReporter:
                     "status": cloud_status,
                     "queue_length": current_queue_length
                 }
-                print(f" [DEBUG] 立即上报打印机状态成功: {p_name} ({cloud_status})")
+                logger.debug("Forced printer status reported: name=%s status=%s", p_name, cloud_status)
             else:
                 if self._is_remote_node_missing_error(result.get("error")):
                     self._notify_node_missing(result.get("error"))
-                print(f" [WARNING] 立即上报打印机状态失败: {result.get('error')}")
+                logger.warning("Forced printer status report failed: %s", result.get("error"))
                 
         except Exception as e:
-            print(f" [DEBUG] 立即上报打印机状态异常: {e}")
+            logger.debug("Forced printer status report failed", exc_info=True)
     
     def _monitor_loop(self):
         """状态监控循环"""
@@ -748,7 +753,7 @@ class PrinterStatusReporter:
                 self._check_and_report_status()
                 time.sleep(self.check_interval)
             except Exception as e:
-                print(f" [DEBUG] 状态监控异常: {e}")
+                logger.debug("Printer status monitor loop failed", exc_info=True)
                 time.sleep(5)  # 出错后短暂等待
     
     def _check_and_report_status(self):
@@ -799,14 +804,14 @@ class PrinterStatusReporter:
                             "status": printer_status["status"],
                             "queue_length": printer_status["queue_length"]
                         }
-                    print(f" [DEBUG] 批量状态上报成功: {len(printers_to_report)} 个打印机")
+                    logger.debug("Printer status batch reported: count=%s", len(printers_to_report))
                 else:
                     if self._is_remote_node_missing_error(result.get("error")):
                         self._notify_node_missing(result.get("error"))
-                    print(f" [WARNING] 批量状态上报失败: {result.get('error')}")
+                    logger.warning("Printer status batch report failed: %s", result.get("error"))
                     
         except Exception as e:
-            print(f" [DEBUG] 检查打印机状态异常: {e}")
+            logger.debug("Checking printer status failed", exc_info=True)
     
     def _convert_status_to_cloud_format(self, cups_status: str) -> str:
         """转换CUPS状态为云端标准格式: ready/printing/error/offline"""
