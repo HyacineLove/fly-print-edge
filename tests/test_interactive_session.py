@@ -80,6 +80,46 @@ class InteractiveSessionManagerTests(unittest.TestCase):
         self.assertTrue(self.manager.revert_print_submission(session["session_id"], "file-1"))
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
 
+    def test_build_snapshot_returns_idle_payload_without_active_session(self):
+        self.assertEqual(
+            {
+                "active": False,
+                "session_id": None,
+                "state": "idle",
+                "file_id": None,
+                "file_url": None,
+                "file_name": None,
+                "file_type": None,
+                "job_id": None,
+                "submitted": False,
+            },
+            self.manager.build_snapshot(),
+        )
+
+    def test_build_snapshot_includes_bound_file_metadata(self):
+        session = self.manager.start_session(upload_token="token-1")
+        self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": "https://example.com/file-1.pdf",
+            "file_name": "resume.pdf",
+            "file_type": "application/pdf",
+        })
+
+        self.assertEqual(
+            {
+                "active": True,
+                "session_id": session["session_id"],
+                "state": "preview_ready",
+                "file_id": "file-1",
+                "file_url": "https://example.com/file-1.pdf",
+                "file_name": "resume.pdf",
+                "file_type": "application/pdf",
+                "job_id": None,
+                "submitted": False,
+            },
+            self.manager.build_snapshot(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import { api, postJson } from "./api.js";
 import { q, setText } from "./dom.js";
 import {
+  createDefaultCapabilityState,
   clearPendingPrintRequest,
   currentSessionId,
   saveSessionState,
@@ -31,8 +32,7 @@ export function gotoPage(name, sseConnection = null) {
   window.location.href = `/static/user/html/${name}.html`;
 }
 
-export async function cleanupAndBackToLogin(sseConnection = null) {
-  sseConnection?.close?.();
+export async function cleanupSessionResources() {
   try {
     if (state.file?.file_id || currentSessionId()) {
       await postJson(api.cleanup, {
@@ -41,13 +41,25 @@ export async function cleanupAndBackToLogin(sseConnection = null) {
       });
     }
   } catch {
-    // Ignore cleanup errors to avoid blocking navigation.
+    // Ignore cleanup errors to avoid blocking UI recovery.
   }
+}
 
+export function clearLocalUserSession() {
   state.file = {};
   state.session_id = null;
+  state.doneResult = null;
+  state.pendingPrintRequest = null;
+  state.defaultPrinterCapabilities = null;
+  state.capabilityState = createDefaultCapabilityState();
   clearPendingPrintRequest();
   saveSessionState();
+}
+
+export async function cleanupAndBackToLogin(sseConnection = null) {
+  sseConnection?.close?.();
+  await cleanupSessionResources();
+  clearLocalUserSession();
   gotoPage("login");
 }
 

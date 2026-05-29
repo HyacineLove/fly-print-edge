@@ -1,11 +1,17 @@
-﻿<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=/static/user/html/login.html">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Fly Print</title>
+  <link rel="stylesheet" href="./css/login.css">
+  <link rel="stylesheet" href="./css/preview.css">
+  <link rel="stylesheet" href="./css/printing.css">
+  <link rel="stylesheet" href="./css/done.css">
 </head>
-<body>
-  <script>window.location.replace('/static/user/html/login.html');</script>
+<body data-app="user-spa">
+  <div id="userToast" class="user-toast is-hidden" aria-live="polite"></div>
+  <div id="app"></div>
+  <script src="./app.js" type="module"></script>
 </body>
 </html>

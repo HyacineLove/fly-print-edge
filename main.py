@@ -1140,7 +1140,20 @@ async def events(request: Request):
                 sse_clients.remove(client_queue)
             logger.debug(f" SSE连接断开，剩余客户端数: {len(sse_clients)}")
                 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/session/current")
+async def get_current_interactive_session():
+    return interactive_session_manager.build_snapshot()
 
 @app.post("/api/preview")
 async def preview(request: Request):

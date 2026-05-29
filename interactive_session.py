@@ -19,6 +19,8 @@ class InteractiveSessionManager:
                 "state": "awaiting_preview",
                 "file_id": None,
                 "file_url": None,
+                "file_name": None,
+                "file_type": None,
                 "job_id": None,
                 "submitted": False,
                 "updated_at": time.time(),
@@ -55,6 +57,8 @@ class InteractiveSessionManager:
 
             self._active_session["file_id"] = file_id
             self._active_session["file_url"] = file_url
+            self._active_session["file_name"] = data.get("file_name")
+            self._active_session["file_type"] = data.get("file_type")
             self._active_session["state"] = "preview_ready"
             self._active_session["updated_at"] = time.time()
 
@@ -147,6 +151,33 @@ class InteractiveSessionManager:
             if file_id is not None and self._active_session.get("file_id") != file_id:
                 return False
             return True
+
+    def build_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            if not self._active_session:
+                return {
+                    "active": False,
+                    "session_id": None,
+                    "state": "idle",
+                    "file_id": None,
+                    "file_url": None,
+                    "file_name": None,
+                    "file_type": None,
+                    "job_id": None,
+                    "submitted": False,
+                }
+
+            return {
+                "active": True,
+                "session_id": self._active_session["session_id"],
+                "state": self._active_session.get("state") or "idle",
+                "file_id": self._active_session.get("file_id"),
+                "file_url": self._active_session.get("file_url"),
+                "file_name": self._active_session.get("file_name"),
+                "file_type": self._active_session.get("file_type"),
+                "job_id": self._active_session.get("job_id"),
+                "submitted": bool(self._active_session.get("submitted")),
+            }
 
     def clear_session(self, session_id: Optional[str] = None) -> bool:
         with self._lock:
