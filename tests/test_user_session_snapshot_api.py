@@ -46,6 +46,22 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 response = client.get("/api/session/current")
         return response
 
+    def _get_root_page(self):
+        with TestClient(self.main.app) as client:
+            response = client.get("/")
+        return response
+
+    def test_root_route_serves_user_spa_shell_directly(self):
+        response = self._get_root_page()
+        self.assertEqual(
+            200,
+            response.status_code,
+            f"GET / should return the user SPA shell directly, got {response.status_code} with body {response.text!r}",
+        )
+        self.assertIn('data-app="user-spa"', response.text)
+        self.assertIn('/static/user/app.js', response.text)
+        self.assertNotIn('./user/index.html', response.text)
+
     def test_session_current_route_returns_http_200(self):
         response = self._get_current_session_snapshot()
         self.assertEqual(

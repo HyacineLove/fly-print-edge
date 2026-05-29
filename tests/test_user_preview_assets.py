@@ -38,7 +38,12 @@ class UserPreviewAssetTests(unittest.TestCase):
         html = path.read_text(encoding="utf-8")
         self.assertIn('id="app"', html, "SPA shell should expose a single #app mount node")
         self.assertIn('type="module"', html, "SPA shell should load the frontend through a module script")
-        self.assertRegex(html, r'src=["\']\./app\.js["\']', "SPA shell should bootstrap ./app.js")
+        self.assertRegex(
+            html,
+            r'src=["\']/static/user/app\.js["\']',
+            "SPA shell should bootstrap /static/user/app.js so it also works when served from /",
+        )
+        self.assertIn('href="/static/user/css/login.css"', html, "SPA shell should use absolute CSS paths")
         for pattern in FULL_PAGE_NAVIGATION_PATTERNS:
             self.assertNotRegex(html, pattern, f"SPA shell should not trigger full-page navigation via pattern {pattern}")
 

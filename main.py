@@ -262,7 +262,7 @@ async def shutdown_event():
 # API 路由
 @app.get("/")
 async def read_root():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "user", "Index.html"))
 
 @app.get("/admin")
 async def read_admin():
