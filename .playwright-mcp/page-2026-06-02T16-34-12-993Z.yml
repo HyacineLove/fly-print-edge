@@ -1,0 +1,49 @@
+- generic [active] [ref=e1]:
+  - paragraph [ref=e5]: 加载中...
+  - main [ref=e6]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - heading "Fly Print Edge 管理中心" [level=1] [ref=e9]
+        - paragraph [ref=e10]: 统一管理云端配置、打印设置、运行参数与打印机。
+      - generic [ref=e11]:
+        - button "保存配置" [disabled] [ref=e12]
+        - button "检测连接并注册节点" [ref=e13] [cursor=pointer]
+    - generic [ref=e14]:
+      - generic [ref=e15]: "配置状态: 已同步"
+      - generic [ref=e16]: "云端状态: 不可用"
+    - generic [ref=e17]:
+      - navigation [ref=e18]:
+        - button "云端配置" [ref=e19]
+        - button "打印默认设置" [ref=e20]
+        - button "运行设置" [ref=e21]
+        - button "打印机管理" [ref=e22]
+      - generic [ref=e23]:
+        - generic [ref=e25]:
+          - heading "云端配置" [level=2] [ref=e26]
+          - paragraph [ref=e27]: 先保存配置，再执行连接检查与节点注册。
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - generic [ref=e30]: 云端地址
+            - textbox "云端地址" [ref=e31]: http://localhost:8012
+          - generic [ref=e32]:
+            - generic [ref=e33]: 认证地址
+            - textbox "认证地址" [ref=e34]: http://localhost:8012/auth/token
+          - generic [ref=e35]:
+            - generic [ref=e36]: 客户端 ID
+            - textbox "客户端 ID" [ref=e37]: edge-default
+          - generic [ref=e38]:
+            - generic [ref=e39]: 客户端密钥
+            - textbox "客户端密钥" [ref=e40]:
+              - /placeholder: 已设置
+          - generic [ref=e41]:
+            - generic [ref=e42]: 节点名称
+            - textbox "节点名称" [ref=e43]: my-edge-node
+          - generic [ref=e44]:
+            - generic [ref=e45]: 位置
+            - textbox "位置" [ref=e46]
+          - generic [ref=e47]:
+            - generic [ref=e48]: 心跳间隔(秒)
+            - spinbutton "心跳间隔(秒)" [ref=e49]: "30"
+          - generic [ref=e50]:
+            - generic [ref=e51]: 当前节点 ID
+            - textbox [disabled] [ref=e52]: "-"

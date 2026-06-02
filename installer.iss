@@ -55,6 +55,7 @@ Source: "dist\flyprint-edge\_internal\*"; DestDir: "{app}\_internal"; Flags: ign
 
 ; Launcher scripts
 Source: "launch.vbs"; DestDir: "{app}"; Flags: ignoreversion
+Source: "start-edge.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Config template — install as both the example reference and as initial config (on fresh install)
 Source: "dist\flyprint-edge\_internal\config.example.json"; DestDir: "{app}"; DestName: "config.example.json"; Flags: ignoreversion
@@ -78,7 +79,7 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 ; Optionally start the app after installation
-Filename: "wscript.exe"; Parameters: """{app}\launch.vbs"" /admin"; Flags: nowait postinstall skipifsilent; Description: "{cm:LaunchProgram,{#MyAppName}}"
+Filename: "wscript.exe"; Parameters: """{app}\launch.vbs"" /admin"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Description: "{cm:LaunchProgram,{#MyAppName}}"
 
 [Registry]
 ; Auto-start with Windows (current user)

@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from typing import Any, Dict, Mapping, Optional
 
 
@@ -55,9 +56,24 @@ def configure_logging(
     config: Dict[str, Any], env: Optional[Mapping[str, str]] = None
 ) -> Dict[str, Any]:
     resolved = resolve_log_settings(config, env=env)
+    fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    handlers = [logging.StreamHandler()]
+    # Always write to a log file in the app directory for diagnostics
+    try:
+        if getattr(sys, 'frozen', False):
+            _app_dir = os.path.dirname(sys.executable)
+        else:
+            _app_dir = os.path.dirname(os.path.abspath(__file__))
+        _log_dir = os.path.join(_app_dir, "logs")
+        os.makedirs(_log_dir, exist_ok=True)
+        _log_path = os.path.join(_log_dir, "edge.log")
+        handlers.append(logging.FileHandler(_log_path, encoding="utf-8"))
+    except Exception:
+        pass  # never let logging setup crash the server
     logging.basicConfig(
         level=resolved["level"],
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format=fmt,
+        handlers=handlers,
         force=True,
     )
     for logger_name, logger_level in NOISY_DEPENDENCY_LOGGERS.items():

@@ -44,50 +44,44 @@ If WScript.Arguments.Named.Exists("silent") Or InStr(1, FirstArg, "/silent", 1) 
     OpenMode = "silent"
 End If
 
-' --- Check if service is already running ---
-Dim StatusUrl, StartTime, Ready, Http, Elapsed
+' --- Start the service and wait for it to become ready ---
+Dim StatusUrl, StartTime, Ready, Http
 StatusUrl = "http://127.0.0.1:" & PORT & "/api/status"
 Ready = False
 
-On Error Resume Next
-Set Http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-If Err.Number = 0 Then
-    Http.SetTimeouts 2000, 2000, 2000, 2000
-    Http.Open "GET", StatusUrl, False
-    Http.Send
-    If Http.Status = 200 Then
+Function IsServerReady()
+    Dim H
+    IsServerReady = False
+    On Error Resume Next
+    Err.Clear
+    Set H = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    If Err.Number <> 0 Then Exit Function
+    H.SetTimeouts 2000, 2000, 2000, 2000
+    H.Open "GET", StatusUrl, False
+    H.Send
+    If H.Status = 200 And InStr(1, H.ResponseText, "online", 1) > 0 Then
+        IsServerReady = True
+    End If
+    On Error GoTo 0
+End Function
+
+' Always start the service (do not pre-check — MSXML may return false positives)
+WshShell.CurrentDirectory = InstallDir
+WshShell.Run """" & ExePath & """", 0, False
+StartTime = Timer
+
+Do While Timer - StartTime < STARTUP_TIMEOUT_SEC
+    WScript.Sleep POLL_INTERVAL_MS
+    If IsServerReady() Then
         Ready = True
+        Exit Do
     End If
-End If
-On Error GoTo 0
+Loop
 
-' --- Start the service if not already running ---
 If Not Ready Then
-    WshShell.Run """" & ExePath & """", 0, False
-    StartTime = Timer
-
-    Do While Timer - StartTime < STARTUP_TIMEOUT_SEC
-        WScript.Sleep POLL_INTERVAL_MS
-        On Error Resume Next
-        Err.Clear
-        Set Http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-        If Err.Number = 0 Then
-            Http.SetTimeouts 2000, 2000, 2000, 2000
-            Http.Open "GET", StatusUrl, False
-            Http.Send
-            If Http.Status = 200 Then
-                Ready = True
-            End If
-        End If
-        On Error GoTo 0
-        If Ready Then Exit Do
-    Loop
-
-    If Not Ready Then
-        MsgBox "FlyPrint Edge did not start within " & STARTUP_TIMEOUT_SEC & " seconds." & vbCrLf & _
-               "Check logs in: " & InstallDir & "\logs", 48, "FlyPrint Edge"
-        WScript.Quit 2
-    End If
+    MsgBox "FlyPrint Edge did not start within " & STARTUP_TIMEOUT_SEC & " seconds." & vbCrLf & _
+           "Check logs in: " & InstallDir & "\logs", 48, "FlyPrint Edge"
+    WScript.Quit 2
 End If
 
 ' --- Open browser ---
