@@ -87,6 +87,10 @@ function updateToolbar(state) {
   cloudStatusText.classList.add("status-info");
 }
 
+export function renderAdminToolbar(state) {
+  updateToolbar(state);
+}
+
 function renderCloudSection(state) {
   const cfg = configModel(state).cloud;
   const nodeId = state.cloudStatus?.node_id || cfg.node_id || "-";
@@ -383,7 +387,7 @@ function renderNav(state) {
 }
 
 export function renderAdminApp(state) {
-  updateToolbar(state);
+  renderAdminToolbar(state);
   renderNav(state);
   renderPanel(state);
 }

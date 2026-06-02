@@ -8,6 +8,7 @@ import {
   updateField,
   updateStaticPrinter,
 } from "./state.js";
+import { renderAdminToolbar } from "./render-sections.js";
 import { showAdminToast } from "./toast.js";
 
 export async function loadConfig(state, render) {
@@ -118,7 +119,7 @@ export function bindConfigActions(state, render, refreshPrinters) {
       } else if (target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) {
         updateField(state, target.dataset.section, target.dataset.key, target.value, "text");
       }
-      render();
+      renderAdminToolbar(state);
       return;
     }
 
@@ -128,7 +129,7 @@ export function bindConfigActions(state, render, refreshPrinters) {
     const key = target.dataset.staticKey;
     if (!Number.isInteger(index) || !key) return;
     updateStaticPrinter(state, index, key, target.value);
-    render();
+    renderAdminToolbar(state);
   });
 
   panel?.addEventListener("click", (event) => {
