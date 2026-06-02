@@ -39,7 +39,7 @@ logger = logging.getLogger("EdgeServer")
 
 # 全局变量
 app = FastAPI(title="FlyPrint Edge Kiosk")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # API Key Authentication - 已移除，仅保留空函数占位以防报错
