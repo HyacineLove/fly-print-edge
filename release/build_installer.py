@@ -41,6 +41,22 @@ INNO_SETUP_DIRS = [
 
 DEFAULT_VERSION = "1.0.0"
 
+# Venv Python detection — PyInstaller must run with the project's venv
+# Python so it can discover all dependencies (fitz, zeroconf, etc.).
+VENV_PYTHON_DIRS = [
+    PROJECT_ROOT / "venv" / "Scripts",
+    PROJECT_ROOT / ".venv" / "Scripts",
+]
+
+
+def find_venv_python() -> str:
+    """Find the venv Python executable, falling back to system Python."""
+    for d in VENV_PYTHON_DIRS:
+        candidate = d / "python.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
+
 
 def find_iscc() -> str | None:
     """Locate the Inno Setup compiler (iscc.exe)."""
@@ -92,8 +108,9 @@ def run_pyinstaller(verbose: bool = False) -> int:
         print(f"ERROR: Spec file not found: {SPEC_FILE}", file=sys.stderr)
         return 1
 
+    venv_python = find_venv_python()
     cmd = [
-        sys.executable, "-m", "PyInstaller",
+        venv_python, "-m", "PyInstaller",
         str(SPEC_FILE),
         "--clean",
         "--noconfirm",

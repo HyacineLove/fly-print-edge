@@ -18,7 +18,8 @@ venv/Scripts/python.exe -m unittest discover tests
 # Run a single test file
 venv/Scripts/python.exe -m unittest tests/test_config_service.py
 
-# Build Windows installer (PyInstaller + Inno Setup)
+# Build Windows installer (PyInstaller + Inno Setup — auto-detects venv)
+# NOTE: PyInstaller must run via venv Python to discover all deps (fitz etc.)
 python release/build_installer.py
 ```
 
