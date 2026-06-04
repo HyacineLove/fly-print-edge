@@ -44,5 +44,11 @@ _fly-print-cloud
 .qoder
 portable/
 
+# 旧的 demo 模块（已移除）
+demo_pjl/
+
+# Playwright MCP 测试快照
+.playwright-mcp/
+
 # Portable 临时文件目录
 temp/
