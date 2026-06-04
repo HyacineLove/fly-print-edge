@@ -642,11 +642,24 @@ class PrintJobHandler:
             
             if result.get("success"):
                 logger.info(f"云端打印任务提交成功: {job_id}")
+                local_job_id = result.get("job_id")
+                if local_job_id is None:
+                    logger.error(
+                        "job_id_debug missing_local_job_id cloud_job_id=%s printer_name=%s printer_id=%s printer_result_success=%s printer_result_message=%r",
+                        job_id,
+                        printer_name,
+                        printer_id,
+                        result.get("success"),
+                        result.get("message"),
+                    )
+                    self._report_job_failure(job_id, "无法获取本地打印任务ID")
+                    return
+
                 # 立即上报打印机状态（任务开始）
                 if self.status_reporter:
                     self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                 # 启动任务完成监控
-                self._monitor_job_completion(job_id, printer_name, result.get("job_id"), printer_id)
+                self._monitor_job_completion(job_id, printer_name, local_job_id, printer_id)
             else:
                 error_msg = result.get("message", "未知错误")
                 logger.error(f"云端打印任务提交失败: {error_msg}")
@@ -778,8 +791,13 @@ class PrintJobHandler:
             s = str(status_text).strip().lower()
 
             error_keywords = [
-                "错误", "离线", "缺纸", "卡纸", "被阻止", "用户干预", "删除", "暂停", "故障",
-                "error", "offline", "paper", "jam", "blocked", "intervention", "paused", "failed"
+                # 中文
+                "错误", "离线", "缺纸", "卡纸", "缺墨", "墨粉", "纸张问题",
+                "被阻止", "用户干预", "删除", "暂停", "故障", "门开",
+                "需要维护", "输出满", "页面错误", "内存不足", "服务器未知",
+                # 英文
+                "error", "offline", "paper", "jam", "toner", "ink",
+                "blocked", "intervention", "paused", "failed"
             ]
             for kw in error_keywords:
                 if kw in s:
@@ -810,76 +828,20 @@ class PrintJobHandler:
                 f"wmi_work_offline={wmi.get('work_offline')}, "
                 f"wmi_availability={wmi.get('availability')}"
             )
-        
-        # 使用轮询方式（更可靠）
+
         def monitor():
             try:
                 if not local_job_id:
-                    # 没有job_id，通过轮询打印机队列状态判断是否完成
-                    logger.warning(f"未获取到job_id，改为队列轮询监控: {cloud_job_id}")
-                    
-                    max_wait_time = 120  # 最大等待2分钟
-                    check_interval = 1   # 每1秒检查一次
-                    waited_time = 0
-                    
-                    # 先等待3秒让任务进入队列
-                    time.sleep(3)
-                    
-                    while waited_time < max_wait_time:
-                        # 先检查打印机本体状态（离线、缺纸等）
-                        printer_status, printer_detail = get_printer_status_snapshot()
-                        has_error, reason = detect_error_from_status(printer_status)
-                        if has_error:
-                            raw_codes = format_printer_status_codes(printer_detail)
-                            err_msg = f"打印机异常({reason}): {printer_status} | 原始状态码: {raw_codes}"
-                            logger.error(f"{err_msg} | 任务: {cloud_job_id}")
-                            self._report_job_failure(cloud_job_id, err_msg)
-                            if self.status_reporter and printer_id:
-                                self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                            return
-
-                        # 检查打印机队列是否为空
-                        queue_jobs = self.printer_manager.get_print_queue(printer_name)
-                        if queue_jobs:
-                            # 队列里存在任务时，检查任务状态是否错误
-                            for qj in queue_jobs:
-                                q_status = qj.get("status", "")
-                                has_error, reason = detect_error_from_status(q_status)
-                                if has_error:
-                                    err_msg = f"打印任务异常({reason}): {q_status}"
-                                    logger.error(f"{err_msg} | 任务: {cloud_job_id}")
-                                    self._report_job_failure(cloud_job_id, err_msg)
-                                    if self.status_reporter and printer_id:
-                                        self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                                    return
-
-                            jobs_count = len(queue_jobs)
-                            if waited_time % 10 == 0:
-                                logger.debug(f"打印机队列中仍有 {jobs_count} 个任务: {cloud_job_id}")
-                            time.sleep(check_interval)
-                            waited_time += check_interval
-                        else:
-                            # 队列为空，任务完成
-                            logger.info(f"打印机队列为空，任务完成: {cloud_job_id}")
-                            self._report_job_success(cloud_job_id, printer_id)
-                            if self.status_reporter and printer_id:
-                                self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                            return
-                    
-                    # 超时按失败处理，避免打印异常被误判为成功
-                    err_msg = f"打印任务监控超时({max_wait_time}s)，未确认完成"
-                    logger.warning(f"{err_msg}: {cloud_job_id}")
-                    self._report_job_failure(cloud_job_id, err_msg)
-                    if self.status_reporter and printer_id:
-                        self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
+                    logger.error("无法获取本地任务ID，放弃监控: %s", cloud_job_id)
+                    self._report_job_failure(cloud_job_id, "无法获取本地打印任务ID")
                     return
-                
+
                 max_wait_time = 600  # 最大等待10分钟
                 check_interval = 1   # 每1秒检查一次
                 waited_time = 0
-                
+
                 logger.info(f"开始监控任务完成: {cloud_job_id} (本地任务ID: {local_job_id})")
-                
+
                 while waited_time < max_wait_time:
                     time.sleep(check_interval)
                     waited_time += check_interval
@@ -911,11 +873,10 @@ class PrintJobHandler:
                                 self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                             return
                     
-                    # 如果任务不存在（完成或失败）
+                    # 如果任务不存在 — spooler 已确认完成
                     if not job_status.get("exists", True):
-                        logger.info(f"任务已从队列中移除（已完成）: {cloud_job_id}")
+                        logger.info(f"任务已从 spooler 队列移除，打印完成: {cloud_job_id}")
                         self._report_job_success(cloud_job_id, printer_id)
-                        # 任务完成后立即上报打印机状态
                         if self.status_reporter and printer_id:
                             self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
                         return

@@ -34,6 +34,7 @@ class PyInstallerSpecTests(unittest.TestCase):
         self.assertIn("main.py", spec_text, "Spec must reference main.py as entry point")
         # Must include critical hidden imports
         self.assertIn("win32com", spec_text, "Spec must include pywin32 hidden imports")
+        self.assertIn("win32timezone", spec_text, "Spec must include pywin32 timezone support")
         self.assertIn("fitz", spec_text, "Spec must include pymupdf (fitz) hidden imports")
         # Must collect static/ as data
         self.assertIn("static", spec_text, "Spec must reference static/ directory")

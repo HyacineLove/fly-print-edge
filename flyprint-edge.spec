@@ -17,6 +17,7 @@ hidden_imports = [
     "win32print",
     "win32api",
     "win32gui",
+    "win32timezone",
     "win32com",
     "win32com.client",
     "win32com.server",

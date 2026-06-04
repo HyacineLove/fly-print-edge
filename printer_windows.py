@@ -20,6 +20,8 @@ if platform.system() == "Windows":
         import win32con
         import pywintypes
         import pythoncom
+        # EnumJobs may deserialize PyTime fields through this pywin32 helper.
+        import win32timezone  # noqa: F401
         WIN32_AVAILABLE = True
     except ImportError:
         WIN32_AVAILABLE = False
@@ -41,6 +43,10 @@ class WindowsEnterprisePrinter:
     def __init__(self):
         self.available = WIN32_AVAILABLE
         self._wmi_query_state: Dict[str, str] = {}
+        # WMI 批量查询缓存：避免逐打印机重复启动 PowerShell
+        self._wmi_batch_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._wmi_batch_cache_time: float = 0.0
+        self._wmi_batch_cache_ttl: float = 30.0  # 30 秒缓存
         if not self.available:
             logger.warning("Windows print API unavailable; install pywin32")
     
@@ -481,10 +487,12 @@ class WindowsEnterprisePrinter:
                 printer_name = printer[2]  # 打印机名称
                 try:
                     # 获取打印机详细信息
-                    printer_handle = win32print.OpenPrinter(printer_name)
+                    printer_handle = win32print.OpenPrinter(
+                        printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE}
+                    )
                     printer_info = win32print.GetPrinter(printer_handle, 2)
                     win32print.ClosePrinter(printer_handle)
-                    
+
                     # 判断打印机连接类型
                     printer_type = "local"
                     port_name = printer_info.get('pPortName', '')
@@ -495,7 +503,7 @@ class WindowsEnterprisePrinter:
                             printer_type = "network"
                         elif port_name.startswith('LPT') or port_name.startswith('COM'):
                             printer_type = "local"
-                    
+
                     # 获取实际状态
                     actual_status = self.get_printer_status(printer_name)
                     
@@ -536,7 +544,7 @@ class WindowsEnterprisePrinter:
             }
         
         try:
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             printer_info = win32print.GetPrinter(printer_handle, 2)
             win32print.ClosePrinter(printer_handle)
             
@@ -545,7 +553,8 @@ class WindowsEnterprisePrinter:
             wmi_detail = self._get_wmi_printer_status_detail(printer_name)
             
             # 首先检查是否设置为离线工作
-            if attributes & 0x00000004:  # PRINTER_ATTRIBUTE_WORK_OFFLINE
+            # PRINTER_ATTRIBUTE_WORK_OFFLINE = 0x00000400
+            if attributes & 0x00000400:
                 return {
                     "status_text": "离线",
                     "win32_status": status,
@@ -558,6 +567,14 @@ class WindowsEnterprisePrinter:
             wmi_status_text = wmi_detail.get("status_text") if wmi_detail else None
             if wmi_status_text:
                 status_text = wmi_status_text
+            elif status == 0:
+                # WMI 不可用且 Win32 Status bitmask 为 0（"就绪"）。
+                # 对于网络打印机，Win32 Status 经常为 0 但打印机实际有
+                # 硬件问题。PRINTER_INFO_3 包含 spooler 维护的独立状态
+                # 字符串，可提供额外的信息。
+                result_dict = {"status_text": status_text}
+                self._enrich_status_from_printer_info_3(printer_name, result_dict=result_dict)
+                status_text = result_dict["status_text"]
 
             return {
                 "status_text": status_text,
@@ -581,7 +598,7 @@ class WindowsEnterprisePrinter:
         
         jobs = []
         try:
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             job_enum = win32print.EnumJobs(printer_handle, 0, -1, 1)
             win32print.ClosePrinter(printer_handle)
             
@@ -605,7 +622,7 @@ class WindowsEnterprisePrinter:
             return {"exists": False, "status": "unknown"}
         
         try:
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
             win32print.ClosePrinter(printer_handle)
             
@@ -624,55 +641,286 @@ class WindowsEnterprisePrinter:
             print(f"获取任务状态失败: {e}")
             return {"exists": False, "status": "error"}
     
-    def _get_latest_job_id(self, printer_name: str, job_name: str = None, max_wait: float = 2.0) -> Optional[int]:
-        """从打印队列获取最新的job_id
-        
-        Args:
-            printer_name: 打印机名称
-            job_name: 任务名称（用于匹配）
-            max_wait: 最大等待时间（秒），因为任务可能需要短暂时间才出现在队列中
-        
-        Returns:
-            job_id或None
-        """
+    def _resolve_windows_printer_queue(self, printer_name: str) -> Optional[Dict[str, Any]]:
+        """Resolve a cloud/display printer name to one exact Windows spooler queue."""
+        if not self.available or not printer_name:
+            return None
+
+        try:
+            printers = win32print.EnumPrinters(
+                win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            )
+        except Exception as e:
+            logger.warning(
+                "job_id_debug enum_printers_error requested=%r error=%s",
+                printer_name,
+                e,
+            )
+            return None
+
+        candidates = []
+        for item in printers:
+            if len(item) > 2 and item[2]:
+                candidates.append({"name": item[2], "driver": "", "port": ""})
+
+        requested = str(printer_name).strip()
+        requested_key = requested.casefold()
+
+        def pick_unique(matches: List[Dict[str, Any]], tag: str) -> Optional[Dict[str, Any]]:
+            if len(matches) == 1:
+                resolved = self._get_windows_printer_queue_detail(matches[0]["name"])
+                logger.debug(
+                    "job_id_debug printer_resolved tag=%s requested=%r resolved=%r driver=%r port=%r",
+                    tag,
+                    printer_name,
+                    resolved.get("name"),
+                    resolved.get("driver"),
+                    resolved.get("port"),
+                )
+                return resolved
+            if len(matches) > 1:
+                logger.warning(
+                    "job_id_debug ambiguous_printer_name tag=%s requested=%r candidates=%s",
+                    tag,
+                    printer_name,
+                    [
+                        {
+                            "name": item.get("name"),
+                            "driver": item.get("driver"),
+                            "port": item.get("port"),
+                        }
+                        for item in matches
+                    ],
+                )
+                return None
+            return None
+
+        exact = [item for item in candidates if item["name"] == requested]
+        resolved = pick_unique(exact, "exact")
+        if resolved:
+            return resolved
+
+        casefold = [item for item in candidates if item["name"].casefold() == requested_key]
+        resolved = pick_unique(casefold, "casefold")
+        if resolved:
+            return resolved
+
+        logger.warning(
+            "job_id_debug printer_name_not_found requested=%r candidates=%s",
+            printer_name,
+            [
+                {
+                    "name": item.get("name"),
+                    "driver": item.get("driver"),
+                    "port": item.get("port"),
+                }
+                for item in candidates
+            ],
+        )
+        return None
+
+    def _get_windows_printer_queue_detail(self, queue_name: str) -> Dict[str, Any]:
+        detail = {"name": queue_name, "driver": "", "port": ""}
+        handle = None
+        try:
+            handle = win32print.OpenPrinter(
+                queue_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE}
+            )
+            info = win32print.GetPrinter(handle, 2)
+            detail["driver"] = info.get("pDriverName", "")
+            detail["port"] = info.get("pPortName", "")
+        except Exception as e:
+            detail["error"] = str(e)
+        finally:
+            if handle:
+                try:
+                    win32print.ClosePrinter(handle)
+                except Exception:
+                    logger.debug("Closing printer handle failed", exc_info=True)
+        return detail
+
+    def _enum_print_jobs_raw(self, printer_name: str) -> List[Dict[str, Any]]:
+        handle = None
+        try:
+            handle = win32print.OpenPrinter(
+                printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE}
+            )
+            return list(win32print.EnumJobs(handle, 0, -1, 1) or [])
+        except ModuleNotFoundError as e:
+            logger.warning(
+                "job_id_debug enum_jobs_error printer=%r missing_module=%r error=%s",
+                printer_name,
+                getattr(e, "name", None) or str(e),
+                e,
+            )
+            raise
+        except Exception as e:
+            logger.warning(
+                "job_id_debug enum_jobs_error printer=%r error=%s",
+                printer_name,
+                e,
+            )
+            raise
+        finally:
+            if handle:
+                try:
+                    win32print.ClosePrinter(handle)
+                except Exception:
+                    logger.debug("Closing printer handle failed", exc_info=True)
+
+    def _summarize_print_jobs(self, jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "JobId": job.get("JobId"),
+                "pDocument": job.get("pDocument", ""),
+                "Status": job.get("Status"),
+            }
+            for job in jobs
+        ]
+
+    def _document_matches_job_name(self, document_name: str, job_name: Optional[str]) -> bool:
+        if not job_name:
+            return True
+        document = os.path.basename(str(document_name or "")).casefold()
+        expected = os.path.basename(str(job_name or "")).casefold()
+        return bool(document and expected and document == expected)
+
+    def _prepare_print_job_tracking(
+        self, printer_name: str, job_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        resolved = self._resolve_windows_printer_queue(printer_name)
+        if not resolved:
+            return None
+
+        queue_name = resolved["name"]
+        try:
+            before_jobs = self._enum_print_jobs_raw(queue_name)
+        except Exception:
+            return None
+
+        before_ids = {job.get("JobId") for job in before_jobs if job.get("JobId") is not None}
+        logger.debug(
+            "job_id_debug queue_snapshot_before printer=%r resolved=%r job_name=%r jobs=%s",
+            printer_name,
+            queue_name,
+            job_name,
+            self._summarize_print_jobs(before_jobs),
+        )
+        return {
+            "requested_name": printer_name,
+            "queue_name": queue_name,
+            "driver": resolved.get("driver", ""),
+            "port": resolved.get("port", ""),
+            "before_job_ids": before_ids,
+            "before_jobs": before_jobs,
+        }
+
+    def _get_latest_job_id(
+        self,
+        printer_name: str,
+        job_name: str = None,
+        max_wait: float = 5.0,
+        before_job_ids: Optional[set] = None,
+    ) -> Optional[int]:
+        """Return a unique matching Windows spooler job id; never guess by latest id."""
         if not self.available:
             return None
-        
+
         import time
-        
-        try:
-            # 多次尝试，因为任务可能需要短暂时间才出现在队列中
-            for attempt in range(int(max_wait * 10)):  # 每0.1秒检查一次
-                try:
-                    printer_handle = win32print.OpenPrinter(printer_name)
-                    jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
-                    win32print.ClosePrinter(printer_handle)
-                    
-                    if jobs:
-                        # 如果提供了job_name，尝试匹配
-                        if job_name:
-                            for job in jobs:
-                                doc_name = job.get("pDocument", "")
-                                if doc_name and job_name in doc_name:
-                                    return job["JobId"]
-                        
-                        # 如果没有匹配到或没有提供job_name，返回最新的（JobId最大的）
-                        latest_job = max(jobs, key=lambda j: j.get("JobId", 0))
-                        job_id = latest_job.get("JobId")
-                        if job_id:
-                            return job_id
-                
-                except Exception:
-                    pass
-                
+
+        resolved = self._resolve_windows_printer_queue(printer_name)
+        if not resolved:
+            return None
+
+        queue_name = resolved["name"]
+        before_ids = set(before_job_ids or set())
+        attempts = max(1, int(max_wait * 10))
+
+        last_reason = "no_new_job"
+        for attempt in range(attempts):
+            try:
+                jobs = self._enum_print_jobs_raw(queue_name)
+            except ModuleNotFoundError:
+                logger.warning(
+                    "job_id_debug enum_jobs_error printer=%r resolved=%r job_name=%r before_job_ids=%s max_wait=%.1fs",
+                    printer_name,
+                    queue_name,
+                    job_name,
+                    sorted(before_ids),
+                    max_wait,
+                )
+                return None
+            except Exception:
+                last_reason = "enum_jobs_error"
                 time.sleep(0.1)
-            
-            logger.warning("Did not obtain job_id from print queue within %.1fs", max_wait)
-            return None
-            
-        except Exception as e:
-            logger.exception("Failed to get latest job_id from print queue")
-            return None
+                continue
+
+            new_jobs = [
+                job for job in jobs
+                if job.get("JobId") is not None and job.get("JobId") not in before_ids
+            ]
+            matching_jobs = [
+                job for job in new_jobs
+                if self._document_matches_job_name(job.get("pDocument", ""), job_name)
+            ]
+
+            logger.debug(
+                "job_id_debug queue_poll attempt=%s printer=%r resolved=%r job_name=%r jobs=%s new_jobs=%s matching_jobs=%s",
+                attempt + 1,
+                printer_name,
+                queue_name,
+                job_name,
+                self._summarize_print_jobs(jobs),
+                self._summarize_print_jobs(new_jobs),
+                self._summarize_print_jobs(matching_jobs),
+            )
+
+            if len(matching_jobs) == 1:
+                job_id = matching_jobs[0].get("JobId")
+                logger.info(
+                    "job_id_debug job_id_matched printer=%r resolved=%r job_id=%s document=%r",
+                    printer_name,
+                    queue_name,
+                    job_id,
+                    matching_jobs[0].get("pDocument", ""),
+                )
+                return job_id
+
+            if len(matching_jobs) > 1:
+                last_reason = "multiple_new_jobs"
+                logger.warning(
+                    "job_id_debug multiple_new_jobs printer=%r resolved=%r job_name=%r matches=%s",
+                    printer_name,
+                    queue_name,
+                    job_name,
+                    self._summarize_print_jobs(matching_jobs),
+                )
+                return None
+
+            if new_jobs:
+                last_reason = "document_name_mismatch"
+                logger.warning(
+                    "job_id_debug document_name_mismatch printer=%r resolved=%r job_name=%r new_jobs=%s",
+                    printer_name,
+                    queue_name,
+                    job_name,
+                    self._summarize_print_jobs(new_jobs),
+                )
+            else:
+                last_reason = "no_new_job"
+
+            time.sleep(0.1)
+
+        logger.warning(
+            "job_id_debug %s printer=%r resolved=%r job_name=%r before_job_ids=%s max_wait=%.1fs",
+            last_reason,
+            printer_name,
+            queue_name,
+            job_name,
+            sorted(before_ids),
+            max_wait,
+        )
+        return None
     
     def _get_job_status_text(self, status: int) -> str:
         """获取任务状态文本"""
@@ -710,13 +958,12 @@ class WindowsEnterprisePrinter:
             return {"success": False, "message": "Windows打印API不可用"}
         
         try:
-            try:
-                printer_handle = win32print.OpenPrinter(printer_name)
-                win32print.ClosePrinter(printer_handle)
-                logger.info("System printer available: %s", printer_name)
-            except Exception:
+            resolved = self._resolve_windows_printer_queue(printer_name)
+            if not resolved:
                 logger.warning("System printer missing: %s", printer_name)
                 return {"success": False, "message": f"打印机 {printer_name} 未安装到Windows系统，无法提交到打印队列"}
+            queue_printer_name = resolved["name"]
+            logger.info("System printer available: %s", queue_printer_name)
             
             logger.debug("Using system print path with print options support")
             
@@ -725,16 +972,16 @@ class WindowsEnterprisePrinter:
             
             if file_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff']:
                 # 图片文件使用GDI打印
-                return self._print_image_file(printer_name, file_path, job_name, print_options)
+                return self._print_image_file(queue_printer_name, file_path, job_name, print_options)
             elif file_ext == '.pdf':
                 # PDF文件尝试调用系统打印
-                return self._print_pdf_file(printer_name, file_path, job_name, print_options)
+                return self._print_pdf_file(queue_printer_name, file_path, job_name, print_options)
             elif file_ext in ['.doc', '.docx']:
                 # Word文档先转PDF再打印
-                return self._print_word_file(printer_name, file_path, job_name, print_options)
+                return self._print_word_file(queue_printer_name, file_path, job_name, print_options)
             else:
                 # 文本文件使用RAW打印
-                return self._print_raw_file(printer_name, file_path, job_name, print_options)
+                return self._print_raw_file(queue_printer_name, file_path, job_name, print_options)
                 
         except Exception as e:
             logger.exception("Submitting print job failed")
@@ -849,7 +1096,7 @@ class WindowsEnterprisePrinter:
             import win32con
             import pywintypes
             
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             try:
                 # 获取当前DEVMODE
                 properties = win32print.GetPrinter(printer_handle, 2)
@@ -1038,7 +1285,6 @@ class WindowsEnterprisePrinter:
         """打印PDF文件 (使用ShellExecute调用默认PDF阅读器打印)"""
         import win32api
         import win32print
-        import time
         import subprocess
         
         print(f"[INFO] 开始打印PDF: {file_path} -> {printer_name}")
@@ -1057,19 +1303,6 @@ class WindowsEnterprisePrinter:
 
             force_bitmap_engine = effective_engine in ["bitmap", "bitmap_gdi", "raster", "image"]
             prefer_system_engine = (effective_engine == "system")
-            bitmap_fallback_setting = self._get_setting("pdf_bitmap_fallback", True)
-            bitmap_fallback_enabled = str(bitmap_fallback_setting).lower() not in ["0", "false", "off", "no"]
-            if print_options and "pdf_bitmap_fallback" in print_options:
-                bitmap_fallback_enabled = str(print_options.get("pdf_bitmap_fallback")).lower() not in ["0", "false", "off", "no"]
-
-            def try_bitmap_fallback(reason: str):
-                if not bitmap_fallback_enabled:
-                    return None
-                print(f"[WARN] PDF打印触发位图兜底: {reason}")
-                fallback_result = self._print_pdf_file_bitmap(printer_name, abs_path, job_name, print_options or {})
-                if fallback_result.get("success"):
-                    fallback_result["message"] = f"位图兜底打印已提交: {reason}"
-                return fallback_result
 
             if force_bitmap_engine:
                 print("[INFO] 使用位图引擎打印PDF")
@@ -1078,9 +1311,30 @@ class WindowsEnterprisePrinter:
             # 使用自动发现逻辑
             sumatra_path = self._find_sumatra_pdf_path()
             
+            if not prefer_system_engine and not sumatra_path:
+                return {"success": False, "message": "SumatraPDF不可用，未提交打印任务", "job_id": None}
+
             if sumatra_path and not prefer_system_engine:
                 try:
                     print(f"[INFO] 使用 SumatraPDF 打印：{sumatra_path}")
+                    tracking = self._prepare_print_job_tracking(
+                        printer_name, os.path.basename(abs_path)
+                    )
+                    if not tracking:
+                        return {
+                            "success": False,
+                            "message": "无法解析Windows打印队列，无法追踪本地打印任务ID",
+                            "job_id": None,
+                        }
+                    queue_printer_name = tracking["queue_name"]
+                    logger.info(
+                        "job_id_debug print_submit cloud_printer=%r resolved=%r driver=%r port=%r document=%r",
+                        printer_name,
+                        queue_printer_name,
+                        tracking.get("driver"),
+                        tracking.get("port"),
+                        os.path.basename(abs_path),
+                    )
                                 
                     # 在打印前先配置打印机的纸张设置（关键修复！）
                     # 仅调用一次 _detect_file_paper_size，避免重复检测
@@ -1089,9 +1343,9 @@ class WindowsEnterprisePrinter:
                         print(f" [INFO] 检测到纸张尺寸：{detected_paper_size}，配置打印机...")
                         config_options = dict(print_options or {})
                         config_options['paper_size'] = detected_paper_size
-                        self._configure_printer_devmode(printer_name, config_options)
+                        self._configure_printer_devmode(queue_printer_name, config_options)
                                 
-                    cmd = [sumatra_path, "-print-to", printer_name, "-silent", "-exit-when-done"]
+                    cmd = [sumatra_path, "-print-to", queue_printer_name, "-silent", "-exit-when-done"]
                     
                     # 构建打印设置字符串
                     print_settings = []
@@ -1139,105 +1393,110 @@ class WindowsEnterprisePrinter:
                     if "fit" not in print_settings:
                         print_settings.append("fit")
 
-                    if print_settings:
-                        print_settings_str = ",".join(print_settings)
+                    print_settings_str = ",".join(print_settings)
+                    if print_settings_str:
                         print(f"[INFO] SumatraPDF print-settings: {print_settings_str}")
                         cmd.extend(["-print-settings", print_settings_str])
                     
                     cmd.append(abs_path)
+                    logger.info(
+                        "job_id_debug sumatra_command printer=%r executable=%r document=%r settings=%r",
+                        queue_printer_name,
+                        os.path.basename(sumatra_path),
+                        os.path.basename(abs_path),
+                        print_settings_str,
+                    )
+                    logger.debug(
+                        "job_id_debug sumatra_command_full printer=%r cmd=%s",
+                        queue_printer_name,
+                        cmd,
+                    )
                     result = subprocess.run(
                         cmd,
                         capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
                     )
+                    logger.info(
+                        "job_id_debug sumatra_result printer=%r returncode=%s stdout=%r stderr=%r",
+                        queue_printer_name,
+                        result.returncode,
+                        (result.stdout or "").strip()[:500],
+                        (result.stderr or "").strip()[:500],
+                    )
                     if result.returncode != 0:
-                        fallback_result = try_bitmap_fallback("SumatraPDF返回非零退出码")
-                        if fallback_result:
-                            return fallback_result
                         return {"success": False, "message": f"SumatraPDF打印失败: {result.stderr.strip() or result.stdout.strip()}"}
                     print(f"[INFO] SumatraPDF 打印成功 (exitCode: {result.returncode})")
                     
-                    # 尝试从打印队列获取job_id（SumatraPDF提交后立即查询）
-                    job_id = self._get_latest_job_id(printer_name, job_name)
+                    job_id = self._get_latest_job_id(
+                        queue_printer_name,
+                        os.path.basename(abs_path),
+                        before_job_ids=tracking["before_job_ids"],
+                    )
                     if job_id:
                         print(f"[INFO] 获取到打印任务ID: {job_id}")
                     else:
-                        print(f"[WARN] 未能从打印队列获取job_id（任务可能已完成或虚拟打印机）")
+                        print("[WARN] 无法获取本地打印任务ID")
+                        return {
+                            "success": False,
+                            "message": "无法获取本地打印任务ID",
+                            "job_id": None,
+                        }
                     
-                    return {"success": True, "message": "SumatraPDF 打印任务已提交", "job_id": job_id}
+                    return {
+                        "success": True,
+                        "message": "SumatraPDF 打印任务已提交",
+                        "job_id": job_id,
+                        "printer_name": queue_printer_name,
+                    }
                 except Exception as e:
-                    fallback_result = try_bitmap_fallback(f"SumatraPDF异常: {str(e)}")
-                    if fallback_result:
-                        return fallback_result
                     return {"success": False, "message": f"SumatraPDF打印失败: {str(e)}"}
 
             if prefer_system_engine:
                 reason = "配置指定" if effective_engine == "system" else "按配置走系统引擎"
                 print(f"[INFO] 使用系统打印引擎 (printto/print): {reason}")
             
-            # 如果没有 SumatraPDF，使用 ShellExecute
-            # 优先使用 printto 动词（不修改默认打印机）
+            # system engine uses printto only; it never changes the default printer.
+            tracking = self._prepare_print_job_tracking(
+                printer_name, os.path.basename(abs_path)
+            )
+            if not tracking:
+                return {
+                    "success": False,
+                    "message": "无法解析Windows打印队列，无法追踪本地打印任务ID",
+                    "job_id": None,
+                }
+            queue_printer_name = tracking["queue_name"]
+            logger.info(
+                "job_id_debug print_submit cloud_printer=%r resolved=%r driver=%r port=%r document=%r",
+                printer_name,
+                queue_printer_name,
+                tracking.get("driver"),
+                tracking.get("port"),
+                os.path.basename(abs_path),
+            )
             res = 33
             print(f"[INFO] 尝试使用 'printto' 动词打印: {abs_path}")
-            res = win32api.ShellExecute(0, "printto", abs_path, f'"{printer_name}"', ".", 0)
+            res = win32api.ShellExecute(0, "printto", abs_path, f'"{queue_printer_name}"', ".", 0)
             
-            # 仅当 printto 失败且错误码为 31（无关联程序）时，才回退到修改默认打印机的方案
             if res <= 32:
-                if res == 31:
-                    print(f"[WARN] 'printto' 失败 (错误码 31: 无关联程序)，回退到修改默认打印机方案...")
-                    default_printer = win32print.GetDefaultPrinter()
-                    
-                    try:
-                        if default_printer != printer_name:
-                            print(f"[INFO] 临时切换默认打印机: {default_printer} -> {printer_name}")
-                            win32print.SetDefaultPrinter(printer_name)
-                        
-                        print(f"[INFO] 尝试使用 'print' 动词打印: {abs_path}")
-                        res = win32api.ShellExecute(0, "print", abs_path, None, ".", 0)
-                    finally:
-                        if default_printer != printer_name:
-                            print(f"[INFO] 恢复默认打印机: {default_printer}")
-                            win32print.SetDefaultPrinter(default_printer)
-                    
-                    if res <= 32:
-                        fallback_result = try_bitmap_fallback(f"ShellExecute print 失败, 错误码: {res}")
-                        if fallback_result:
-                            return fallback_result
-                        return {"success": False, "message": f"ShellExecute调用失败, 错误码: {res}"}
-                else:
-                    fallback_result = try_bitmap_fallback(f"ShellExecute printto 失败, 错误码: {res}")
-                    if fallback_result:
-                        return fallback_result
-                    return {"success": False, "message": f"printto 调用失败, 错误码: {res}"}
+                return {"success": False, "message": f"printto 调用失败, 错误码: {res}"}
             
-            # 轮询获取打印任务ID
-            job_id = None
-            max_attempts = 5
-            
-            for attempt in range(max_attempts):
-                try:
-                    printer_handle = win32print.OpenPrinter(printer_name)
-                    jobs = win32print.EnumJobs(printer_handle, 0, -1, 1)
-                    win32print.ClosePrinter(printer_handle)
-                    
-                    if jobs:
-                        latest_job = max(jobs, key=lambda x: x['JobId'])
-                        job_id = latest_job['JobId']
-                        print(f"[INFO] 获取到打印任务ID: {job_id} (第{attempt+1}次尝试)")
-                        break
-                    elif attempt < max_attempts - 1:
-                        time.sleep(1)
-                except Exception as e:
-                    print(f"[WARN] 第{attempt+1}次获取打印任务ID失败: {e}")
-                    if attempt < max_attempts - 1:
-                        time.sleep(1)
-            
+            job_id = self._get_latest_job_id(
+                queue_printer_name,
+                os.path.basename(abs_path),
+                before_job_ids=tracking["before_job_ids"],
+            )
             if not job_id:
-                print(f"[WARN] {max_attempts}次尝试后仍未获取到job_id，虚拟打印机可能不经过后台程序")
+                print("[WARN] 无法获取本地打印任务ID")
+                return {
+                    "success": False,
+                    "message": "无法获取本地打印任务ID",
+                    "job_id": None,
+                }
             
             return {
                 "success": True, 
                 "job_id": job_id, 
-                "printer_name": printer_name,
+                "printer_name": queue_printer_name,
                 "file_path": file_path,
                 "message": "PDF打印命令已发送"
             }
@@ -1260,7 +1519,7 @@ class WindowsEnterprisePrinter:
             import time
 
             options = print_options or {}
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             devmode = None
 
             try:
@@ -1344,7 +1603,7 @@ class WindowsEnterprisePrinter:
             if page_count <= 0:
                 return {"success": False, "message": "PDF无可打印页面"}
 
-            hdc.StartDoc(job_name or os.path.basename(file_path))
+            job_id = hdc.StartDoc(job_name or os.path.basename(file_path))
             for page_index in range(page_count):
                 page = document.load_page(page_index)
                 pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -1400,8 +1659,6 @@ class WindowsEnterprisePrinter:
                 win32print.ClosePrinter(printer_handle)
                 printer_handle = None
 
-            time.sleep(0.8)
-            job_id = self._get_latest_job_id(printer_name, job_name or os.path.basename(file_path))
             return {
                 "success": True,
                 "job_id": job_id,
@@ -1435,7 +1692,7 @@ class WindowsEnterprisePrinter:
     
     def _print_raw_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
         """使用RAW方式打印文件"""
-        printer_handle = win32print.OpenPrinter(printer_name)
+        printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
         
         # 创建打印作业
         job_info = (
@@ -1487,7 +1744,7 @@ class WindowsEnterprisePrinter:
             
             try:
                 # 打开打印机（用于获取DEVMODE配置）
-                printer_handle = win32print.OpenPrinter(printer_name)
+                printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
                 
                 # 使用win32ui进行实际的图片绘制和打印
                 import win32ui
@@ -1602,8 +1859,7 @@ class WindowsEnterprisePrinter:
                     hdc = win32ui.CreateDC()
                     hdc.CreatePrinterDC(printer_name)
                 
-                # 开始打印文档（这里不会重新生成job_id，使用之前获取的）
-                hdc.StartDoc(job_name or os.path.basename(file_path))
+                job_id = hdc.StartDoc(job_name or os.path.basename(file_path))
                 hdc.StartPage()
                 
                 # 获取打印机分辨率
@@ -1718,11 +1974,6 @@ class WindowsEnterprisePrinter:
                     win32print.ClosePrinter(printer_handle)
                     printer_handle = None
                 
-                # 打印完成后获取真实的job_id
-                import time
-                time.sleep(0.5)  # 等待任务进入队列
-                job_id = self._get_latest_job_id(printer_name, job_name or os.path.basename(file_path))
-                
                 if job_id:
                     logger.info("Image print submitted with job_id=%s", job_id)
                 else:
@@ -1762,7 +2013,7 @@ class WindowsEnterprisePrinter:
             return {}
         
         try:
-            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             printer_info = win32print.GetPrinter(printer_handle, 2)
             port_name = printer_info.get('pPortName', '')
             
@@ -1930,56 +2181,190 @@ class WindowsEnterprisePrinter:
             return detail.get("status_text")
         return None
 
-    def _get_wmi_printer_status_detail(self, printer_name: str) -> Optional[Dict[str, Any]]:
+    def _query_all_printers_wmi_batch(self) -> Dict[str, Optional[Dict[str, Any]]]:
+        """一次性查询所有打印机的 WMI 状态，避免逐打印机重复启动 PowerShell。
+
+        返回 {printer_name: status_detail_dict_or_None} 的字典。
+        单次 PowerShell 调用即可获取全部打印机数据，降低管理页加载延迟。
+        """
         import subprocess
+        import json as _json
         try:
-            safe_name = printer_name.replace("'", "''")
+            powershell_cmd = (
+                'Get-CimInstance Win32_Printer '
+                '| Select-Object Name, WorkOffline, PrinterStatus, '
+                'ExtendedPrinterStatus, DetectedErrorState, Availability '
+                '| ConvertTo-Json'
+            )
             result = subprocess.run(
-                ["wmic", "printer", "where", f"Name='{safe_name}'", "get", "WorkOffline,PrinterStatus,ExtendedPrinterStatus,DetectedErrorState,Availability", "/format:list"],
+                ["powershell", "-NoProfile", "-Command", powershell_cmd],
+                capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=15
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "WMI batch query failed: returncode=%s stderr=%s",
+                    result.returncode,
+                    result.stderr.strip() or "(none)",
+                )
+                return {}
+
+            raw = result.stdout.strip()
+            if not raw:
+                return {}
+
+            items = _json.loads(raw)
+            # 如果是单个对象则包装为列表
+            if isinstance(items, dict):
+                items = [items]
+
+            cache: Dict[str, Optional[Dict[str, Any]]] = {}
+            for item in items:
+                name = (item.get('Name') or '').strip()
+                if not name:
+                    continue
+                work_offline = str(item.get('WorkOffline', ''))
+                printer_status = str(item.get('PrinterStatus', ''))
+                extended_status = str(item.get('ExtendedPrinterStatus', ''))
+                detected_error_state = str(item.get('DetectedErrorState', ''))
+                availability = str(item.get('Availability', ''))
+
+                DETECTED_ERROR_STATE_MAP = {
+                    "3": "缺纸", "4": "缺纸",
+                    "5": "缺墨", "6": "缺墨",
+                    "7": "门开", "8": "卡纸",
+                    "9": "离线", "10": "需要维护",
+                    "11": "输出满",
+                }
+                status_text = None
+                if work_offline.lower() in ("true", "1", "yes"):
+                    status_text = "离线"
+                elif printer_status == "7" or extended_status == "7" or availability == "8":
+                    status_text = "离线"
+                elif printer_status == "4" or extended_status == "4":
+                    status_text = "正在打印"
+                elif printer_status in ("3", "5") or extended_status in ("3", "5"):
+                    status_text = "就绪"
+                elif detected_error_state and detected_error_state not in ("0", "1", "2"):
+                    status_text = DETECTED_ERROR_STATE_MAP.get(
+                        detected_error_state, "错误"
+                    )
+
+                cache[name] = {
+                    "status_text": status_text,
+                    "work_offline": work_offline,
+                    "printer_status": printer_status,
+                    "extended_status": extended_status,
+                    "detected_error_state": detected_error_state,
+                    "availability": availability,
+                }
+            logger.debug("WMI batch query returned %d printers", len(cache))
+            return cache
+        except Exception as e:
+            logger.warning("WMI batch query exception: %s", e)
+            return {}
+
+    def _get_wmi_printer_status_detail(self, printer_name: str) -> Optional[Dict[str, Any]]:
+        """通过PowerShell Get-CimInstance查询打印机扩展状态。
+
+        替代已弃用的 wmic（Windows 11 24H2+ 已移除 wmic）。
+        Get-CimInstance 在 PowerShell 3.0+ / 所有受支持 Windows 版本上均可用。
+
+        优先使用批量查询缓存（30s TTL），避免逐打印机重复启动 PowerShell。
+        缓存未命中时回退到单打印机查询。
+        """
+        import subprocess
+        import time
+        try:
+            # 1. 先尝试从批量缓存获取（避免重复启动 PowerShell）
+            now = time.time()
+            if now - self._wmi_batch_cache_time > self._wmi_batch_cache_ttl:
+                self._wmi_batch_cache = self._query_all_printers_wmi_batch()
+                self._wmi_batch_cache_time = now
+
+            # 缓存命中（包括值为 None 的条目，表示 WMI 中无此打印机）
+            if printer_name in self._wmi_batch_cache:
+                cached = self._wmi_batch_cache[printer_name]
+                if self._wmi_query_state.get(printer_name) != "ok":
+                    logger.debug("WMI printer status from batch cache: printer=%s", printer_name)
+                    self._wmi_query_state[printer_name] = "ok"
+                return cached
+
+            # 2. 缓存未命中，回退到单打印机查询（处理边缘情况）
+            safe_name = printer_name.replace("'", "''")
+            wql = f"SELECT * FROM Win32_Printer WHERE Name='{safe_name}'"
+            powershell_cmd = (
+                f'Get-CimInstance -Query "{wql}" '
+                '| Select-Object WorkOffline, PrinterStatus, ExtendedPrinterStatus, '
+                'DetectedErrorState, Availability '
+                '| Format-List'
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", powershell_cmd],
                 capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=10
             )
             if result.returncode != 0:
                 if self._wmi_query_state.get(printer_name) != "failed":
                     logger.warning(
-                        "WMI printer status query failed: printer=%s returncode=%s",
+                        "WMI printer status query failed: printer=%s returncode=%s stderr=%s",
                         printer_name,
                         result.returncode,
+                        result.stderr.strip() or "(none)",
                     )
                     self._wmi_query_state[printer_name] = "failed"
                 return None
+
             work_offline = None
             printer_status = None
             extended_status = None
             detected_error_state = None
             availability = None
+            # Format-List 输出为 "Key : Value"（冒号+空格分隔），与旧 wmic 的 "Key=Value" 不同
             for line in result.stdout.splitlines():
-                if line.startswith("WorkOffline="):
-                    work_offline = line.split("=", 1)[1].strip()
-                elif line.startswith("PrinterStatus="):
-                    printer_status = line.split("=", 1)[1].strip()
-                elif line.startswith("ExtendedPrinterStatus="):
-                    extended_status = line.split("=", 1)[1].strip()
-                elif line.startswith("DetectedErrorState="):
-                    detected_error_state = line.split("=", 1)[1].strip()
-                elif line.startswith("Availability="):
-                    availability = line.split("=", 1)[1].strip()
+                if line.startswith("WorkOffline"):
+                    work_offline = line.split(":", 1)[1].strip()
+                elif line.startswith("PrinterStatus"):
+                    printer_status = line.split(":", 1)[1].strip()
+                elif line.startswith("ExtendedPrinterStatus"):
+                    extended_status = line.split(":", 1)[1].strip()
+                elif line.startswith("DetectedErrorState"):
+                    detected_error_state = line.split(":", 1)[1].strip()
+                elif line.startswith("Availability"):
+                    availability = line.split(":", 1)[1].strip()
+
+            # WMI DetectedErrorState → 中文状态映射
+            # ref: https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-printer
+            DETECTED_ERROR_STATE_MAP = {
+                "3": "缺纸",      # Low Paper
+                "4": "缺纸",      # No Paper
+                "5": "缺墨",      # Low Toner
+                "6": "缺墨",      # No Toner
+                "7": "门开",      # Door Open
+                "8": "卡纸",      # Jammed
+                "9": "离线",      # Offline
+                "10": "需要维护",  # Service Requested
+                "11": "输出满",    # Output Bin Full
+            }
 
             status_text = None
             if work_offline and work_offline.lower() in ("true", "1", "yes"):
                 status_text = "离线"
-            elif printer_status == "7" or extended_status == "7" or detected_error_state == "9" or availability == "8":
+            elif printer_status == "7" or extended_status == "7" or availability == "8":
                 status_text = "离线"
             elif printer_status == "4" or extended_status == "4":
                 status_text = "正在打印"
             elif printer_status in ("3", "5") or extended_status in ("3", "5"):
                 status_text = "就绪"
-            elif detected_error_state and detected_error_state not in ("0", "2"):
-                status_text = "错误"
+            elif detected_error_state and detected_error_state not in ("0", "1", "2"):
+                status_text = DETECTED_ERROR_STATE_MAP.get(
+                    detected_error_state, "错误"
+                )
 
             if self._wmi_query_state.get(printer_name) != "ok":
                 logger.debug("WMI printer status query available: printer=%s", printer_name)
                 self._wmi_query_state[printer_name] = "ok"
-            return {
+
+            # 将单打印机查询结果回填到批量缓存中
+            result_item = {
                 "status_text": status_text,
                 "work_offline": work_offline,
                 "printer_status": printer_status,
@@ -1987,12 +2372,40 @@ class WindowsEnterprisePrinter:
                 "detected_error_state": detected_error_state,
                 "availability": availability,
             }
+            self._wmi_batch_cache[printer_name] = result_item
+            return result_item
+        except FileNotFoundError:
+            # PowerShell 不可用（极端罕见的 Windows 环境）
+            if self._wmi_query_state.get(printer_name) != "failed":
+                logger.warning("PowerShell not available for WMI printer status query: printer=%s", printer_name)
+                self._wmi_query_state[printer_name] = "failed"
+            return None
         except Exception as e:
             if self._wmi_query_state.get(printer_name) != "failed":
                 logger.warning("WMI printer status query exception: printer=%s error=%s", printer_name, e)
                 self._wmi_query_state[printer_name] = "failed"
             return None
-    
+
+    def _enrich_status_from_printer_info_3(
+        self, printer_name: str, result_dict: Dict[str, Any]
+    ) -> None:
+        """当 Win32 Status bitmask=0 且 WMI 不可用时，从 PRINTER_INFO_3 获取
+        spooler 维护的独立状态字符串作为兜底。
+
+        对于网络打印机，spooler 可能持有 "打印机脱机"、"无法与打印机通讯"
+        等更准确的状态描述，即使 Status bitmask 显示为 0（就绪）。
+        """
+        try:
+            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
+            printer_info_3 = win32print.GetPrinter(printer_handle, 3)
+            win32print.ClosePrinter(printer_handle)
+
+            spooler_status = printer_info_3.get('Status', '')
+            if spooler_status and spooler_status.strip():
+                result_dict["status_text"] = spooler_status.strip()
+        except Exception:
+            pass  # 兜底查询失败则保持原有的 status_text
+
     def _normalize_paper_size_for_win32(self, paper_size: Optional[str]) -> Optional[str]:
         """将 'Letter (横向)' 等规范化为 win32 可识别的名称"""
         s = str(paper_size or "").strip()

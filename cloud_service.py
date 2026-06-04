@@ -16,6 +16,52 @@ from edge_node_info import EdgeNodeInfo
 logger = logging.getLogger(__name__)
 
 
+PRINTER_STATUS_TO_CLOUD = {
+    # English status values
+    "idle": "ready",
+    "processing": "printing",
+    "stopped": "error",
+    "paused": "error",
+    "error": "error",
+    "offline": "offline",
+    "unknown": "offline",
+    # Chinese ready states
+    "在线": "ready",
+    "空闲": "ready",
+    "就绪": "ready",
+    "准备就绪": "ready",
+    "省电模式": "ready",
+    # Chinese printing states
+    "打印中": "printing",
+    "正在打印": "printing",
+    # Chinese offline states
+    "离线": "offline",
+    "服务器未知": "offline",
+    "未知": "offline",
+    "未知状态": "offline",
+    # Chinese error states
+    "停止": "error",
+    "暂停": "error",
+    "已禁用": "error",
+    "错误": "error",
+    "缺纸": "error",
+    "门开": "error",
+    "用户干预": "error",
+    "正在删除": "error",
+    "纸张问题": "error",
+    "手动送纸": "error",
+    "输出满": "error",
+    "页面错误": "error",
+    "内存不足": "error",
+    "被阻止": "error",
+}
+
+NORMALIZED_PRINTER_STATUS_TO_CLOUD = {
+    status.casefold(): cloud_status
+    for status, cloud_status in PRINTER_STATUS_TO_CLOUD.items()
+}
+
+
 class CloudService:
     """Cloud service coordinator."""
 
@@ -815,28 +861,5 @@ class PrinterStatusReporter:
     
     def _convert_status_to_cloud_format(self, cups_status: str) -> str:
         """转换CUPS状态为云端标准格式: ready/printing/error/offline"""
-        status_map = {
-            # 英文状态
-            "idle": "ready",
-            "processing": "printing", 
-            "stopped": "error",
-            "unknown": "offline",
-            # 中文状态
-            "在线": "ready",
-            "空闲": "ready", 
-            "就绪": "ready",
-            "准备就绪": "ready",
-            "省电模式": "ready",
-            "打印中": "printing",
-            "正在打印": "printing",
-            "离线": "offline",
-            "停止": "error",
-            "已禁用": "error",
-            "错误": "error",
-            "缺纸": "error",
-            "门开": "error",
-            "用户干预": "error",
-            "未知": "offline",
-            "未知状态": "offline"
-        }
-        return status_map.get(cups_status, "offline")
+        normalized_status = str(cups_status or "").strip().casefold()
+        return NORMALIZED_PRINTER_STATUS_TO_CLOUD.get(normalized_status, "offline")
