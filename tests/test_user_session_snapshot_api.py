@@ -40,15 +40,34 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
         self.manager = InteractiveSessionManager()
         self.main = _import_main_module()
 
+    class NoopCloudService:
+        def __init__(self, *args, **kwargs):
+            self.listeners = []
+
+        def add_message_listener(self, message_type, listener):
+            self.listeners.append((message_type, listener))
+
+        def start(self):
+            return {
+                "success": False,
+                "message": "cloud disabled in test",
+                "node_id": None,
+            }
+
+        def stop(self):
+            return None
+
     def _get_current_session_snapshot(self):
-        with patch.object(self.main, "interactive_session_manager", self.manager):
+        with patch.object(self.main, "CloudService", self.NoopCloudService), \
+             patch.object(self.main, "interactive_session_manager", self.manager):
             with TestClient(self.main.app) as client:
                 response = client.get("/api/session/current")
         return response
 
     def _get_root_page(self):
-        with TestClient(self.main.app) as client:
-            response = client.get("/")
+        with patch.object(self.main, "CloudService", self.NoopCloudService):
+            with TestClient(self.main.app) as client:
+                response = client.get("/")
         return response
 
     def test_root_route_serves_user_spa_shell_directly(self):
@@ -88,6 +107,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": None,
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -116,6 +138,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -144,6 +169,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": None,
                 "submitted": True,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -173,6 +201,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -203,6 +234,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -232,6 +266,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": "job-42",
                 "submitted": True,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -262,6 +299,9 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": "job-42",
                 "submitted": True,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             response.json(),
         )
@@ -277,7 +317,19 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
         self.manager.attach_cloud_job("/api/v1/files/file-1", "job-42")
-        self.manager.accept_job_status_event({"job_id": "job-42", "status": "failed"})
+        self.manager.accept_job_status_event({
+            "job_id": "job-42",
+            "status": "failed",
+            "error_code": "printer_fault",
+            "message": "打印机缺纸，请联系管理员补纸",
+            "printer_fault": {
+                "faulted": True,
+                "reason_code": "media-empty-error",
+                "reason_label": "缺纸",
+                "message": "打印机缺纸，请联系管理员补纸",
+                "raw_reasons": ["media-empty-error", "media-needed-error"],
+            },
+        })
 
         response = self._get_current_session_snapshot()
         self.assertEqual(200, response.status_code, f"GET /api/session/current should return 200, got {response.status_code} with body {response.text!r}")
@@ -292,6 +344,15 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": "job-42",
                 "submitted": True,
+                "error_code": "printer_fault",
+                "error_message": "打印机缺纸，请联系管理员补纸",
+                "printer_fault": {
+                    "faulted": True,
+                    "reason_code": "media-empty-error",
+                    "reason_label": "缺纸",
+                    "message": "打印机缺纸，请联系管理员补纸",
+                    "raw_reasons": ["media-empty-error", "media-needed-error"],
+                },
             },
             response.json(),
         )

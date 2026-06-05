@@ -12,8 +12,10 @@ from printer_windows import WindowsEnterprisePrinter
 
 class FakeWin32Print:
     PRINTER_ACCESS_USE = 0x00000008
+    PRINTER_ALL_ACCESS = 0x000F000C
     PRINTER_ENUM_LOCAL = 0x00000002
     PRINTER_ENUM_CONNECTIONS = 0x00000004
+    JOB_CONTROL_DELETE = 5
 
     def __init__(self, jobs_by_call=None, printers=None, enum_jobs_error=None):
         self.jobs_by_call = list(jobs_by_call or [])
@@ -22,6 +24,7 @@ class FakeWin32Print:
             (0, None, "HP LaserJet Pro 3288dn", "HP LaserJet Pro 3288dn"),
         ]
         self.opened = []
+        self.set_job_calls = []
 
     def EnumPrinters(self, flags):
         return self.printers
@@ -41,6 +44,9 @@ class FakeWin32Print:
         if self.jobs_by_call:
             return self.jobs_by_call.pop(0)
         return []
+
+    def SetJob(self, handle, job_id, level, job_info, command):
+        self.set_job_calls.append((handle, job_id, level, job_info, command))
 
     def ClosePrinter(self, handle):
         return None
@@ -223,6 +229,56 @@ class WindowsJobTrackingTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         bitmap_mock.assert_not_called()
+
+    def test_remove_print_job_deletes_existing_job_and_confirms_removed(self):
+        fake = FakeWin32Print(jobs_by_call=[
+            [{"JobId": 42, "pDocument": "target.pdf", "Status": 0}],
+            [],
+        ])
+        printer = self.make_printer()
+
+        with patch("printer_windows.win32print", fake, create=True), \
+             patch("time.sleep") as sleep_mock:
+            success, message = printer.remove_print_job("HP LaserJet Pro 3288dn", "42")
+
+        self.assertTrue(success)
+        self.assertIn("cancelled", message)
+        self.assertEqual(
+            [("HP LaserJet Pro 3288dn", 42, 0, None, fake.JOB_CONTROL_DELETE)],
+            fake.set_job_calls,
+        )
+        sleep_mock.assert_not_called()
+
+    def test_remove_print_job_fails_when_target_job_is_missing(self):
+        fake = FakeWin32Print(jobs_by_call=[[]])
+        printer = self.make_printer()
+
+        with patch("printer_windows.win32print", fake, create=True):
+            success, message = printer.remove_print_job("HP LaserJet Pro 3288dn", "42")
+
+        self.assertFalse(success)
+        self.assertIn("not found", message)
+        self.assertEqual([], fake.set_job_calls)
+
+    def test_remove_print_job_fails_when_cancel_confirmation_times_out(self):
+        fake = FakeWin32Print(jobs_by_call=[
+            [{"JobId": 42, "pDocument": "target.pdf", "Status": 0}],
+            [{"JobId": 42, "pDocument": "target.pdf", "Status": 0}],
+            [{"JobId": 42, "pDocument": "target.pdf", "Status": 0}],
+        ])
+        printer = self.make_printer()
+
+        with patch("printer_windows.win32print", fake, create=True), \
+             patch("time.sleep"):
+            success, message = printer.remove_print_job(
+                "HP LaserJet Pro 3288dn",
+                "42",
+                confirm_timeout=0.0,
+            )
+
+        self.assertFalse(success)
+        self.assertIn("timeout", message)
+        self.assertEqual(1, len(fake.set_job_calls))
 
 
 if __name__ == "__main__":

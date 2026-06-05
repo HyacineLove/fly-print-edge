@@ -467,10 +467,112 @@ class WindowsEnterprisePrinter:
         """清空打印队列"""
         return "Windows系统暂不支持此功能"
     
-    def remove_print_job(self, printer_name: str, job_id: str) -> str:
-        """删除打印任务"""
-        return "Windows系统暂不支持此功能"
-    
+    def remove_print_job(
+        self,
+        printer_name: str,
+        job_id: str,
+        confirm_timeout: float = 5.0,
+        poll_interval: float = 0.5,
+    ) -> tuple[bool, str]:
+        """Cancel one Windows spooler job and confirm it leaves the queue."""
+        if not self.available:
+            return False, "windows_print_api_unavailable"
+
+        try:
+            target_job_id = int(job_id)
+        except (TypeError, ValueError):
+            return False, f"invalid job_id: {job_id!r}"
+
+        resolved = self._resolve_windows_printer_queue(printer_name)
+        if not resolved:
+            return False, "printer queue not found"
+        queue_name = resolved["name"]
+
+        try:
+            jobs = self._enum_print_jobs_raw(queue_name)
+        except Exception as exc:
+            return False, f"enum jobs failed: {exc}"
+
+        matching_jobs = [
+            job for job in jobs if int(job.get("JobId", -1)) == target_job_id
+        ]
+        if not matching_jobs:
+            logger.info(
+                "job_cancel_failed reason=target_job_missing printer=%r job_id=%s visible_job_ids=%s",
+                queue_name,
+                target_job_id,
+                [job.get("JobId") for job in jobs],
+            )
+            return False, f"job {target_job_id} not found"
+
+        handle = None
+        try:
+            handle = win32print.OpenPrinter(
+                queue_name,
+                {
+                    "DesiredAccess": getattr(
+                        win32print,
+                        "PRINTER_ALL_ACCESS",
+                        win32print.PRINTER_ACCESS_USE,
+                    )
+                },
+            )
+            logger.info(
+                "job_cancel_requested printer=%r job_id=%s document=%r",
+                queue_name,
+                target_job_id,
+                matching_jobs[0].get("pDocument", ""),
+            )
+            win32print.SetJob(
+                handle,
+                target_job_id,
+                0,
+                None,
+                win32print.JOB_CONTROL_DELETE,
+            )
+        except Exception as exc:
+            logger.warning(
+                "job_cancel_failed reason=set_job_error printer=%r job_id=%s error=%s",
+                queue_name,
+                target_job_id,
+                exc,
+            )
+            return False, f"cancel request failed: {exc}"
+        finally:
+            if handle:
+                try:
+                    win32print.ClosePrinter(handle)
+                except Exception:
+                    logger.debug("Closing printer handle failed", exc_info=True)
+
+        import time
+
+        deadline = time.monotonic() + confirm_timeout
+        while True:
+            try:
+                jobs = self._enum_print_jobs_raw(queue_name)
+            except Exception as exc:
+                return False, f"cancel confirmation failed: {exc}"
+
+            if not any(int(job.get("JobId", -1)) == target_job_id for job in jobs):
+                logger.info(
+                    "job_cancel_confirmed printer=%r job_id=%s",
+                    queue_name,
+                    target_job_id,
+                )
+                return True, f"job {target_job_id} cancelled"
+
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "job_cancel_failed reason=confirm_timeout printer=%r job_id=%s timeout=%ss",
+                    queue_name,
+                    target_job_id,
+                    confirm_timeout,
+                )
+                return False, f"cancel confirmation timeout for job {target_job_id}"
+
+            time.sleep(poll_interval)
+
     def discover_printers(self) -> List[Dict]:
         """发现打印机"""
         if not self.available:

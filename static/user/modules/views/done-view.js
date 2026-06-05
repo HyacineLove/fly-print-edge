@@ -1,4 +1,5 @@
 import { on, setText } from "../shared/dom.js";
+import { api, getJson } from "../shared/api.js";
 
 export function renderDoneView() {
   return `
@@ -27,6 +28,57 @@ export function renderDoneView() {
 
 export function bindDoneViewEvents({ appState, restartCycle }) {
   const result = appState.session.doneResult || { type: "success", message: "" };
+  let availabilityPollTimer = null;
+
+  function isPrinterFaultResult() {
+    return result.type === "error" && result.error_code === "printer_fault";
+  }
+
+  function setReturnEnabled(enabled) {
+    const button = document.getElementById("115_40");
+    if (!button) return;
+    button.style.pointerEvents = enabled ? "auto" : "none";
+    button.style.opacity = enabled ? "1" : "0.45";
+    button.style.cursor = enabled ? "pointer" : "not-allowed";
+  }
+
+  if (isPrinterFaultResult()) {
+    setText(["77_18"], "设备维护中");
+    setText(["77_21"], result.message || "打印机故障，请联系管理员处理");
+    setText(["115_39"], "");
+    setText(["115_42"], "等待恢复");
+    setReturnEnabled(false);
+
+    const pollAvailability = async () => {
+      try {
+        const availability = await getJson(api.printerAvailability);
+        if (!availability?.faulted) {
+          if (availabilityPollTimer) {
+            window.clearInterval(availabilityPollTimer);
+            availabilityPollTimer = null;
+          }
+          setText(["77_21"], "打印机已恢复，可返回首页继续使用");
+          setText(["115_42"], "返回首页");
+          setReturnEnabled(true);
+        }
+      } catch {
+        // Keep the locked state until a positive recovery signal is observed.
+      }
+    };
+
+    availabilityPollTimer = window.setInterval(pollAvailability, 4000);
+    void pollAvailability();
+    on("115_40", () => {
+      if (availabilityPollTimer) return;
+      void restartCycle();
+    });
+
+    return {
+      destroy() {
+        if (availabilityPollTimer) window.clearInterval(availabilityPollTimer);
+      },
+    };
+  }
   if (result.type === "error") {
     setText(["77_18"], "打印失败");
     setText(["77_21"], result.message || "云端服务异常，请稍后重试");

@@ -118,11 +118,12 @@ export function currentSessionId() {
   return state.session_id || "";
 }
 
-export function setDoneResult(type, message) {
+export function setDoneResult(type, message, extra = {}) {
   state.doneResult = {
     type: type || "success",
     message: message || "",
     ts: Date.now(),
+    ...(extra && typeof extra === "object" ? extra : {}),
   };
   saveSessionState();
 }

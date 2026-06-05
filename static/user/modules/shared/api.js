@@ -1,6 +1,7 @@
 export const api = {
   qr: "/api/qr_code",
   events: "/api/events",
+  printerAvailability: "/api/printer/availability",
   sessionCurrent: "/api/session/current",
   preview: "/api/preview",
   print: "/api/print",

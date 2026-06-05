@@ -34,6 +34,8 @@ from file_manager import init_file_manager, get_file_manager
 from interactive_session import InteractiveSessionManager
 from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
+from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
+from printer_fault_state import PrinterFaultStateStore
 
 logger = logging.getLogger("EdgeServer")
 
@@ -65,6 +67,8 @@ preview_cache: Dict[str, Dict[str, Any]] = {}
 preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
 preview_page_meta: Dict[str, Dict[str, int]] = {}
 interactive_session_manager = InteractiveSessionManager()
+printer_fault_state_store = PrinterFaultStateStore()
+printer_fault_probe = IPPPrinterFaultProbe()
 qr_code_request_lock: Optional[asyncio.Lock] = None
 config_service: Optional[ConfigService] = None
 
@@ -131,6 +135,7 @@ async def startup_event():
         cloud_config,
         printer_manager,
         interactive_job_binder=bind_interactive_cloud_job,
+        fault_state_store=printer_fault_state_store,
     )
 
     if cloud_service:
@@ -277,6 +282,10 @@ async def get_status():
         "printer_count": len(printer_manager.config.get_managed_printers()) if printer_manager else 0
     }
 
+@app.get("/api/printer/availability")
+async def get_printer_availability():
+    return _get_default_printer_availability_state()
+
 def get_host_ip():
     """获取本机局域网 IP"""
     try:
@@ -413,6 +422,44 @@ def _ensure_default_printer():
     if new_default_id:
         printer_manager.config.set_default_printer_id(new_default_id)
     return new_default_id
+
+def _get_default_printer_record():
+    default_printer_id = _ensure_default_printer()
+    if not default_printer_id:
+        return None
+    return _get_printer_by_id(default_printer_id)
+
+def _get_default_printer_availability_state():
+    default_printer = _get_default_printer_record()
+    if not default_printer:
+        return {
+            "available": False,
+            "faulted": False,
+            "error_code": "printer_unavailable",
+            "reason_code": "no_default_printer",
+            "reason_label": "无可用打印机",
+            "message": "暂无可用打印机",
+            "raw_reasons": [],
+            "printer_id": None,
+            "printer_name": None,
+        }
+
+    printer_id = default_printer.get("id")
+    printer_name = default_printer.get("name")
+    host = resolve_printer_host(default_printer)
+    if printer_fault_probe and host:
+        result = printer_fault_probe.probe(host)
+        if getattr(result, "available", False):
+            return printer_fault_state_store.update_from_probe(
+                printer_id=printer_id,
+                printer_name=printer_name,
+                result=result,
+            )
+
+    state = printer_fault_state_store.get_state()
+    state["printer_id"] = printer_id
+    state["printer_name"] = printer_name
+    return state
 
 def _get_settings():
     if not printer_manager:
@@ -966,6 +1013,16 @@ async def get_qr_code():
             return {"success": False, "standby": True, "message": "暂无可用打印机"}
 
         # 通过 WebSocket 请求上传凭证
+        availability = _get_default_printer_availability_state()
+        if availability.get("faulted"):
+            return {
+                "success": False,
+                "standby": True,
+                "error_code": "printer_fault",
+                "message": availability.get("message") or "打印机故障，请联系管理员处理",
+                "printer_fault": availability,
+            }
+
         if not cloud_service or not cloud_service.websocket_client:
             return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
 

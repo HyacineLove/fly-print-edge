@@ -1,4 +1,4 @@
-import { getJson } from "../shared/api.js";
+import { api, getJson } from "../shared/api.js";
 import { clearBg, on, q, setBg, setText } from "../shared/dom.js";
 import {
   createDefaultCapabilityState,
@@ -57,6 +57,8 @@ export function bindLoginViewEvents({ appState }) {
   let loginQrRefreshing = false;
   let loginQrRetryTimer = null;
   let loginQrAutoRefreshTimer = null;
+  let printerFaultLocked = false;
+  let availabilityPollTimer = null;
 
   function setManualRefreshDisabled(disabled) {
     const btn = q("3_28");
@@ -69,6 +71,50 @@ export function bindLoginViewEvents({ appState }) {
     if (!loginQrRetryTimer) return;
     window.clearTimeout(loginQrRetryTimer);
     loginQrRetryTimer = null;
+  }
+
+  function clearAvailabilityPollTimer() {
+    if (!availabilityPollTimer) return;
+    window.clearInterval(availabilityPollTimer);
+    availabilityPollTimer = null;
+  }
+
+  function setPrinterFaultLocked(fault) {
+    printerFaultLocked = Boolean(fault?.faulted);
+    if (printerFaultLocked) {
+      clearRetryTimer();
+      clearBg("3_37");
+      setQrCenterVisible(false);
+      setManualRefreshDisabled(true);
+      loginCountdownActive = false;
+      loginCountdownValue = 0;
+      setText(["77_56"], "0");
+      showUserToast(fault?.message || "打印机故障，请联系管理员处理", "error");
+      if (!availabilityPollTimer) {
+        availabilityPollTimer = window.setInterval(checkPrinterAvailability, 4000);
+      }
+    } else {
+      clearAvailabilityPollTimer();
+      setManualRefreshDisabled(false);
+    }
+  }
+
+  async function checkPrinterAvailability() {
+    try {
+      const availability = await getJson(api.printerAvailability);
+      if (availability?.faulted) {
+        setPrinterFaultLocked(availability);
+        return false;
+      }
+      if (printerFaultLocked) {
+        setPrinterFaultLocked(null);
+        hideUserToast();
+        void refreshQrCode();
+      }
+      return true;
+    } catch {
+      return !printerFaultLocked;
+    }
   }
 
   function setLoginErrorCountdown(message) {
@@ -84,7 +130,7 @@ export function bindLoginViewEvents({ appState }) {
   }
 
   async function refreshQrCode() {
-    if (loginQrRefreshing) return false;
+    if (loginQrRefreshing || printerFaultLocked) return false;
     clearRetryTimer();
     const qrWrap = q("3_37");
     clearBg("3_37");
@@ -98,7 +144,13 @@ export function bindLoginViewEvents({ appState }) {
     if (qrWrap) qrWrap.style.opacity = "0.6";
 
     try {
+      const available = await checkPrinterAvailability();
+      if (!available) return false;
       const qr = await getJson("/api/qr_code");
+      if (qr?.error_code === "printer_fault") {
+        setPrinterFaultLocked(qr.printer_fault || qr);
+        return false;
+      }
       if (qr?.standby || qr?.success === false) {
         session.session_id = null;
         setLoginErrorCountdown(mapQrErrorMessage(qr?.error_code, qr?.message));
@@ -131,7 +183,7 @@ export function bindLoginViewEvents({ appState }) {
     } finally {
       if (qrWrap) qrWrap.style.opacity = "1";
       loginQrRefreshing = false;
-      setManualRefreshDisabled(false);
+      setManualRefreshDisabled(printerFaultLocked);
       if (!loginCountdownActive) {
         setText(["77_56"], "0");
       }
@@ -156,7 +208,7 @@ export function bindLoginViewEvents({ appState }) {
   }, 1000);
 
   loginQrAutoRefreshTimer = window.setInterval(() => {
-    if (loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
+    if (printerFaultLocked || loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
     loginQrRetryTimer = window.setTimeout(() => {
       loginQrRetryTimer = null;
       if (loginQrRefreshing || loginCountdownActive) return;
@@ -170,7 +222,7 @@ export function bindLoginViewEvents({ appState }) {
   showUserToast("获取二维码中", "info");
 
   on("3_28", () => {
-    if (loginQrRefreshing) return;
+    if (loginQrRefreshing || printerFaultLocked) return;
     void refreshQrCode();
   });
 
@@ -181,6 +233,7 @@ export function bindLoginViewEvents({ appState }) {
     destroy() {
       if (loginCountdownTimer) window.clearInterval(loginCountdownTimer);
       if (loginQrAutoRefreshTimer) window.clearInterval(loginQrAutoRefreshTimer);
+      clearAvailabilityPollTimer();
       clearRetryTimer();
     },
   };

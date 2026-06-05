@@ -10,12 +10,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main
 from file_manager import FileManager
+from printer_fault_state import PrinterFaultStateStore
 
 
 class DummyConfig:
     def __init__(self):
         self.config = {
-            "managed_printers": [],
+            "managed_printers": [
+                {
+                    "id": "printer-1",
+                    "name": "HP",
+                    "location": "http://169.254.12.234:3911",
+                    "enabled": True,
+                }
+            ],
             "default_printer_id": "printer-1",
             "cloud": {
                 "base_url": "http://localhost:8012",
@@ -35,25 +43,49 @@ class DummyConfig:
     def get_full_config(self):
         return self.config
 
+    def get_default_printer_id(self):
+        return self.config.get("default_printer_id")
+
+    def set_default_printer_id(self, printer_id):
+        self.config["default_printer_id"] = printer_id
+
+    def clear_default_printer_id(self):
+        self.config["default_printer_id"] = None
+
+    def get_managed_printers(self):
+        return self.config["managed_printers"]
+
 
 class DummyPrinterManager:
     def __init__(self):
         self.config = DummyConfig()
 
+    def get_printers(self):
+        return self.config.get_managed_printers()
+
+    def get_printer_capabilities(self, printer_name):
+        return {"page_size": ["A4"], "color_model": ["RGB"], "duplex": ["None"]}
+
 
 class DummyWebSocketClient:
     def __init__(self):
         self.sent_messages = []
+        self.upload_token_requested = False
 
     async def send_message(self, message):
         self.sent_messages.append(message)
         return True
+
+    def request_upload_token(self, node_id, printer_id):
+        self.upload_token_requested = True
+        return False
 
 
 class DummyCloudService:
     def __init__(self):
         self.node_id = "node-123"
         self.websocket_client = DummyWebSocketClient()
+        self.print_job_handler = None
 
 
 class DummyRequest:
@@ -159,6 +191,59 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         self.assertEqual({}, main.preview_cache)
         self.assertEqual({}, main.preview_page_cache)
         self.assertEqual({}, main.preview_page_meta)
+
+    def test_printer_availability_reports_fault_from_probe_and_mapping(self):
+        fault_store = PrinterFaultStateStore()
+        fault_probe = type(
+            "FaultProbe",
+            (),
+            {
+                "probe": lambda self, host: type(
+                    "FaultResult",
+                    (),
+                    {
+                        "available": True,
+                        "faulted": True,
+                        "fault_reasons": ["media-empty-error", "media-needed-error"],
+                        "printer_state": 5,
+                        "printer_state_name": "stopped",
+                    },
+                )()
+            },
+        )()
+
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "printer_fault_state_store", fault_store), \
+             patch.object(main, "printer_fault_probe", fault_probe):
+            response = asyncio.run(main.get_printer_availability())
+
+        self.assertFalse(response["available"])
+        self.assertTrue(response["faulted"])
+        self.assertEqual("printer_fault", response["error_code"])
+        self.assertEqual("缺纸", response["reason_label"])
+        self.assertEqual("打印机缺纸，请联系管理员补纸", response["message"])
+        self.assertEqual(["media-empty-error", "media-needed-error"], response["raw_reasons"])
+
+    def test_qr_code_does_not_request_upload_token_while_default_printer_faulted(self):
+        fault_store = PrinterFaultStateStore()
+        fault_store.set_fault(
+            printer_id="printer-1",
+            printer_name="HP",
+            raw_reasons=["media-empty-error"],
+        )
+
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "cloud_service", self.cloud_service), \
+             patch.object(main, "printer_fault_state_store", fault_store), \
+             patch.object(main, "printer_fault_probe", None), \
+             patch.object(main, "node_id", "node-123"):
+            response = asyncio.run(main.get_qr_code())
+
+        self.assertEqual(False, response["success"])
+        self.assertEqual(True, response["standby"])
+        self.assertEqual("printer_fault", response["error_code"])
+        self.assertEqual("打印机缺纸，请联系管理员补纸", response["message"])
+        self.assertFalse(self.cloud_service.websocket_client.upload_token_requested)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ import base64
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
 from file_manager import get_file_manager
+from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
+from printer_fault_state import PrinterFaultStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +412,18 @@ class CloudWebSocketClient:
 class PrintJobHandler:
     """打印任务处理器"""
     
-    def __init__(self, printer_manager, api_client, websocket_client=None, auth_client=None, node_id=None, status_reporter=None, interactive_job_binder=None):
+    def __init__(
+        self,
+        printer_manager,
+        api_client,
+        websocket_client=None,
+        auth_client=None,
+        node_id=None,
+        status_reporter=None,
+        interactive_job_binder=None,
+        fault_probe=None,
+        fault_state_store=None,
+    ):
         self.printer_manager = printer_manager
         self.api_client = api_client
         self.websocket_client = websocket_client
@@ -418,6 +431,8 @@ class PrintJobHandler:
         self.node_id = node_id
         self.status_reporter = status_reporter  # 打印机状态上报器
         self.interactive_job_binder = interactive_job_binder
+        self.fault_probe = fault_probe or IPPPrinterFaultProbe()
+        self.fault_state_store = fault_state_store or PrinterFaultStateStore()
         self.upload_token_callback = None  # 上传凭证成功回调
         self.upload_token_error_callback = None  # 上传凭证错误回调
         self.last_upload_token = None  # 缓存最近的上传凭证
@@ -772,142 +787,229 @@ class PrintJobHandler:
             logger.error(f"下载打印文件异常: {e}")
             return None
     
-    def _monitor_job_completion(self, cloud_job_id: str, printer_name: str, local_job_id: str, printer_id: str = None):
-        """监控打印任务完成状态（使用轮询方式）
-        
-        Args:
-            cloud_job_id: 云端任务ID
-            printer_name: 打印机名称
-            local_job_id: 本地任务ID
-            printer_id: 打印机ID（用于状态上报）
-        """
+    def _refresh_printer_status(self, printer_id: str = None, printer_name: str = None):
+        if self.status_reporter and printer_id:
+            self.status_reporter.force_report_printer(
+                printer_id=printer_id,
+                printer_name=printer_name,
+            )
+
+    def _get_managed_printer_record(self, printer_id: str = None, printer_name: str = None):
+        config = getattr(self.printer_manager, "config", None)
+        if not config:
+            return None
+        if printer_id and hasattr(config, "get_printer_by_id"):
+            printer = config.get_printer_by_id(printer_id)
+            if printer:
+                return printer
+        if printer_name and hasattr(config, "get_printer_by_name"):
+            return config.get_printer_by_name(printer_name)
+        return None
+
+    def _resolve_fault_probe_host(self, printer_id: str = None, printer_name: str = None):
+        return resolve_printer_host(
+            self._get_managed_printer_record(
+                printer_id=printer_id,
+                printer_name=printer_name,
+            )
+        )
+
+    def _probe_printer_fault(self, printer_id: str, printer_name: str):
+        host = self._resolve_fault_probe_host(
+            printer_id=printer_id,
+            printer_name=printer_name,
+        )
+        if not host:
+            logger.info(
+                "fault_probe_unavailable printer=%r printer_id=%s reason=device_host_unresolved",
+                printer_name,
+                printer_id,
+            )
+            return None
+
+        result = self.fault_probe.probe(host)
+        if not getattr(result, "available", False):
+            logger.info(
+                "fault_probe_unavailable printer=%r printer_id=%s host=%r error=%r",
+                printer_name,
+                printer_id,
+                host,
+                getattr(result, "error", ""),
+            )
+            return result
+
+        logger.info(
+            "fault_probe_result printer=%r printer_id=%s host=%r state=%r state_name=%r reasons=%s faulted=%s",
+            printer_name,
+            printer_id,
+            host,
+            getattr(result, "printer_state", None),
+            getattr(result, "printer_state_name", "unknown"),
+            getattr(result, "printer_state_reasons", []),
+            getattr(result, "faulted", False),
+        )
+        return result
+
+    def _format_fault_failure_message(self, fault_result) -> str:
+        fault_state = self.fault_state_store.update_from_probe(result=fault_result)
+        return fault_state.get("message") or "打印机故障，请联系管理员处理"
+
+    def _cancel_local_print_job(self, printer_name: str, local_job_id) -> tuple[bool, str]:
+        if not hasattr(self.printer_manager, "remove_print_job"):
+            logger.warning(
+                "job_cancel_failed reason=remove_print_job_unavailable printer=%r job_id=%s",
+                printer_name,
+                local_job_id,
+            )
+            return False, "remove_print_job unavailable"
+
+        success, message = self.printer_manager.remove_print_job(
+            printer_name,
+            local_job_id,
+        )
+        if success:
+            logger.info(
+                "job_cancel_confirmed printer=%r job_id=%s message=%r",
+                printer_name,
+                local_job_id,
+                message,
+            )
+        else:
+            logger.warning(
+                "job_cancel_failed printer=%r job_id=%s message=%r",
+                printer_name,
+                local_job_id,
+                message,
+            )
+        return success, message
+
+    def _monitor_job_completion(
+        self,
+        cloud_job_id: str,
+        printer_name: str,
+        local_job_id: str,
+        printer_id: str = None,
+    ):
+        """Monitor a cloud job by spooler lifecycle and IPP device faults."""
         import threading
         import time
-
-        def detect_error_from_status(status_text: str):
-            """根据状态文本判断是否处于错误状态。"""
-            if not status_text:
-                return False, ""
-            s = str(status_text).strip().lower()
-
-            error_keywords = [
-                # 中文
-                "错误", "离线", "缺纸", "卡纸", "缺墨", "墨粉", "纸张问题",
-                "被阻止", "用户干预", "删除", "暂停", "故障", "门开",
-                "需要维护", "输出满", "页面错误", "内存不足", "服务器未知",
-                # 英文
-                "error", "offline", "paper", "jam", "toner", "ink",
-                "blocked", "intervention", "paused", "failed"
-            ]
-            for kw in error_keywords:
-                if kw in s:
-                    return True, kw
-            return False, ""
-
-        def get_printer_status_snapshot():
-            """获取打印机状态快照（包含原始码，若可用）。"""
-            detail = {}
-            if hasattr(self.printer_manager, 'get_printer_status_detail'):
-                detail = self.printer_manager.get_printer_status_detail(printer_name) or {}
-            if not detail:
-                detail = {"status_text": self.printer_manager.get_printer_status(printer_name)}
-            status_text = detail.get("status_text", "未知")
-            return status_text, detail
-
-        def format_printer_status_codes(detail: dict) -> str:
-            """格式化原始状态码日志。"""
-            win32_status = detail.get("win32_status")
-            win32_attr = detail.get("win32_attributes")
-            wmi = detail.get("wmi") or {}
-            return (
-                f"win32_status={win32_status}, "
-                f"win32_attributes={win32_attr}, "
-                f"wmi_printer_status={wmi.get('printer_status')}, "
-                f"wmi_extended_status={wmi.get('extended_status')}, "
-                f"wmi_detected_error_state={wmi.get('detected_error_state')}, "
-                f"wmi_work_offline={wmi.get('work_offline')}, "
-                f"wmi_availability={wmi.get('availability')}"
-            )
 
         def monitor():
             try:
                 if not local_job_id:
-                    logger.error("无法获取本地任务ID，放弃监控: %s", cloud_job_id)
+                    logger.error(
+                        "missing local print job id; cloud_job_id=%s printer=%r",
+                        cloud_job_id,
+                        printer_name,
+                    )
                     self._report_job_failure(cloud_job_id, "无法获取本地打印任务ID")
                     return
 
-                max_wait_time = 600  # 最大等待10分钟
-                check_interval = 1   # 每1秒检查一次
+                max_wait_time = 600
+                check_interval = 1
                 waited_time = 0
 
-                logger.info(f"开始监控任务完成: {cloud_job_id} (本地任务ID: {local_job_id})")
+                logger.info(
+                    "start job monitor cloud_job_id=%s printer=%r local_job_id=%s",
+                    cloud_job_id,
+                    printer_name,
+                    local_job_id,
+                )
 
                 while waited_time < max_wait_time:
                     time.sleep(check_interval)
                     waited_time += check_interval
 
-                    # 先检查打印机本体状态（覆盖不体现在队列中的异常）
-                    printer_status, printer_detail = get_printer_status_snapshot()
-                    has_error, reason = detect_error_from_status(printer_status)
-                    if has_error:
-                        raw_codes = format_printer_status_codes(printer_detail)
-                        err_msg = f"打印机异常({reason}): {printer_status} | 原始状态码: {raw_codes}"
-                        logger.error(f"{err_msg} | 任务: {cloud_job_id}")
-                        self._report_job_failure(cloud_job_id, err_msg)
-                        if self.status_reporter and printer_id:
-                            self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                        return
-                    
-                    # 检查任务状态
-                    job_status = self.printer_manager.get_job_status(printer_name, local_job_id)
-
-                    # 任务仍在队列时，识别错误状态
-                    if job_status.get("exists", True):
-                        current_status = job_status.get("status", "")
-                        has_error, reason = detect_error_from_status(current_status)
-                        if has_error:
-                            err_msg = f"打印任务异常({reason}): {current_status}"
-                            logger.error(f"{err_msg} | 任务: {cloud_job_id}")
-                            self._report_job_failure(cloud_job_id, err_msg)
-                            if self.status_reporter and printer_id:
-                                self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                            return
-                    
-                    # 如果任务不存在 — spooler 已确认完成
+                    job_status = self.printer_manager.get_job_status(
+                        printer_name,
+                        local_job_id,
+                    )
                     if not job_status.get("exists", True):
-                        logger.info(f"任务已从 spooler 队列移除，打印完成: {cloud_job_id}")
+                        logger.info(
+                            "spooler job removed; reporting completed cloud_job_id=%s local_job_id=%s",
+                            cloud_job_id,
+                            local_job_id,
+                        )
                         self._report_job_success(cloud_job_id, printer_id)
-                        if self.status_reporter and printer_id:
-                            self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
+                        self._refresh_printer_status(printer_id, printer_name)
                         return
-                    
-                    # 显示当前状态（每10秒显示一次）
+
+                    fault_result = self._probe_printer_fault(printer_id, printer_name)
+                    if fault_result and getattr(fault_result, "available", False) and getattr(fault_result, "faulted", False):
+                        cancel_success, cancel_message = self._cancel_local_print_job(
+                            printer_name,
+                            local_job_id,
+                        )
+                        fault_state = self.fault_state_store.update_from_probe(
+                            printer_id=printer_id,
+                            printer_name=printer_name,
+                            result=fault_result,
+                        )
+                        failure_message = fault_state.get("message") or self._format_fault_failure_message(fault_result)
+                        if not cancel_success:
+                            failure_message = (
+                                f"{failure_message}; 本地任务取消失败: {cancel_message}"
+                            )
+                        logger.error(
+                            "job_failed_after_cancel cloud_job_id=%s printer=%r local_job_id=%s cancel_success=%s message=%r",
+                            cloud_job_id,
+                            printer_name,
+                            local_job_id,
+                            cancel_success,
+                            failure_message,
+                        )
+                        self._report_job_failure(
+                            cloud_job_id,
+                            failure_message,
+                            error_code="printer_fault",
+                            local_extra={"printer_fault": fault_state},
+                        )
+                        self._refresh_printer_status(printer_id, printer_name)
+                        return
+
                     if waited_time % 10 == 0:
-                        current_status = job_status.get('status', 'unknown')
-                        pages_printed = job_status.get('pages_printed', 0)
-                        total_pages = job_status.get('total_pages', 0)
-                        logger.debug(f"任务处理中: {cloud_job_id} | 状态: {current_status} | 页数: {pages_printed}/{total_pages}")
-                
-                # 超时按失败处理，避免误判成功
-                err_msg = f"打印任务监控超时({max_wait_time}s)，未确认完成"
-                logger.warning(f"{err_msg}: {cloud_job_id}")
-                self._report_job_failure(cloud_job_id, err_msg)
-                # 任务完成后立即上报打印机状态
-                if self.status_reporter and printer_id:
-                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-                
-            except Exception as e:
-                logger.error(f"监控任务完成异常: {e}")
-                # 异常按失败处理，避免掩盖真实问题
-                self._report_job_failure(cloud_job_id, f"监控任务异常: {e}")
-                # 异常后也要上报打印机状态
-                if self.status_reporter and printer_id:
-                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
-        
-        # 在后台线程中监控
+                        logger.debug(
+                            "job monitor active cloud_job_id=%s local_job_id=%s status=%r pages=%s/%s",
+                            cloud_job_id,
+                            local_job_id,
+                            job_status.get("status", "unknown"),
+                            job_status.get("pages_printed", 0),
+                            job_status.get("total_pages", 0),
+                        )
+
+                job_status = self.printer_manager.get_job_status(printer_name, local_job_id)
+                cancel_suffix = ""
+                if job_status.get("exists", True):
+                    cancel_success, cancel_message = self._cancel_local_print_job(
+                        printer_name,
+                        local_job_id,
+                    )
+                    cancel_suffix = (
+                        f"; 本地任务已取消: {cancel_message}"
+                        if cancel_success
+                        else f"; 本地任务取消失败: {cancel_message}"
+                    )
+
+                error_message = (
+                    f"打印任务监控超时({max_wait_time}s){cancel_suffix}"
+                )
+                logger.warning(
+                    "job monitor timeout cloud_job_id=%s printer=%r local_job_id=%s message=%r",
+                    cloud_job_id,
+                    printer_name,
+                    local_job_id,
+                    error_message,
+                )
+                self._report_job_failure(cloud_job_id, error_message)
+                self._refresh_printer_status(printer_id, printer_name)
+            except Exception as exc:
+                logger.error("job monitor exception cloud_job_id=%s error=%s", cloud_job_id, exc)
+                self._report_job_failure(cloud_job_id, f"打印任务监控异常: {exc}")
+                self._refresh_printer_status(printer_id, printer_name)
+
         monitor_thread = threading.Thread(target=monitor, daemon=True)
         monitor_thread.start()
-    
+
     def _report_job_status(self, job_id: str, status: str, progress: int, message_text: str):
         """通过WebSocket报告任务状态"""
         if job_id:
@@ -987,7 +1089,13 @@ class PrintJobHandler:
             except Exception as e:
                 logger.error(f"报告任务成功异常: {e}")
     
-    def _report_job_failure(self, job_id: str, error_message: str):
+    def _report_job_failure(
+        self,
+        job_id: str,
+        error_message: str,
+        error_code: str = None,
+        local_extra: Optional[Dict[str, Any]] = None,
+    ):
         """通过WebSocket报告任务失败"""
         if job_id:
             try:
@@ -1000,6 +1108,11 @@ class PrintJobHandler:
                     "error_message": error_message,
                     "message": error_message
                 }
+                local_job_data = dict(job_data)
+                if error_code:
+                    local_job_data["error_code"] = error_code
+                if local_extra:
+                    local_job_data.update(local_extra)
                 
                 message = {
                     "type": "job_update",
@@ -1019,7 +1132,7 @@ class PrintJobHandler:
                 if self.websocket_client:
                     local_msg = {
                         "type": "job_status",
-                        "data": job_data
+                        "data": local_job_data
                     }
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
                     logger.debug(f"任务失败状态已分发到本地处理器 (SSE)")

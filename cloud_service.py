@@ -65,10 +65,17 @@ NORMALIZED_PRINTER_STATUS_TO_CLOUD = {
 class CloudService:
     """Cloud service coordinator."""
 
-    def __init__(self, config: Dict[str, Any], printer_manager=None, interactive_job_binder=None):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        printer_manager=None,
+        interactive_job_binder=None,
+        fault_state_store=None,
+    ):
         self.config = dict(config or {})
         self.printer_manager = printer_manager
         self.interactive_job_binder = interactive_job_binder
+        self.fault_state_store = fault_state_store
 
         self.auth_client = None
         self.api_client = None
@@ -168,6 +175,7 @@ class CloudService:
                     auth_client=self.auth_client,
                     node_id=self.node_id,
                     interactive_job_binder=self.interactive_job_binder,
+                    fault_state_store=self.fault_state_store,
                 )
 
             self.last_error = None

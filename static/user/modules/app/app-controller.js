@@ -114,7 +114,9 @@ export function createAppController({ mountNode }) {
       return;
     }
     if (state.currentView === "printing") {
-      finishWithResult("error", mapPrintErrorMessage(errorCode, message));
+      finishWithResult("error", mapPrintErrorMessage(errorCode, message), {
+        error_code: errorCode || null,
+      });
     }
   }
 
@@ -129,7 +131,10 @@ export function createAppController({ mountNode }) {
     const status = String(data?.status || "").toLowerCase();
     const progress = Number(data?.progress || 0);
     if (status.includes("failed") || status.includes("error")) {
-      finishWithResult("error", mapPrintErrorMessage(data?.error_code, data?.message || data?.error_message));
+      finishWithResult("error", mapPrintErrorMessage(data?.error_code, data?.message || data?.error_message), {
+        error_code: data?.error_code || null,
+        printer_fault: data?.printer_fault || null,
+      });
       return;
     }
 
@@ -208,12 +213,17 @@ export function createAppController({ mountNode }) {
 
     if (phase === "completed") {
       setDoneResult("success", "");
-      await router.go("done");
-      return;
     }
 
     if (phase === "failed") {
-      setDoneResult("error", "鎵撳嵃澶辫触锛岃绋嶅悗閲嶈瘯");
+      setDoneResult(
+        "error",
+        mapPrintErrorMessage(normalized.error_code, normalized.error_message || "打印失败，请联系管理员"),
+        {
+          error_code: normalized.error_code || null,
+          printer_fault: normalized.printer_fault || null,
+        },
+      );
       await router.go("done");
       return;
     }
@@ -236,8 +246,8 @@ export function createAppController({ mountNode }) {
     }
   }
 
-  function finishWithResult(type, message) {
-    setDoneResult(type, message);
+  function finishWithResult(type, message, extra = {}) {
+    setDoneResult(type, message, extra);
     state.sessionPhase = type === "success" ? "completed" : "error";
     void router.go("done");
   }

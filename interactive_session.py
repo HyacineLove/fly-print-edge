@@ -23,6 +23,9 @@ class InteractiveSessionManager:
                 "file_type": None,
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
                 "updated_at": time.time(),
             }
             return deepcopy(self._active_session)
@@ -60,6 +63,9 @@ class InteractiveSessionManager:
             self._active_session["file_name"] = data.get("file_name")
             self._active_session["file_type"] = data.get("file_type")
             self._active_session["state"] = "preview_ready"
+            self._active_session["error_code"] = None
+            self._active_session["error_message"] = None
+            self._active_session["printer_fault"] = None
             self._active_session["updated_at"] = time.time()
 
             enriched = deepcopy(data)
@@ -79,6 +85,9 @@ class InteractiveSessionManager:
 
             self._active_session["submitted"] = True
             self._active_session["state"] = "print_submitted"
+            self._active_session["error_code"] = None
+            self._active_session["error_message"] = None
+            self._active_session["printer_fault"] = None
             self._active_session["updated_at"] = time.time()
             return True
 
@@ -115,6 +124,9 @@ class InteractiveSessionManager:
             self._active_session["submitted"] = False
             self._active_session["job_id"] = None
             self._active_session["state"] = "preview_ready"
+            self._active_session["error_code"] = None
+            self._active_session["error_message"] = None
+            self._active_session["printer_fault"] = None
             self._active_session["updated_at"] = time.time()
             return True
 
@@ -132,8 +144,14 @@ class InteractiveSessionManager:
             status = str(data.get("status") or "").lower()
             if status in {"completed", "complete", "done", "success"} or int(data.get("progress") or 0) >= 100:
                 self._active_session["state"] = "completed"
+                self._active_session["error_code"] = None
+                self._active_session["error_message"] = None
+                self._active_session["printer_fault"] = None
             elif status in {"failed", "error"}:
                 self._active_session["state"] = "failed"
+                self._active_session["error_code"] = data.get("error_code")
+                self._active_session["error_message"] = data.get("message") or data.get("error_message")
+                self._active_session["printer_fault"] = deepcopy(data.get("printer_fault"))
             else:
                 self._active_session["state"] = "printing"
             self._active_session["updated_at"] = time.time()
@@ -165,6 +183,9 @@ class InteractiveSessionManager:
                     "file_type": None,
                     "job_id": None,
                     "submitted": False,
+                    "error_code": None,
+                    "error_message": None,
+                    "printer_fault": None,
                 }
 
             return {
@@ -177,6 +198,9 @@ class InteractiveSessionManager:
                 "file_type": self._active_session.get("file_type"),
                 "job_id": self._active_session.get("job_id"),
                 "submitted": bool(self._active_session.get("submitted")),
+                "error_code": self._active_session.get("error_code"),
+                "error_message": self._active_session.get("error_message"),
+                "printer_fault": deepcopy(self._active_session.get("printer_fault")),
             }
 
     def clear_session(self, session_id: Optional[str] = None) -> bool:

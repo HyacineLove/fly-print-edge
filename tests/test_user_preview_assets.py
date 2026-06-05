@@ -72,6 +72,30 @@ class UserPreviewAssetTests(unittest.TestCase):
         script = path.read_text(encoding="utf-8")
         self.assertIn("EventSource", script, "sse-client.js should use the EventSource API")
 
+    def test_printer_fault_locking_contract_is_present_in_user_views(self):
+        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
+        login_view = (BASE_DIR / "modules/views/login-view.js").read_text(encoding="utf-8")
+        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
+        api = (BASE_DIR / "modules/shared/api.js").read_text(encoding="utf-8")
+
+        self.assertIn("printerAvailability", api)
+        self.assertIn("printer_fault", runtime)
+        self.assertNotIn("media-needed-error", runtime)
+        self.assertIn("isPrinterFaultResult", done_view)
+        self.assertIn("availabilityPollTimer", done_view)
+        self.assertIn("printerAvailability", login_view)
+        self.assertIn("setPrinterFaultLocked", login_view)
+
+    def test_printer_fault_done_view_does_not_auto_restart_until_recovered(self):
+        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            done_view,
+            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\)\s*\{[\s\S]*?return;",
+            "printer fault result should short-circuit normal countdown restart",
+        )
+        self.assertIn("打印机已恢复", done_view)
+
 
 if __name__ == "__main__":
     unittest.main()

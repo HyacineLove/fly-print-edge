@@ -92,6 +92,9 @@ class InteractiveSessionManagerTests(unittest.TestCase):
                 "file_type": None,
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             self.manager.build_snapshot(),
         )
@@ -116,6 +119,9 @@ class InteractiveSessionManagerTests(unittest.TestCase):
                 "file_type": "application/pdf",
                 "job_id": None,
                 "submitted": False,
+                "error_code": None,
+                "error_message": None,
+                "printer_fault": None,
             },
             self.manager.build_snapshot(),
         )

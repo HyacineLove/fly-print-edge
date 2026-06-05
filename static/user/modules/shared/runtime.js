@@ -103,6 +103,8 @@ export function mapQrErrorMessage(errorCode, message) {
   const code = String(errorCode || "").toLowerCase();
   const msg = String(message || "").trim();
 
+  if (code === "printer_fault") return msg || "打印机故障，请联系管理员处理";
+
   if (code === "printer_disabled") return "打印机已被禁用，请联系管理员";
   if (code === "printer_not_found") return "打印机已被删除或不存在，请联系管理员";
   if (code === "node_disabled") return "节点已被禁用，请联系管理员";
@@ -128,6 +130,8 @@ export function mapQrErrorMessage(errorCode, message) {
 export function mapPrintErrorMessage(errorCode, message) {
   const code = String(errorCode || "").toLowerCase();
   const msg = String(message || "").trim();
+
+  if (code === "printer_fault") return msg || "打印机故障，请联系管理员处理";
 
   if (code === "printer_disabled") return "打印机已被禁用，请联系管理员";
   if (code === "printer_not_found") return "打印机已被删除或不存在，请联系管理员";
@@ -248,7 +252,10 @@ export function handleJobStatusEvent(data, { page, sseConnection, renderPrinting
   if (status.includes("failed") || status.includes("error")) {
     const message = data?.message || data?.error_message || "打印失败，请重试";
     if (page === "printing") {
-      setDoneResult("error", mapPrintErrorMessage(data?.error_code, message));
+      setDoneResult("error", mapPrintErrorMessage(data?.error_code, message), {
+        error_code: data?.error_code || null,
+        printer_fault: data?.printer_fault || null,
+      });
       gotoPage("done", sseConnection);
     } else {
       showError(message);
