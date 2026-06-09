@@ -173,7 +173,11 @@ function renderSettingsSection(state) {
       <div class="field">
         <label for="settings_default_scale_mode">默认缩放模式</label>
         <select id="settings_default_scale_mode" data-section="settings" data-key="default_scale_mode">
-          ${["fit", "actual", "fill"].map((mode) => `<option value="${mode}" ${String(cfg.default_scale_mode || "fit") === mode ? "selected" : ""}>${mode}</option>`).join("")}
+          ${[
+            ["actual", "原始尺寸/过大缩小"],
+            ["fit", "适合纸张"],
+            ["fill", "填满纸张"],
+          ].map(([mode, label]) => `<option value="${mode}" ${String(cfg.default_scale_mode || "actual") === mode ? "selected" : ""}>${label}</option>`).join("")}
         </select>
       </div>
       <div class="field">

@@ -12,6 +12,15 @@ from typing import List, Dict, Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 from printer_capability_summary import build_printer_capability_summary
+from print_layout import (
+    compute_physical_fit_rect,
+    compute_scaled_size,
+    image_size_inches,
+    normalize_paper_size,
+    normalize_scale_mode,
+    resolve_layout_options,
+    safe_float,
+)
 from windows_subprocess import run_hidden
 
 # Windows特定导入
@@ -175,16 +184,10 @@ class WindowsEnterprisePrinter:
         return abs_path if os.path.exists(abs_path) else None
 
     def _safe_float(self, value: Any, default: float) -> float:
-        try:
-            return float(value)
-        except Exception:
-            return default
+        return safe_float(value, default)
 
     def _normalize_scale_mode(self, value: Any, default: str = "fit") -> str:
-        mode = str(value or "").strip().lower()
-        if mode in {"fit", "actual", "fill"}:
-            return mode
-        return default
+        return normalize_scale_mode(value, default)
 
     def _detect_pdf_page_size(self, file_path: str) -> Optional[str]:
         """检测 PDF 第一页的纸张尺寸，返回标准尺寸名称"""
@@ -326,51 +329,11 @@ class WindowsEnterprisePrinter:
         return default_size
     
     def _resolve_image_layout_options(self, print_options: Optional[Dict[str, Any]] = None, file_path: Optional[str] = None) -> Dict[str, Any]:
-        """解析图像布局选项（支持文件路径参数以自动检测纸张）"""
-        options = dict(print_options or {})
-        settings = self._load_settings()
-        
-        # 优先使用文件自身尺寸检测
-        detected_paper_size = None
-        if file_path and os.path.exists(file_path):
-            detected_paper_size = self._detect_file_paper_size(file_path, print_options)
-        
-        # 如果没有检测到尺寸，使用配置或选项中的设置
-        if not detected_paper_size:
-            default_paper_size = settings.get("default_paper_size") or "A4"
-            paper_size = options.get("paper_size") or options.get("page_size") or options.get("size") or default_paper_size
-        else:
-            paper_size = detected_paper_size
-        
-        if paper_size:
-            paper_size = str(paper_size).strip()
-        default_scale_mode = self._normalize_scale_mode(settings.get("default_scale_mode"), "fit")
-        scale_mode = self._normalize_scale_mode(options.get("scale_mode"), default_scale_mode)
-        default_max_upscale = self._safe_float(settings.get("default_max_upscale"), 3.0)
-        max_upscale = self._safe_float(options.get("max_upscale"), default_max_upscale)
-        if max_upscale <= 0:
-            max_upscale = default_max_upscale if default_max_upscale > 0 else 3.0
-        return {
-            "paper_size": paper_size,
-            "scale_mode": scale_mode,
-            "max_upscale": max_upscale
-        }
+        """解析图像布局选项。图像文件不通过像素/DPI猜纸张，避免预览与实打漂移。"""
+        return resolve_layout_options(print_options, self._load_settings())
 
     def _calculate_scaled_size(self, src_w: int, src_h: int, dst_w: int, dst_h: int, scale_mode: str, max_upscale: float):
-        if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
-            return 1, 1, 1.0
-        fit_scale = min(dst_w / src_w, dst_h / src_h)
-        fill_scale = max(dst_w / src_w, dst_h / src_h)
-        if scale_mode == "actual":
-            scale = min(1.0, fit_scale)
-        elif scale_mode == "fill":
-            scale = fill_scale
-        else:
-            scale = fit_scale
-        if scale_mode != "actual":
-            scale = min(scale, max_upscale)
-        scale = max(scale, 1.0 / max(src_w, src_h))
-        return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale))), scale
+        return compute_scaled_size(src_w, src_h, dst_w, dst_h, scale_mode, max_upscale)
 
     def _find_libreoffice_path(self):
         configured = self._resolve_path(self._get_setting("libreoffice_path"))
@@ -1387,9 +1350,7 @@ class WindowsEnterprisePrinter:
             print(f"     无法读取打印机能力: {e}")
     
     def _print_pdf_file(self, printer_name: str, file_path: str, job_name: str, print_options: Dict[str, str] = None) -> Dict[str, Any]:
-        """打印PDF文件 (使用ShellExecute调用默认PDF阅读器打印)"""
-        import win32api
-        import win32print
+        """打印PDF文件。Windows 自助终端只使用受控引擎，禁止系统默认应用打印。"""
         import subprocess
         
         print(f"[INFO] 开始打印PDF: {file_path} -> {printer_name}")
@@ -1397,17 +1358,28 @@ class WindowsEnterprisePrinter:
         try:
             abs_path = os.path.abspath(file_path)
 
-            # 选择PDF打印引擎：sumatra / system / auto(默认)
+            # 选择PDF打印引擎：sumatra / bitmap / auto(默认)
             pdf_engine = "auto"
             if print_options and print_options.get("pdf_engine"):
                 pdf_engine = str(print_options.get("pdf_engine", "auto")).strip().lower()
             elif self._get_setting("pdf_engine"):
                 pdf_engine = str(self._get_setting("pdf_engine", "auto")).strip().lower()
 
-            effective_engine = "sumatra" if pdf_engine == "auto" else pdf_engine
+            effective_engine = "bitmap" if pdf_engine == "auto" else pdf_engine
 
             force_bitmap_engine = effective_engine in ["bitmap", "bitmap_gdi", "raster", "image"]
-            prefer_system_engine = (effective_engine == "system")
+            if effective_engine == "system":
+                return {
+                    "success": False,
+                    "message": "PDF打印引擎不支持system/printto，请配置为sumatra或bitmap",
+                    "job_id": None,
+                }
+            if not force_bitmap_engine and effective_engine != "sumatra":
+                return {
+                    "success": False,
+                    "message": f"PDF打印引擎不支持: {effective_engine}",
+                    "job_id": None,
+                }
 
             if force_bitmap_engine:
                 print("[INFO] 使用位图引擎打印PDF")
@@ -1416,150 +1388,10 @@ class WindowsEnterprisePrinter:
             # 使用自动发现逻辑
             sumatra_path = self._find_sumatra_pdf_path()
             
-            if not prefer_system_engine and not sumatra_path:
+            if not sumatra_path:
                 return {"success": False, "message": "SumatraPDF不可用，未提交打印任务", "job_id": None}
 
-            if sumatra_path and not prefer_system_engine:
-                try:
-                    print(f"[INFO] 使用 SumatraPDF 打印：{sumatra_path}")
-                    tracking = self._prepare_print_job_tracking(
-                        printer_name, os.path.basename(abs_path)
-                    )
-                    if not tracking:
-                        return {
-                            "success": False,
-                            "message": "无法解析Windows打印队列，无法追踪本地打印任务ID",
-                            "job_id": None,
-                        }
-                    queue_printer_name = tracking["queue_name"]
-                    logger.info(
-                        "job_id_debug print_submit cloud_printer=%r resolved=%r driver=%r port=%r document=%r",
-                        printer_name,
-                        queue_printer_name,
-                        tracking.get("driver"),
-                        tracking.get("port"),
-                        os.path.basename(abs_path),
-                    )
-                                
-                    # 在打印前先配置打印机的纸张设置（关键修复！）
-                    # 仅调用一次 _detect_file_paper_size，避免重复检测
-                    detected_paper_size = self._detect_file_paper_size(abs_path, print_options)
-                    if detected_paper_size:
-                        print(f" [INFO] 检测到纸张尺寸：{detected_paper_size}，配置打印机...")
-                        config_options = dict(print_options or {})
-                        config_options['paper_size'] = detected_paper_size
-                        self._configure_printer_devmode(queue_printer_name, config_options)
-                                
-                    cmd = [sumatra_path, "-print-to", queue_printer_name, "-silent", "-exit-when-done"]
-                    
-                    # 构建打印设置字符串
-                    print_settings = []
-                    
-                    if print_options:
-                        duplex_value = print_options.get("duplex")
-                        if duplex_value in ["DuplexNoTumble", "LongEdge", "long", "long_edge"]:
-                            print_settings.append("duplexlong")
-                        elif duplex_value in ["DuplexTumble", "ShortEdge", "short", "short_edge"]:
-                            print_settings.append("duplexshort")
-                        elif duplex_value in ["None", "none", "simplex", "single"]:
-                            print_settings.append("simplex")
-                        
-                        color_value = print_options.get("color_mode") or print_options.get("color_model")
-                        if color_value:
-                            color_str = str(color_value).lower()
-                            if color_str in ["grayscale", "gray", "mono", "monochrome", "black"]:
-                                print_settings.append("monochrome")
-                            elif color_str in ["color", "colour", "rgb"]:
-                                print_settings.append("color")
-                        
-                        copies = print_options.get("copies")
-                        if copies:
-                            try:
-                                copies_int = int(copies)
-                                if copies_int > 1:
-                                    print_settings.append(f"{copies_int}x")
-                            except (ValueError, TypeError):
-                                pass
-                    
-                    # 使用已检测的纸张尺寸，规范化 "Letter (横向)" 等
-                    paper_str = self._normalize_paper_size_for_win32(detected_paper_size)
-                    if paper_str:
-                        paper_str = paper_str.upper()
-                        if paper_str in ["A4", "A3", "A5", "LETTER", "LEGAL", "TABLOID"]:
-                            print(f" [INFO] SumatraPDF 使用纸张：{paper_str}")
-                            # SumatraPDF 纸张参数格式必须是 paper=<size>，否则可能被忽略并回退为自定义纸张
-                            print_settings.append(f"paper={paper_str}")
-                    # 锁定方向，避免 Sumatra/驱动自动旋转导致预览与实打不一致
-                    orientation = self._resolve_print_orientation(abs_path, print_options or {}, detected_paper_size)
-                    if orientation in ["portrait", "landscape"]:
-                        print(f" [INFO] SumatraPDF 锁定方向：{orientation}")
-                        print_settings.append(orientation)
-                    # 统一添加 fit，确保所有纸张内容完整适配、避免截断
-                    if "fit" not in print_settings:
-                        print_settings.append("fit")
-
-                    print_settings_str = ",".join(print_settings)
-                    if print_settings_str:
-                        print(f"[INFO] SumatraPDF print-settings: {print_settings_str}")
-                        cmd.extend(["-print-settings", print_settings_str])
-                    
-                    cmd.append(abs_path)
-                    logger.info(
-                        "job_id_debug sumatra_command printer=%r executable=%r document=%r settings=%r",
-                        queue_printer_name,
-                        os.path.basename(sumatra_path),
-                        os.path.basename(abs_path),
-                        print_settings_str,
-                    )
-                    logger.debug(
-                        "job_id_debug sumatra_command_full printer=%r cmd=%s",
-                        queue_printer_name,
-                        cmd,
-                    )
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
-                    )
-                    logger.info(
-                        "job_id_debug sumatra_result printer=%r returncode=%s stdout=%r stderr=%r",
-                        queue_printer_name,
-                        result.returncode,
-                        (result.stdout or "").strip()[:500],
-                        (result.stderr or "").strip()[:500],
-                    )
-                    if result.returncode != 0:
-                        return {"success": False, "message": f"SumatraPDF打印失败: {result.stderr.strip() or result.stdout.strip()}"}
-                    print(f"[INFO] SumatraPDF 打印成功 (exitCode: {result.returncode})")
-                    
-                    job_id = self._get_latest_job_id(
-                        queue_printer_name,
-                        os.path.basename(abs_path),
-                        before_job_ids=tracking["before_job_ids"],
-                    )
-                    if job_id:
-                        print(f"[INFO] 获取到打印任务ID: {job_id}")
-                    else:
-                        print("[WARN] 无法获取本地打印任务ID")
-                        return {
-                            "success": False,
-                            "message": "无法获取本地打印任务ID",
-                            "job_id": None,
-                        }
-                    
-                    return {
-                        "success": True,
-                        "message": "SumatraPDF 打印任务已提交",
-                        "job_id": job_id,
-                        "printer_name": queue_printer_name,
-                    }
-                except Exception as e:
-                    return {"success": False, "message": f"SumatraPDF打印失败: {str(e)}"}
-
-            if prefer_system_engine:
-                reason = "配置指定" if effective_engine == "system" else "按配置走系统引擎"
-                print(f"[INFO] 使用系统打印引擎 (printto/print): {reason}")
-            
-            # system engine uses printto only; it never changes the default printer.
+            print(f"[INFO] 使用 SumatraPDF 打印：{sumatra_path}")
             tracking = self._prepare_print_job_tracking(
                 printer_name, os.path.basename(abs_path)
             )
@@ -1578,12 +1410,88 @@ class WindowsEnterprisePrinter:
                 tracking.get("port"),
                 os.path.basename(abs_path),
             )
-            res = 33
-            print(f"[INFO] 尝试使用 'printto' 动词打印: {abs_path}")
-            res = win32api.ShellExecute(0, "printto", abs_path, f'"{queue_printer_name}"', ".", 0)
+
+            detected_paper_size = self._detect_file_paper_size(abs_path, print_options)
+            if detected_paper_size:
+                print(f" [INFO] 检测到纸张尺寸：{detected_paper_size}，配置打印机...")
+                config_options = dict(print_options or {})
+                config_options["paper_size"] = detected_paper_size
+                self._configure_printer_devmode(queue_printer_name, config_options)
+
+            cmd = [sumatra_path, "-print-to", queue_printer_name, "-silent", "-exit-when-done"]
+            print_settings = []
             
-            if res <= 32:
-                return {"success": False, "message": f"printto 调用失败, 错误码: {res}"}
+            if print_options:
+                duplex_value = print_options.get("duplex")
+                if duplex_value in ["DuplexNoTumble", "LongEdge", "long", "long_edge"]:
+                    print_settings.append("duplexlong")
+                elif duplex_value in ["DuplexTumble", "ShortEdge", "short", "short_edge"]:
+                    print_settings.append("duplexshort")
+                elif duplex_value in ["None", "none", "simplex", "single"]:
+                    print_settings.append("simplex")
+
+                color_value = print_options.get("color_mode") or print_options.get("color_model")
+                if color_value:
+                    color_str = str(color_value).lower()
+                    if color_str in ["grayscale", "gray", "mono", "monochrome", "black"]:
+                        print_settings.append("monochrome")
+                    elif color_str in ["color", "colour", "rgb"]:
+                        print_settings.append("color")
+
+                copies = print_options.get("copies")
+                if copies:
+                    try:
+                        copies_int = int(copies)
+                        if copies_int > 1:
+                            print_settings.append(f"{copies_int}x")
+                    except (ValueError, TypeError):
+                        pass
+
+            paper_str = self._normalize_paper_size_for_win32(detected_paper_size)
+            if paper_str:
+                paper_str = paper_str.upper()
+                if paper_str in ["A4", "A3", "A5", "LETTER", "LEGAL", "TABLOID"]:
+                    print(f" [INFO] SumatraPDF 使用纸张：{paper_str}")
+                    print_settings.append(f"paper={paper_str}")
+            orientation = self._resolve_print_orientation(abs_path, print_options or {}, detected_paper_size)
+            if orientation in ["portrait", "landscape"]:
+                print(f" [INFO] SumatraPDF 锁定方向：{orientation}")
+                print_settings.append(orientation)
+            if "fit" not in print_settings:
+                print_settings.append("fit")
+
+            print_settings_str = ",".join(print_settings)
+            if print_settings_str:
+                print(f"[INFO] SumatraPDF print-settings: {print_settings_str}")
+                cmd.extend(["-print-settings", print_settings_str])
+
+            cmd.append(abs_path)
+            logger.info(
+                "job_id_debug sumatra_command printer=%r executable=%r document=%r settings=%r",
+                queue_printer_name,
+                os.path.basename(sumatra_path),
+                os.path.basename(abs_path),
+                print_settings_str,
+            )
+            logger.debug(
+                "job_id_debug sumatra_command_full printer=%r cmd=%s",
+                queue_printer_name,
+                cmd,
+            )
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
+            )
+            logger.info(
+                "job_id_debug sumatra_result printer=%r returncode=%s stdout=%r stderr=%r",
+                queue_printer_name,
+                result.returncode,
+                (result.stdout or "").strip()[:500],
+                (result.stderr or "").strip()[:500],
+            )
+            if result.returncode != 0:
+                return {"success": False, "message": f"SumatraPDF打印失败: {result.stderr.strip() or result.stdout.strip()}"}
+            print(f"[INFO] SumatraPDF 打印成功 (exitCode: {result.returncode})")
             
             job_id = self._get_latest_job_id(
                 queue_printer_name,
@@ -1599,11 +1507,10 @@ class WindowsEnterprisePrinter:
                 }
             
             return {
-                "success": True, 
-                "job_id": job_id, 
+                "success": True,
+                "message": "SumatraPDF 打印任务已提交",
+                "job_id": job_id,
                 "printer_name": queue_printer_name,
-                "file_path": file_path,
-                "message": "PDF打印命令已发送"
             }
             
         except Exception as e:
@@ -1621,17 +1528,24 @@ class WindowsEnterprisePrinter:
             import win32gui
             from PIL import Image
             from portable_temp import get_temp_file_path
-            import time
-
             options = print_options or {}
-            printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
+            document_name = job_name or os.path.basename(file_path)
+            tracking = self._prepare_print_job_tracking(printer_name, document_name)
+            if not tracking:
+                return {
+                    "success": False,
+                    "message": "鏃犳硶瑙ｆ瀽Windows鎵撳嵃闃熷垪锛屾棤娉曡拷韪湰鍦版墦鍗颁换鍔D",
+                    "job_id": None,
+                }
+            queue_printer_name = tracking["queue_name"]
+            printer_handle = win32print.OpenPrinter(queue_printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
             devmode = None
 
             try:
                 devmode = win32print.GetPrinter(printer_handle, 2)['pDevMode']
                 if not devmode:
                     devmode = pywintypes.DEVMODEType()
-                    devmode.DeviceName = printer_name
+                    devmode.DeviceName = queue_printer_name
             except Exception:
                 devmode = None
 
@@ -1689,17 +1603,17 @@ class WindowsEnterprisePrinter:
                         pass
 
             if devmode:
-                h_printer_dc = win32gui.CreateDC("WINSPOOL", printer_name, devmode)
+                h_printer_dc = win32gui.CreateDC("WINSPOOL", queue_printer_name, devmode)
                 hdc = win32ui.CreateDCFromHandle(h_printer_dc)
             else:
                 hdc = win32ui.CreateDC()
-                hdc.CreatePrinterDC(printer_name)
+                hdc.CreatePrinterDC(queue_printer_name)
 
-            dpi_setting = options.get("pdf_bitmap_dpi") or self._get_setting("pdf_bitmap_dpi", 300)
+            dpi_setting = options.get("pdf_bitmap_dpi") or self._get_setting("pdf_bitmap_dpi", 150)
             try:
-                render_dpi = max(150, min(600, int(dpi_setting)))
+                render_dpi = max(120, min(300, int(dpi_setting)))
             except (ValueError, TypeError):
-                render_dpi = 300
+                render_dpi = 150
 
             zoom = render_dpi / 72.0
             matrix = fitz.Matrix(zoom, zoom)
@@ -1708,7 +1622,7 @@ class WindowsEnterprisePrinter:
             if page_count <= 0:
                 return {"success": False, "message": "PDF无可打印页面"}
 
-            job_id = hdc.StartDoc(job_name or os.path.basename(file_path))
+            hdc.StartDoc(document_name)
             for page_index in range(page_count):
                 page = document.load_page(page_index)
                 pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -1723,14 +1637,20 @@ class WindowsEnterprisePrinter:
                     hdc.StartPage()
                     printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
                     printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
+                    printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
+                    printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
 
                     img_width, img_height = img.size
-                    fit_scale = min(printer_width / img_width, printer_height / img_height)
-                    scale = min(1.0, fit_scale)
-                    draw_width = max(1, int(img_width * scale))
-                    draw_height = max(1, int(img_height * scale))
-                    x_offset = (printer_width - draw_width) // 2
-                    y_offset = (printer_height - draw_height) // 2
+                    page_rect = getattr(page, "rect", None) or getattr(page, "mediabox", None)
+                    source_inches = (
+                        float(getattr(page_rect, "width", img_width / render_dpi)) / 72.0,
+                        float(getattr(page_rect, "height", img_height / render_dpi)) / 72.0,
+                    )
+                    x_offset, y_offset, draw_width, draw_height, _ = compute_physical_fit_rect(
+                        source_inches,
+                        (printer_width, printer_height),
+                        (printer_dpi_x, printer_dpi_y),
+                    )
 
                     hbmp = win32gui.LoadImage(0, temp_bmp, 0, 0, 0, 16)
                     if not hbmp:
@@ -1764,10 +1684,22 @@ class WindowsEnterprisePrinter:
                 win32print.ClosePrinter(printer_handle)
                 printer_handle = None
 
+            job_id = self._get_latest_job_id(
+                queue_printer_name,
+                document_name,
+                before_job_ids=tracking["before_job_ids"],
+            )
+            if not job_id:
+                return {
+                    "success": False,
+                    "message": "鏃犳硶鑾峰彇鏈湴鎵撳嵃浠诲姟ID",
+                    "job_id": None,
+                }
+
             return {
                 "success": True,
                 "job_id": job_id,
-                "printer_name": printer_name,
+                "printer_name": queue_printer_name,
                 "file_path": file_path,
                 "message": "位图引擎打印任务已提交"
             }
@@ -1831,6 +1763,15 @@ class WindowsEnterprisePrinter:
         printer_handle = None
         job_id = None
         layout_options = self._resolve_image_layout_options(print_options, file_path)
+        document_name = job_name or os.path.basename(file_path)
+        tracking = self._prepare_print_job_tracking(printer_name, document_name)
+        if not tracking:
+            return {
+                "success": False,
+                "message": "无法解析Windows打印队列，无法追踪本地打印任务ID",
+                "job_id": None,
+            }
+        queue_printer_name = tracking["queue_name"]
         try:
             from PIL import Image
             import tempfile
@@ -1840,6 +1781,7 @@ class WindowsEnterprisePrinter:
             
             # 打开图片并转换为适合打印的格式
             img = Image.open(file_path)
+            source_inches = image_size_inches(img)
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
@@ -1849,7 +1791,7 @@ class WindowsEnterprisePrinter:
             
             try:
                 # 打开打印机（用于获取DEVMODE配置）
-                printer_handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
+                printer_handle = win32print.OpenPrinter(queue_printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE})
                 
                 # 使用win32ui进行实际的图片绘制和打印
                 import win32ui
@@ -1865,25 +1807,10 @@ class WindowsEnterprisePrinter:
                         if not devmode:
                             # 如果没有默认DEVMODE，创建一个新的
                             devmode = pywintypes.DEVMODEType()
-                            devmode.DeviceName = printer_name
+                            devmode.DeviceName = queue_printer_name
                         
-                        # 处理纸张尺寸设置（优先使用文件自身尺寸）
+                        # 处理纸张尺寸设置。图像纸张只来自用户选项或运行配置，不从像素/DPI猜测。
                         paper_size = layout_options.get("paper_size")
-                        # 如果是图像文件，尝试检测图像尺寸
-                        if file_path and os.path.exists(file_path):
-                            ext = os.path.splitext(file_path)[1].lower()
-                            if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']:
-                                try:
-                                    from PIL import Image
-                                    with Image.open(file_path) as img:
-                                        img_width_inch = img.width / 96.0  # 假设图像 DPI 为 96
-                                        img_height_inch = img.height / 96.0
-                                        detected_size = self._identify_paper_size(img_width_inch, img_height_inch)
-                                        if detected_size:
-                                            logger.debug("Auto-detected image paper size: %s", detected_size)
-                                            paper_size = detected_size
-                                except Exception as e:
-                                    logger.debug("Image size detection failed", exc_info=True)
                         
                         if paper_size and paper_size != '默认':
                             paper_size_map = {
@@ -1957,33 +1884,45 @@ class WindowsEnterprisePrinter:
                 # 创建打印机设备上下文
                 if devmode:
                     # 使用devmode创建设备上下文
-                    hDC = win32gui.CreateDC("WINSPOOL", printer_name, devmode)
+                    hDC = win32gui.CreateDC("WINSPOOL", queue_printer_name, devmode)
                     hdc = win32ui.CreateDCFromHandle(hDC)
                 else:
                     # 使用默认设置创建设备上下文
                     hdc = win32ui.CreateDC()
-                    hdc.CreatePrinterDC(printer_name)
+                    hdc.CreatePrinterDC(queue_printer_name)
                 
-                job_id = hdc.StartDoc(job_name or os.path.basename(file_path))
+                start_doc_job_id = hdc.StartDoc(document_name)
                 hdc.StartPage()
                 
                 # 获取打印机分辨率
                 printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
                 printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
+                printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
+                printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
                 
                 # 计算图片缩放：小图不放大，大图等比缩小到可打印区域
                 img_width, img_height = img.size
                 if img_width <= 0 or img_height <= 0:
                     raise ValueError(f"无效图片尺寸: {img_width}x{img_height}")
 
-                new_width, new_height, scale = self._calculate_scaled_size(
-                    img_width,
-                    img_height,
-                    printer_width,
-                    printer_height,
-                    layout_options.get("scale_mode", "fit"),
-                    self._safe_float(layout_options.get("max_upscale"), 3.0)
-                )
+                scale_mode = layout_options.get("scale_mode", "actual")
+                if scale_mode == "actual":
+                    x_offset, y_offset, new_width, new_height, scale = compute_physical_fit_rect(
+                        source_inches,
+                        (printer_width, printer_height),
+                        (printer_dpi_x, printer_dpi_y),
+                    )
+                else:
+                    new_width, new_height, scale = self._calculate_scaled_size(
+                        img_width,
+                        img_height,
+                        printer_width,
+                        printer_height,
+                        scale_mode,
+                        self._safe_float(layout_options.get("max_upscale"), 3.0)
+                    )
+                    x_offset = (printer_width - new_width) // 2
+                    y_offset = (printer_height - new_height) // 2
                 
                 # 检查是否居中打印（默认居中）
                 center_print = True
@@ -1993,14 +1932,10 @@ class WindowsEnterprisePrinter:
                         center_print = False
                 
                 # 计算打印位置（居中或左上角）
-                if center_print:
-                    x_offset = (printer_width - new_width) // 2
-                    y_offset = (printer_height - new_height) // 2
-                else:
+                if not center_print:
                     x_offset = 0
                     y_offset = 0
                 
-                scale_mode = layout_options.get("scale_mode", "fit")
                 max_upscale = self._safe_float(layout_options.get("max_upscale"), 3.0)
                 if scale_mode == "actual":
                     logger.debug(
@@ -2079,10 +2014,27 @@ class WindowsEnterprisePrinter:
                     win32print.ClosePrinter(printer_handle)
                     printer_handle = None
                 
-                if job_id:
-                    logger.info("Image print submitted with job_id=%s", job_id)
+                job_id = self._get_latest_job_id(
+                    queue_printer_name,
+                    document_name,
+                    before_job_ids=tracking["before_job_ids"],
+                )
+                if job_id is not None:
+                    logger.info(
+                        "Image print submitted with tracked job_id=%s start_doc_job_id=%s",
+                        job_id,
+                        start_doc_job_id,
+                    )
                 else:
-                    logger.warning("Image print submitted but no job_id was returned")
+                    logger.warning(
+                        "Image print submitted but local spooler job id was not resolved; start_doc_job_id=%s",
+                        start_doc_job_id,
+                    )
+                    return {
+                        "success": False,
+                        "message": "无法获取本地打印任务ID",
+                        "job_id": None,
+                    }
                 
             except Exception as print_error:
                 logger.exception("Image print process failed")
@@ -2103,7 +2055,7 @@ class WindowsEnterprisePrinter:
             return {
                 "success": True, 
                 "job_id": job_id,
-                "printer_name": printer_name,
+                "printer_name": queue_printer_name,
                 "file_path": file_path,
                 "message": "图片打印任务已提交"
             }
@@ -2554,11 +2506,7 @@ class WindowsEnterprisePrinter:
 
     def _normalize_paper_size_for_win32(self, paper_size: Optional[str]) -> Optional[str]:
         """将 'Letter (横向)' 等规范化为 win32 可识别的名称"""
-        s = str(paper_size or "").strip()
-        if not s:
-            return None
-        if " (横向)" in s or " (landscape)" in s.lower():
-            s = s.split(" (")[0].strip()
+        s = normalize_paper_size(paper_size)
         return s if s else None
 
     def _identify_paper_size(self, width_inch: float, height_inch: float) -> str:

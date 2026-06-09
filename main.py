@@ -37,6 +37,17 @@ from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_tem
 from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
 from printer_fault_state import PrinterFaultStateStore
 from windows_startup import get_windows_startup_enabled, set_windows_startup_enabled
+from print_layout import (
+    compute_physical_fit_rect,
+    compute_scaled_size,
+    image_size_inches,
+    normalize_paper_size,
+    normalize_scale_mode,
+    paper_size_px,
+    paper_size_inches,
+    resolve_layout_options,
+    safe_float,
+)
 
 logger = logging.getLogger("EdgeServer")
 
@@ -502,33 +513,11 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
 
 def _normalize_paper_size(paper_size: Optional[str]) -> str:
     """规范化纸张名称，支持 'Letter (横向)' 等"""
-    s = str(paper_size or "").strip()
-    if " (横向)" in s or " (landscape)" in s.lower():
-        s = s.split(" (")[0].strip()
-    return s
+    return normalize_paper_size(paper_size)
 
 
 def _get_paper_size_px(paper_size: Optional[str], dpi: int = 120):
-    raw = str(paper_size or "").strip()
-    is_landscape = (" (横向)" in raw) or ("(landscape)" in raw.lower())
-    sizes = {
-        "A3": (297, 420),
-        "A4": (210, 297),
-        "A5": (148, 210),
-        "B5": (176, 250),
-        "Letter": (216, 279),
-        "Legal": (216, 356),
-        "Tabloid": (279, 432),
-    }
-    normalized = _normalize_paper_size(paper_size)
-    mm = sizes.get(normalized or "")
-    if not mm:
-        return None
-    if is_landscape:
-        mm = (mm[1], mm[0])
-    w = int(mm[0] / 25.4 * dpi)
-    h = int(mm[1] / 25.4 * dpi)
-    return w, h
+    return paper_size_px(paper_size, dpi=dpi)
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
@@ -547,60 +536,16 @@ def _clamp_copy_count(copies: Any, settings: Optional[Dict[str, Any]] = None) ->
     return min(copies_max, max(copies_min, _safe_int(copies, copies_min)))
 
 def _safe_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
+    return safe_float(value, default)
 
 def _normalize_scale_mode(value: Any, default: str = "fit") -> str:
-    mode = str(value or "").strip().lower()
-    if mode in {"fit", "actual", "fill"}:
-        return mode
-    return default
+    return normalize_scale_mode(value, default)
 
 def _resolve_layout_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    opts = dict(options or {})
-    settings = _get_settings()
-
-    default_paper_size = settings.get("default_paper_size") or "A4"
-    paper_size = opts.get("paper_size") or opts.get("page_size") or opts.get("size") or default_paper_size
-    if paper_size:
-        paper_size = str(paper_size).strip()
-
-    default_scale_mode = _normalize_scale_mode(settings.get("default_scale_mode"), "fit")
-    scale_mode = _normalize_scale_mode(opts.get("scale_mode"), default_scale_mode)
-
-    default_max_upscale = _safe_float(settings.get("default_max_upscale"), 3.0)
-    max_upscale = _safe_float(opts.get("max_upscale"), default_max_upscale)
-    if max_upscale <= 0:
-        max_upscale = default_max_upscale if default_max_upscale > 0 else 3.0
-
-    return {
-        "paper_size": paper_size,
-        "scale_mode": scale_mode,
-        "max_upscale": max_upscale
-    }
+    return resolve_layout_options(options, _get_settings())
 
 def _compute_scaled_size(src_w: int, src_h: int, dst_w: int, dst_h: int, scale_mode: str, max_upscale: float):
-    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
-        return 1, 1
-
-    fit_scale = min(dst_w / src_w, dst_h / src_h)
-    fill_scale = max(dst_w / src_w, dst_h / src_h)
-
-    if scale_mode == "actual":
-        scale = min(1.0, fit_scale)
-    elif scale_mode == "fill":
-        scale = fill_scale
-    else:
-        scale = fit_scale
-
-    if scale_mode != "actual":
-        scale = min(scale, max_upscale)
-
-    scale = max(scale, 1.0 / max(src_w, src_h))
-    target_w = max(1, int(round(src_w * scale)))
-    target_h = max(1, int(round(src_h * scale)))
+    target_w, target_h, _ = compute_scaled_size(src_w, src_h, dst_w, dst_h, scale_mode, max_upscale)
     return target_w, target_h
 
 def _normalize_request_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -631,18 +576,39 @@ def _apply_paper_size(image: Image.Image, paper_size: Optional[str], options: Op
     w, h = target
     canvas = Image.new("RGB", (w, h), "white")
     img = image.convert("RGB")
-    new_w, new_h = _compute_scaled_size(
-        img.width,
-        img.height,
-        w,
-        h,
-        layout.get("scale_mode", "fit"),
-        _safe_float(layout.get("max_upscale"), 3.0)
-    )
+    source_inches = opts.get("source_inches")
+    if source_inches and layout.get("scale_mode") == "actual":
+        target_inches = paper_size_inches(paper_size or layout.get("paper_size"))
+        if target_inches:
+            target_dpi = (w / target_inches[0], h / target_inches[1])
+            x, y, new_w, new_h, _ = compute_physical_fit_rect(
+                source_inches,
+                (w, h),
+                target_dpi,
+            )
+        else:
+            x = y = 0
+            new_w, new_h = _compute_scaled_size(
+                img.width,
+                img.height,
+                w,
+                h,
+                layout.get("scale_mode", "actual"),
+                _safe_float(layout.get("max_upscale"), 3.0)
+            )
+    else:
+        new_w, new_h = _compute_scaled_size(
+            img.width,
+            img.height,
+            w,
+            h,
+            layout.get("scale_mode", "actual"),
+            _safe_float(layout.get("max_upscale"), 3.0)
+        )
+        x = (w - new_w) // 2
+        y = (h - new_h) // 2
     resample_lanczos = getattr(Image, "Resampling", Image).LANCZOS
     resized = img.resize((new_w, new_h), resample=resample_lanczos)
-    x = (w - new_w) // 2
-    y = (h - new_h) // 2
     canvas.paste(resized, (x, y))
     return canvas
 
@@ -675,6 +641,22 @@ def _detect_pdf_paper_size_from_file(file_path: str) -> Optional[str]:
             if abs(width_inch - std_h) <= tolerance and abs(height_inch - std_w) <= tolerance:
                 return f"{size_name} (横向)"
         return None
+    except Exception:
+        return None
+
+
+def _get_pdf_page_size_inches(file_path: str, page_index: int = 0) -> Optional[tuple[float, float]]:
+    try:
+        doc = fitz.open(file_path)
+        if doc.page_count == 0:
+            doc.close()
+            return None
+        page_index = max(0, min(page_index, doc.page_count - 1))
+        page = doc.load_page(page_index)
+        media_box = page.mediabox
+        size = (media_box.width / 72.0, media_box.height / 72.0)
+        doc.close()
+        return size
     except Exception:
         return None
 
@@ -827,9 +809,11 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
     page_count = 1
     resolved_page_index = page_index
     error = None
+    source_inches = None
     if ext in [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".webp"]:
         try:
             img = Image.open(file_path)
+            source_inches = image_size_inches(img)
             image = img.convert("RGB")
             img.close()
             resolved_page_index = 0
@@ -841,6 +825,8 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
             error = str(e)
     elif ext == ".pdf":
         image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, file_path, page_index)
+        if image is not None:
+            source_inches = _get_pdf_page_size_inches(file_path, resolved_page_index)
     elif ext in [".doc", ".docx"]:
         pdf_path = None
         file_mgr = get_file_manager()
@@ -854,6 +840,8 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
                     file_mgr.register_preview_resource(file_id, file_info.get("file_url") or "", file_info["source_path"], pdf_path)
         if pdf_path:
             image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, pdf_path, page_index)
+            if image is not None:
+                source_inches = _get_pdf_page_size_inches(pdf_path, resolved_page_index)
     else:
         error = "暂不支持该文件类型预览"
     if image is None:
@@ -862,23 +850,12 @@ def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[st
     if "gray" in color_mode or "mono" in color_mode or "黑白" in color_mode:
         image = image.convert("L").convert("RGB")
     resolved_options = _normalize_request_options(options)
-    # 预览纸张策略：
-    # - 用户显式指定 paper_size 时，严格使用用户设置（与打印参数保持一致）
-    # - 仅当用户未显式指定时，才根据文件自动检测纸张
+    if source_inches:
+        resolved_options["source_inches"] = source_inches
+    # 预览固定落在目标纸张画布上；源文件尺寸只参与内容绘制比例，不改变目标纸张。
     explicit_paper = options.get("paper_size") or options.get("page_size") or options.get("size")
     if explicit_paper:
         resolved_options["paper_size"] = str(explicit_paper).strip()
-    else:
-        pdf_path_for_detect = None
-        if file_id and ext in [".doc", ".docx"] and 'file_info' in locals():
-            pdf_path_for_detect = file_info.get("pdf_path") if file_info else None
-        detected_paper = _detect_paper_size_from_file(file_path, file_name, file_type, pdf_path_for_detect)
-        if detected_paper:
-            paper_px = _get_paper_size_px(detected_paper)
-            if paper_px:
-                resolved_options["preview_width_px"] = paper_px[0]
-                resolved_options["preview_height_px"] = paper_px[1]
-                resolved_options["paper_size"] = detected_paper
     image = _apply_paper_size(image, resolved_options.get("paper_size"), resolved_options)
     return image, page_count, resolved_page_index, None
 

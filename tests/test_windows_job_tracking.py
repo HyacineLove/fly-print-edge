@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -194,7 +195,7 @@ class WindowsJobTrackingTests(unittest.TestCase):
 
         self.assertEqual("Ready from PRINTER_INFO_3", status["status_text"])
 
-    def test_pdf_sumatra_failure_does_not_call_bitmap_fallback(self):
+    def test_pdf_explicit_sumatra_failure_does_not_call_bitmap_fallback(self):
         printer = self.make_printer()
         completed = types.SimpleNamespace(returncode=1, stdout="sumatra failed", stderr="")
 
@@ -224,11 +225,417 @@ class WindowsJobTrackingTests(unittest.TestCase):
                 "HP LaserJet Pro 3288dn",
                 "target.pdf",
                 "target.pdf",
-                {"pdf_bitmap_fallback": True},
+                {"pdf_engine": "sumatra", "pdf_bitmap_fallback": True},
             )
 
         self.assertFalse(result["success"])
         bitmap_mock.assert_not_called()
+
+    def test_pdf_default_engine_uses_bitmap_without_resolving_sumatra(self):
+        printer = self.make_printer()
+
+        with patch.object(printer, "_find_sumatra_pdf_path") as sumatra_mock, \
+             patch.object(
+                 printer,
+                 "_print_pdf_file_bitmap",
+                 return_value={"success": True, "job_id": 42, "message": "bitmap"},
+             ) as bitmap_mock:
+            result = printer._print_pdf_file(
+                "HP LaserJet Pro 3288dn",
+                "target.pdf",
+                "target.pdf",
+                {},
+            )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(42, result["job_id"])
+        bitmap_mock.assert_called_once_with("HP LaserJet Pro 3288dn", os.path.abspath("target.pdf"), "target.pdf", {})
+        sumatra_mock.assert_not_called()
+
+    def test_pdf_bitmap_print_uses_queue_tracked_job_id_and_physical_draw_size(self):
+        printer = self.make_printer()
+        stretch_calls = []
+
+        class FakePixmap:
+            width = 600
+            height = 900
+            samples = b"\xff" * (600 * 900 * 3)
+
+        class FakePage:
+            rect = types.SimpleNamespace(width=288.0, height=432.0)
+
+            def get_pixmap(self, matrix=None, alpha=False):
+                return FakePixmap()
+
+        class FakeDocument:
+            def __len__(self):
+                return 1
+
+            def load_page(self, index):
+                return FakePage()
+
+            def close(self):
+                return None
+
+        class FakeMemDc:
+            def SelectObject(self, obj):
+                return "old"
+
+            def DeleteDC(self):
+                return None
+
+        class FakeHdc:
+            def CreatePrinterDC(self, printer_name):
+                return None
+
+            def StartDoc(self, job_name):
+                return 777
+
+            def StartPage(self):
+                return None
+
+            def GetDeviceCaps(self, cap):
+                values = {
+                    8: 2480,
+                    10: 3507,
+                    88: 300,
+                    90: 300,
+                }
+                return values[cap]
+
+            def CreateCompatibleDC(self):
+                return FakeMemDc()
+
+            def StretchBlt(self, dst_pos, dst_size, *args):
+                stretch_calls.append((dst_pos, dst_size))
+
+            def EndPage(self):
+                return None
+
+            def EndDoc(self):
+                return None
+
+            def DeleteDC(self):
+                return None
+
+        fake_win32print = types.SimpleNamespace(
+            PRINTER_ACCESS_USE=8,
+            OpenPrinter=Mock(return_value="printer-handle"),
+            ClosePrinter=Mock(),
+            GetPrinter=Mock(return_value={"pDevMode": None}),
+        )
+        fake_win32ui = types.SimpleNamespace(
+            CreateDC=lambda: FakeHdc(),
+            CreateDCFromHandle=lambda handle: FakeHdc(),
+            CreateBitmapFromHandle=lambda handle: f"bitmap-{handle}",
+        )
+        fake_win32con = types.SimpleNamespace(
+            HORZRES=8,
+            VERTRES=10,
+            LOGPIXELSX=88,
+            LOGPIXELSY=90,
+            SRCCOPY=0x00CC0020,
+            DMPAPER_A4=9,
+            DMPAPER_LETTER=1,
+            DMPAPER_LEGAL=5,
+            DMPAPER_A3=8,
+            DMPAPER_A5=11,
+            DM_PAPERSIZE=0x2,
+            DMDUP_SIMPLEX=1,
+            DMDUP_VERTICAL=2,
+            DMDUP_HORIZONTAL=3,
+            DM_DUPLEX=0x1000,
+            DMCOLOR_MONOCHROME=1,
+            DMCOLOR_COLOR=2,
+            DM_COLOR=0x800,
+            DM_COPIES=0x100,
+        )
+        fake_win32gui = types.SimpleNamespace(
+            CreateDC=Mock(return_value="hdc-handle"),
+            LoadImage=Mock(return_value="hbmp"),
+            DeleteObject=Mock(),
+        )
+        fake_fitz = types.SimpleNamespace(
+            Matrix=lambda x, y: (x, y),
+            open=Mock(return_value=FakeDocument()),
+        )
+
+        with patch("printer_windows.win32print", fake_win32print, create=True), \
+             patch.dict(
+                 sys.modules,
+                 {
+                     "win32ui": fake_win32ui,
+                     "win32con": fake_win32con,
+                     "win32gui": fake_win32gui,
+                     "fitz": fake_fitz,
+                 },
+             ), \
+             patch.object(
+                 printer,
+                 "_prepare_print_job_tracking",
+                 return_value={"queue_name": "HP LaserJet Pro 3288dn", "before_job_ids": {1}},
+             ) as tracking_mock, \
+             patch.object(printer, "_get_latest_job_id", return_value=42) as latest_mock:
+            result = printer._print_pdf_file_bitmap(
+                "HP LaserJet Pro 3288dn",
+                "target.pdf",
+                "target.pdf",
+                {},
+            )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(42, result["job_id"])
+        tracking_mock.assert_called_once_with("HP LaserJet Pro 3288dn", "target.pdf")
+        latest_mock.assert_called_once_with(
+            "HP LaserJet Pro 3288dn",
+            "target.pdf",
+            before_job_ids={1},
+        )
+        self.assertEqual([((640, 853), (1200, 1800))], stretch_calls)
+
+    def test_pdf_system_engine_does_not_call_shellexecute(self):
+        printer = self.make_printer()
+        shell_execute = Mock(side_effect=AssertionError("ShellExecute must not be used"))
+
+        with patch.dict(
+            sys.modules,
+            {
+                "win32api": types.SimpleNamespace(ShellExecute=shell_execute),
+                "win32print": types.SimpleNamespace(),
+            },
+        ), \
+             patch.object(printer, "_find_sumatra_pdf_path", return_value="SumatraPDF.exe"), \
+             patch.object(printer, "_prepare_print_job_tracking") as tracking_mock:
+            result = printer._print_pdf_file(
+                "HP LaserJet Pro 3288dn",
+                "target.pdf",
+                "target.pdf",
+                {"pdf_engine": "system"},
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("PDF打印引擎不支持", result["message"])
+        shell_execute.assert_not_called()
+        tracking_mock.assert_not_called()
+
+    def test_pdf_explicit_sumatra_missing_fails_without_system_application_fallback(self):
+        printer = self.make_printer()
+        shell_execute = Mock()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "win32api": types.SimpleNamespace(ShellExecute=shell_execute),
+                "win32print": types.SimpleNamespace(),
+            },
+        ), \
+             patch.object(printer, "_find_sumatra_pdf_path", return_value=None), \
+             patch.object(printer, "_prepare_print_job_tracking") as tracking_mock:
+            result = printer._print_pdf_file(
+                "HP LaserJet Pro 3288dn",
+                "target.pdf",
+                "target.pdf",
+                {"pdf_engine": "sumatra"},
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("SumatraPDF不可用", result["message"])
+        shell_execute.assert_not_called()
+        tracking_mock.assert_not_called()
+
+    def test_image_print_returns_queue_tracked_job_id_not_startdoc_value(self):
+        printer = self.make_printer()
+
+        class FakeMemDc:
+            def SelectObject(self, obj):
+                return "old-bitmap"
+
+            def DeleteDC(self):
+                return None
+
+        class FakeHdc:
+            def CreatePrinterDC(self, printer_name):
+                self.printer_name = printer_name
+
+            def StartDoc(self, job_name):
+                return 777
+
+            def StartPage(self):
+                return None
+
+            def GetDeviceCaps(self, cap):
+                if cap == 8:
+                    return 2400
+                if cap == 10:
+                    return 3300
+                if cap in (88, 90):
+                    return 300
+                return 0
+
+            def CreateCompatibleDC(self):
+                return FakeMemDc()
+
+            def StretchBlt(self, *args, **kwargs):
+                return None
+
+            def EndPage(self):
+                return None
+
+            def EndDoc(self):
+                return None
+
+            def DeleteDC(self):
+                return None
+
+        fake_win32print = types.SimpleNamespace(
+            PRINTER_ACCESS_USE=8,
+            OpenPrinter=Mock(return_value="printer-handle"),
+            ClosePrinter=Mock(),
+        )
+        fake_win32ui = types.SimpleNamespace(
+            CreateDC=lambda: FakeHdc(),
+            CreateBitmapFromHandle=lambda handle: f"bitmap-{handle}",
+        )
+        fake_win32con = types.SimpleNamespace(HORZRES=8, VERTRES=10, LOGPIXELSX=88, LOGPIXELSY=90, SRCCOPY=0x00CC0020)
+        fake_win32gui = types.SimpleNamespace(
+            LoadImage=Mock(return_value="hbmp"),
+            DeleteObject=Mock(),
+        )
+
+        from PIL import Image
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            image_path = tmp.name
+        try:
+            Image.new("RGB", (100, 200), "white").save(image_path, "JPEG")
+
+            with patch("printer_windows.win32print", fake_win32print, create=True), \
+                 patch.dict(
+                     sys.modules,
+                     {
+                         "win32ui": fake_win32ui,
+                         "win32con": fake_win32con,
+                         "win32gui": fake_win32gui,
+                     },
+                 ), \
+                 patch.object(
+                     printer,
+                     "_prepare_print_job_tracking",
+                     return_value={"queue_name": "HP LaserJet Pro 3288dn", "before_job_ids": {1}},
+                 ) as tracking_mock, \
+                 patch.object(printer, "_get_latest_job_id", return_value=42) as latest_mock:
+                result = printer._print_image_file(
+                    "HP LaserJet Pro 3288dn",
+                    image_path,
+                    "photo.jpg",
+                    {},
+                )
+        finally:
+            try:
+                os.unlink(image_path)
+            except FileNotFoundError:
+                pass
+
+        self.assertTrue(result["success"])
+        self.assertEqual(42, result["job_id"])
+        tracking_mock.assert_called_once_with("HP LaserJet Pro 3288dn", "photo.jpg")
+        latest_mock.assert_called_once_with(
+            "HP LaserJet Pro 3288dn",
+            "photo.jpg",
+            before_job_ids={1},
+        )
+
+    def test_image_print_fails_when_queue_job_id_cannot_be_resolved(self):
+        printer = self.make_printer()
+
+        class FakeHdc:
+            def CreatePrinterDC(self, printer_name):
+                return None
+
+            def StartDoc(self, job_name):
+                return 777
+
+            def StartPage(self):
+                return None
+
+            def GetDeviceCaps(self, cap):
+                return 1200
+
+            def CreateCompatibleDC(self):
+                return types.SimpleNamespace(
+                    SelectObject=lambda obj: "old",
+                    DeleteDC=lambda: None,
+                )
+
+            def StretchBlt(self, *args, **kwargs):
+                return None
+
+            def EndPage(self):
+                return None
+
+            def EndDoc(self):
+                return None
+
+            def DeleteDC(self):
+                return None
+
+        fake_win32print = types.SimpleNamespace(
+            PRINTER_ACCESS_USE=8,
+            OpenPrinter=Mock(return_value="printer-handle"),
+            ClosePrinter=Mock(),
+        )
+        fake_win32ui = types.SimpleNamespace(
+            CreateDC=lambda: FakeHdc(),
+            CreateBitmapFromHandle=lambda handle: f"bitmap-{handle}",
+        )
+        fake_win32con = types.SimpleNamespace(HORZRES=8, VERTRES=10, LOGPIXELSX=88, LOGPIXELSY=90, SRCCOPY=0x00CC0020)
+        fake_win32gui = types.SimpleNamespace(LoadImage=Mock(return_value="hbmp"), DeleteObject=Mock())
+
+        from PIL import Image
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            image_path = tmp.name
+        try:
+            Image.new("RGB", (100, 200), "white").save(image_path, "JPEG")
+
+            with patch("printer_windows.win32print", fake_win32print, create=True), \
+                 patch.dict(
+                     sys.modules,
+                     {
+                         "win32ui": fake_win32ui,
+                         "win32con": fake_win32con,
+                         "win32gui": fake_win32gui,
+                     },
+                 ), \
+                 patch.object(
+                     printer,
+                     "_prepare_print_job_tracking",
+                     return_value={"queue_name": "HP LaserJet Pro 3288dn", "before_job_ids": {1}},
+                 ), \
+                 patch.object(printer, "_get_latest_job_id", return_value=None):
+                result = printer._print_image_file(
+                    "HP LaserJet Pro 3288dn",
+                    image_path,
+                    "photo.jpg",
+                    {},
+                )
+        finally:
+            try:
+                os.unlink(image_path)
+            except FileNotFoundError:
+                pass
+
+        self.assertFalse(result["success"])
+        self.assertIn("无法获取本地打印任务ID", result["message"])
+
+    def test_image_print_does_not_infer_paper_size_from_guessed_image_dpi(self):
+        source = open(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "printer_windows.py"),
+            encoding="utf-8",
+        ).read()
+
+        self.assertNotIn("img.width / 96.0", source)
+        self.assertNotIn("img.height / 96.0", source)
 
     def test_remove_print_job_deletes_existing_job_and_confirms_removed(self):
         fake = FakeWin32Print(jobs_by_call=[

@@ -130,6 +130,7 @@ export function mapQrErrorMessage(errorCode, message) {
 export function mapPrintErrorMessage(errorCode, message) {
   const code = String(errorCode || "").toLowerCase();
   const msg = String(message || "").trim();
+  const lowerMsg = msg.toLowerCase();
 
   if (code === "printer_fault") return msg || "打印机故障，请联系管理员处理";
 
@@ -139,6 +140,23 @@ export function mapPrintErrorMessage(errorCode, message) {
   if (code === "node_not_found") return "节点已被删除或不存在，请联系管理员";
   if (code === "printer_not_belong_to_node") return "打印机与节点绑定异常，请联系管理员";
   if (code === "token_generation_failed") return "云端凭证生成失败，请稍后重试";
+  if (code === "print_spooler_error") {
+    return "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态";
+  }
+
+  if (
+    msg.includes("PCL XL") ||
+    msg.includes("MemAllocError") ||
+    msg.includes("ReadImage") ||
+    lowerMsg.includes("memallocerror") ||
+    lowerMsg.includes("readimage") ||
+    lowerMsg.includes("spooler job entered terminal error status")
+  ) {
+    return "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态";
+  }
+  if (msg.includes("无法获取本地打印任务ID")) {
+    return "打印任务提交失败，请联系管理员检查打印机队列";
+  }
 
   if (msg.includes("打印机已被管理员禁用") || msg.includes("打印机禁用")) {
     return "打印机已被禁用，请联系管理员";

@@ -40,7 +40,9 @@ class CloudWebSocketClient:
         
         # 任务去重缓存：记录已完成的任务ID及完成时间戳
         self.completed_jobs = {}  # {job_id: completion_timestamp}
+        self.processing_jobs = {}  # {job_id: start_timestamp}
         self.completed_jobs_ttl = 3600  # 缓存保留1小时
+        self._job_tracking_lock = threading.Lock()
         self._start_cleanup_task()  # 启动定期清理任务
         
     def add_message_handler(self, message_type: str, handler: Callable[[Dict[str, Any]], None]):
@@ -141,13 +143,35 @@ class CloudWebSocketClient:
     
     def _mark_job_completed(self, job_id: str):
         """标记任务为已完成"""
-        self.completed_jobs[job_id] = time.time()
+        with self._job_tracking_lock:
+            self.processing_jobs.pop(job_id, None)
+            self.completed_jobs[job_id] = time.time()
         logger.debug(f"任务已标记为完成: {job_id} (缓存中共 {len(self.completed_jobs)} 个)")
     
     def _is_job_completed(self, job_id: str) -> bool:
         """检查任务是否已完成"""
-        return job_id in self.completed_jobs
+        with self._job_tracking_lock:
+            return job_id in self.completed_jobs
     
+    def _begin_job_processing(self, job_id: str) -> str:
+        """Return started, processing, or completed for cloud job idempotency."""
+        if not job_id:
+            return "started"
+        with self._job_tracking_lock:
+            if job_id in self.completed_jobs:
+                return "completed"
+            if job_id in self.processing_jobs:
+                return "processing"
+            self.processing_jobs[job_id] = time.time()
+            return "started"
+
+    def _finish_job_processing(self, job_id: str):
+        """Release an in-flight job marker without marking it completed."""
+        if not job_id:
+            return
+        with self._job_tracking_lock:
+            self.processing_jobs.pop(job_id, None)
+
     def _run_async_loop(self):
         """在单独线程中运行异步循环"""
         loop = asyncio.new_event_loop()
@@ -629,7 +653,16 @@ class PrintJobHandler:
                 logger.warning(f"绑定交互会话失败: {bind_error}")
             
             # 【去重检查】如果任务已经完成过，直接上报成功，不重复打印
-            if self.websocket_client and self.websocket_client._is_job_completed(job_id):
+            if self.websocket_client and hasattr(self.websocket_client, "_begin_job_processing"):
+                job_state = self.websocket_client._begin_job_processing(job_id)
+                if job_state == "completed":
+                    logger.info("duplicate completed cloud print job acknowledged: %s", job_id)
+                    self._report_job_success(job_id, printer_id)
+                    return
+                if job_state == "processing":
+                    logger.warning("duplicate cloud print job ignored while in flight: %s", job_id)
+                    return
+            if self.websocket_client and hasattr(self.websocket_client, "_is_job_completed") and self.websocket_client._is_job_completed(job_id):
                 logger.info(f"任务 {job_id} 已完成过，跳过重复打印，直接上报成功状态")
                 self._report_job_success(job_id, printer_id)
                 return
@@ -956,7 +989,16 @@ class PrintJobHandler:
             cancel_success,
             failure_message,
         )
-        self._report_job_failure(cloud_job_id, failure_message)
+        friendly_message = "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态"
+        self._report_job_failure(
+            cloud_job_id,
+            failure_message,
+            error_code="print_spooler_error",
+            local_extra={
+                "message": friendly_message,
+                "error_message": friendly_message,
+            },
+        )
 
     def _monitor_job_completion(
         self,
@@ -1169,6 +1211,8 @@ class PrintJobHandler:
                         "data": job_data
                     }
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
+                    if hasattr(self.websocket_client, "_finish_job_processing"):
+                        self.websocket_client._finish_job_processing(job_id)
                     logger.debug(f"任务成功状态已分发到本地处理器 (SSE)")
 
             except Exception as e:
@@ -1220,6 +1264,8 @@ class PrintJobHandler:
                         "data": local_job_data
                     }
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
+                    if hasattr(self.websocket_client, "_finish_job_processing"):
+                        self.websocket_client._finish_job_processing(job_id)
                     logger.debug(f"任务失败状态已分发到本地处理器 (SSE)")
 
             except Exception as e:

@@ -1,7 +1,7 @@
 const stateKey = "fly_print_state";
 
 export const defaultPaperSize = "A4";
-export const defaultScaleMode = "fit";
+export const defaultScaleMode = "actual";
 export const defaultMaxUpscale = 3;
 
 export function createDefaultOptions() {

@@ -96,6 +96,49 @@ class UserPreviewAssetTests(unittest.TestCase):
         )
         self.assertIn("打印机已恢复", done_view)
 
+    def test_printer_fault_done_view_hides_countdown_accessory_before_and_after_recovery(self):
+        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
+
+        self.assertIn("function setCountdownAccessoryVisible", done_view)
+        self.assertRegex(
+            done_view,
+            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\)\s*\{[\s\S]*?setCountdownAccessoryVisible\(false\)",
+        )
+        self.assertRegex(
+            done_view,
+            r"打印机已恢复[\s\S]*?setCountdownAccessoryVisible\(false\)",
+        )
+        self.assertRegex(
+            done_view,
+            r"if\s*\(\s*result\.type\s*===\s*\"error\"[\s\S]*?setCountdownAccessoryVisible\(true\)",
+        )
+
+    def test_app_controller_failed_snapshot_uses_snapshot_error_fields(self):
+        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("normalized.error_code", controller)
+        self.assertNotIn("normalized.error_message", controller)
+        self.assertIn("snapshot.error_code", controller)
+        self.assertIn("snapshot.error_message", controller)
+
+    def test_print_error_mapping_sanitizes_driver_and_job_tracking_errors(self):
+        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
+
+        self.assertIn("PCL XL", runtime)
+        self.assertIn("MemAllocError", runtime)
+        self.assertIn("ReadImage", runtime)
+        self.assertIn("无法获取本地打印任务ID", runtime)
+        self.assertIn("print_spooler_error", runtime)
+        self.assertIn("spooler job entered terminal error status", runtime)
+
+    def test_default_scale_mode_is_actual_size_shrink_only_in_frontend(self):
+        session_state = (BASE_DIR / "modules/shared/session-state.js").read_text(encoding="utf-8")
+        admin_settings = pathlib.Path("static/admin/modules/render-sections.js").read_text(encoding="utf-8")
+
+        self.assertIn('defaultScaleMode = "actual"', session_state)
+        self.assertIn("原始尺寸/过大缩小", admin_settings)
+        self.assertIn('cfg.default_scale_mode || "actual"', admin_settings)
+
 
 if __name__ == "__main__":
     unittest.main()

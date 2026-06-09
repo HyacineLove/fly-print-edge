@@ -116,6 +116,7 @@ export function createAppController({ mountNode }) {
     if (state.currentView === "printing") {
       finishWithResult("error", mapPrintErrorMessage(errorCode, message), {
         error_code: errorCode || null,
+        printer_fault: data?.printer_fault || null,
       });
     }
   }
@@ -218,10 +219,10 @@ export function createAppController({ mountNode }) {
     if (phase === "failed") {
       setDoneResult(
         "error",
-        mapPrintErrorMessage(normalized.error_code, normalized.error_message || "打印失败，请联系管理员"),
+        mapPrintErrorMessage(snapshot.error_code, snapshot.error_message || "打印失败，请联系管理员"),
         {
-          error_code: normalized.error_code || null,
-          printer_fault: normalized.printer_fault || null,
+          error_code: snapshot.error_code || null,
+          printer_fault: snapshot.printer_fault || null,
         },
       );
       await router.go("done");

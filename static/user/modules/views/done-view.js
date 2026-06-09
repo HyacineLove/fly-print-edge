@@ -42,11 +42,17 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
     button.style.cursor = enabled ? "pointer" : "not-allowed";
   }
 
+  function setCountdownAccessoryVisible(visible) {
+    const accessory = document.getElementById("115_37");
+    if (accessory) accessory.style.display = visible ? "" : "none";
+    if (!visible) setText(["115_39"], "");
+  }
+
   if (isPrinterFaultResult()) {
     setText(["77_18"], "设备维护中");
     setText(["77_21"], result.message || "打印机故障，请联系管理员处理");
-    setText(["115_39"], "");
     setText(["115_42"], "等待恢复");
+    setCountdownAccessoryVisible(false);
     setReturnEnabled(false);
 
     const pollAvailability = async () => {
@@ -59,6 +65,7 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
           }
           setText(["77_21"], "打印机已恢复，可返回首页继续使用");
           setText(["115_42"], "返回首页");
+          setCountdownAccessoryVisible(false);
           setReturnEnabled(true);
         }
       } catch {
@@ -80,9 +87,11 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
     };
   }
   if (result.type === "error") {
+    setCountdownAccessoryVisible(true);
     setText(["77_18"], "打印失败");
     setText(["77_21"], result.message || "云端服务异常，请稍后重试");
   } else {
+    setCountdownAccessoryVisible(true);
     setText(["77_18"], "打印完成");
     setText(["77_21"], "请尽快取走您的简历");
   }
