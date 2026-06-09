@@ -41,6 +41,7 @@ class DummyPrinterManager:
         self._printers = [
             {"name": "Main Printer", "id": "printer-1", "ip": "127.0.0.1", "port": 631, "enabled": True}
         ]
+        self.get_admin_printer_summary = MagicMock()
 
     def get_printers(self):
         return [dict(item) for item in self._printers]
@@ -51,11 +52,11 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.printer_manager = DummyPrinterManager()
 
     def test_managed_printers_include_capability_summary(self):
-        capabilities = {
-            "duplex": ["simplex", "duplex"],
-            "color_model": ["Gray", "RGB"],
+        self.printer_manager.get_admin_printer_summary.return_value = {
+            "duplex_supported": True,
+            "color_supported": True,
+            "capability_summary": "单双面: 支持, 彩色: 支持",
         }
-        self.printer_manager.get_printer_capabilities = MagicMock(return_value=capabilities)
 
         with patch.object(main, "printer_manager", self.printer_manager):
             result = asyncio.run(main.get_managed_printers())
@@ -66,9 +67,14 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.assertEqual(item["color_supported"], True)
         self.assertIn("单双面: 支持", item["capability_summary"])
         self.assertIn("彩色: 支持", item["capability_summary"])
+        self.printer_manager.get_admin_printer_summary.assert_called_once_with("Main Printer")
 
     def test_discovered_printers_report_unknown_capabilities(self):
-        self.printer_manager.get_printer_capabilities = MagicMock(return_value=None)
+        self.printer_manager.get_admin_printer_summary.return_value = {
+            "duplex_supported": None,
+            "color_supported": None,
+            "capability_summary": "单双面: 未知, 彩色: 未知",
+        }
 
         with patch.object(main, "printer_manager", self.printer_manager):
             result = asyncio.run(main.get_discovered_printers())
@@ -79,6 +85,7 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.assertIsNone(item["color_supported"])
         self.assertIn("单双面: 未知", item["capability_summary"])
         self.assertIn("彩色: 未知", item["capability_summary"])
+        self.printer_manager.get_admin_printer_summary.assert_called_once_with("Office Printer")
 
 
 if __name__ == "__main__":

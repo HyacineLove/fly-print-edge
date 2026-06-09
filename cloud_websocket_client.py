@@ -411,6 +411,30 @@ class CloudWebSocketClient:
 
 class PrintJobHandler:
     """打印任务处理器"""
+
+    _TERMINAL_SPOOLER_STATUS_FLAGS = (
+        0x00000002,  # JOB_STATUS_ERROR
+        0x00000020,  # JOB_STATUS_OFFLINE
+        0x00000040,  # JOB_STATUS_PAPEROUT
+        0x00000100,  # JOB_STATUS_DELETED
+        0x00000200,  # JOB_STATUS_BLOCKED_DEVQ
+        0x00000400,  # JOB_STATUS_USER_INTERVENTION
+    )
+    _TERMINAL_SPOOLER_STATUS_KEYWORDS = (
+        "error",
+        "failed",
+        "offline",
+        "paper",
+        "blocked",
+        "intervention",
+        "deleted",
+        "\u9519\u8bef",
+        "\u79bb\u7ebf",
+        "\u7f3a\u7eb8",
+        "\u88ab\u963b\u6b62",
+        "\u7528\u6237\u5e72\u9884",
+        "\u5df2\u5220\u9664",
+    )
     
     def __init__(
         self,
@@ -883,6 +907,57 @@ class PrintJobHandler:
             )
         return success, message
 
+    @classmethod
+    def _is_terminal_spooler_error(cls, job_status: Dict[str, Any]) -> bool:
+        if not isinstance(job_status, dict):
+            return False
+
+        raw_status = job_status.get("status_code")
+        if raw_status is not None:
+            try:
+                status_code = int(raw_status)
+            except (TypeError, ValueError):
+                status_code = 0
+            if any(status_code & flag for flag in cls._TERMINAL_SPOOLER_STATUS_FLAGS):
+                return True
+
+        status_text = str(job_status.get("status") or "").casefold()
+        return any(
+            keyword.casefold() in status_text
+            for keyword in cls._TERMINAL_SPOOLER_STATUS_KEYWORDS
+        )
+
+    def _report_terminal_spooler_error(
+        self,
+        cloud_job_id: str,
+        printer_name: str,
+        local_job_id,
+        job_status: Dict[str, Any],
+    ) -> None:
+        status_text = str(job_status.get("status") or "unknown")
+        cancel_success, cancel_message = self._cancel_local_print_job(
+            printer_name,
+            local_job_id,
+        )
+        cancel_suffix = (
+            f"; local job cancelled: {cancel_message}"
+            if cancel_success
+            else f"; local job cancel failed: {cancel_message}"
+        )
+        failure_message = (
+            f"spooler job entered terminal error status: {status_text}{cancel_suffix}"
+        )
+        logger.error(
+            "job_failed_spooler_error cloud_job_id=%s printer=%r local_job_id=%s status=%r cancel_success=%s message=%r",
+            cloud_job_id,
+            printer_name,
+            local_job_id,
+            status_text,
+            cancel_success,
+            failure_message,
+        )
+        self._report_job_failure(cloud_job_id, failure_message)
+
     def _monitor_job_completion(
         self,
         cloud_job_id: str,
@@ -963,6 +1038,16 @@ class PrintJobHandler:
                             failure_message,
                             error_code="printer_fault",
                             local_extra={"printer_fault": fault_state},
+                        )
+                        self._refresh_printer_status(printer_id, printer_name)
+                        return
+
+                    if self._is_terminal_spooler_error(job_status):
+                        self._report_terminal_spooler_error(
+                            cloud_job_id,
+                            printer_name,
+                            local_job_id,
+                            job_status,
                         )
                         self._refresh_printer_status(printer_id, printer_name)
                         return

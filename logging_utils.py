@@ -57,7 +57,9 @@ def configure_logging(
 ) -> Dict[str, Any]:
     resolved = resolve_log_settings(config, env=env)
     fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    handlers = [logging.StreamHandler()]
+    handlers = []
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     # Always write to a log file in the app directory for diagnostics
     try:
         if getattr(sys, 'frozen', False):
@@ -70,6 +72,8 @@ def configure_logging(
         handlers.append(logging.FileHandler(_log_path, encoding="utf-8"))
     except Exception:
         pass  # never let logging setup crash the server
+    if not handlers:
+        handlers.append(logging.NullHandler())
     logging.basicConfig(
         level=resolved["level"],
         format=fmt,

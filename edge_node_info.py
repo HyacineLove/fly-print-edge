@@ -8,6 +8,7 @@ import subprocess
 import psutil
 import socket
 from typing import Dict, Any, Optional
+from windows_subprocess import run_hidden
 
 
 class EdgeNodeInfo:
@@ -81,7 +82,7 @@ class EdgeNodeInfo:
     def _get_windows_mac(self, interface: str = None) -> str:
         """获取Windows系统MAC地址"""
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 ['getmac', '/fo', 'csv', '/nh'],
                 capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
             )
@@ -163,7 +164,7 @@ class EdgeNodeInfo:
                         return line.split(':')[1].strip()
             else:
                 # Windows使用wmic命令
-                result = subprocess.run(
+                result = run_hidden(
                     ['wmic', 'cpu', 'get', 'name', '/value'],
                     capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5
                 )

@@ -96,6 +96,7 @@ class AdminConfigApiTests(unittest.TestCase):
         self.assertEqual(result["settings"]["copies_max"], 3)
         self.assertEqual(result["settings"]["log_level"], "INFO")
         self.assertEqual(result["settings"]["debug_logging"], False)
+        self.assertNotIn("system", result)
 
     def test_save_config_keeps_secret_when_blank(self):
         request = DummyRequest({

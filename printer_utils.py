@@ -10,6 +10,7 @@ import threading
 from typing import List, Dict, Any
 import pandas as pd
 from file_manager import get_file_manager
+from printer_capability_summary import build_printer_capability_summary
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +345,17 @@ class PrinterManager:
                 "media_type": ["Plain", "Cardstock", "Transparency"]
             }
     
+    def get_admin_printer_summary(self, printer_name: str) -> Dict[str, Any]:
+        try:
+            if hasattr(self.platform_printer, "get_printer_capability_summary"):
+                summary = self.platform_printer.get_printer_capability_summary(printer_name)
+                if isinstance(summary, dict):
+                    return summary
+            return build_printer_capability_summary(self.get_printer_capabilities(printer_name))
+        except Exception as e:
+            logger.warning(f" 获取打印机摘要时出错: {e}")
+            return build_printer_capability_summary(None)
+
     def get_managed_printers_df(self) -> pd.DataFrame:
         """获取管理的打印机DataFrame"""
         printers = self.config.get_managed_printers()

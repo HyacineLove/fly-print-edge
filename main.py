@@ -36,6 +36,7 @@ from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
 from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
 from printer_fault_state import PrinterFaultStateStore
+from windows_startup import get_windows_startup_enabled, set_windows_startup_enabled
 
 logger = logging.getLogger("EdgeServer")
 
@@ -315,89 +316,6 @@ def _get_managed_printers():
     if not printer_manager:
         return []
     return printer_manager.get_printers()
-
-def _capability_values(capabilities: Optional[Dict[str, Any]], *keys: str) -> list[str]:
-    if not isinstance(capabilities, dict):
-        return []
-    values: list[str] = []
-    for key in keys:
-        raw_value = capabilities.get(key)
-        if raw_value is None:
-            continue
-        if isinstance(raw_value, dict):
-            items = raw_value.values()
-        elif isinstance(raw_value, (list, tuple, set)):
-            items = raw_value
-        else:
-            items = [raw_value]
-        for item in items:
-            text = str(item).strip()
-            if text:
-                values.append(text.lower())
-    return values
-
-def _capability_flag(capabilities: Optional[Dict[str, Any]], *keys: str) -> Optional[bool]:
-    if not isinstance(capabilities, dict):
-        return None
-    for key in keys:
-        raw_value = capabilities.get(key)
-        if isinstance(raw_value, bool):
-            return raw_value
-        if isinstance(raw_value, (int, float)) and raw_value in (0, 1):
-            return bool(raw_value)
-    return None
-
-def _capability_tristate_from_duplex(capabilities: Optional[Dict[str, Any]]) -> Optional[bool]:
-    direct = _capability_flag(capabilities, "duplex_supported", "duplex_support")
-    if direct is not None:
-        return direct
-
-    values = _capability_values(capabilities, "duplex", "duplex_mode")
-    if not values:
-        return None
-
-    positive_tokens = ("duplex", "longedge", "shortedge", "two-sided", "2-sided")
-    negative_tokens = {"none", "simplex", "single"}
-
-    if any(any(token in value for token in positive_tokens) for value in values):
-        return True
-    if any(value in negative_tokens for value in values):
-        return False
-    return None
-
-def _capability_tristate_from_color(capabilities: Optional[Dict[str, Any]]) -> Optional[bool]:
-    direct = _capability_flag(capabilities, "color_supported", "color_support")
-    if direct is not None:
-        return direct
-
-    values = _capability_values(capabilities, "color_model", "color_mode", "color")
-    if not values:
-        return None
-
-    positive_tokens = ("color", "colour", "rgb", "cmyk")
-    negative_tokens = ("gray", "grey", "grayscale", "greyscale", "mono", "monochrome", "blackandwhite", "black")
-
-    if any(any(token in value for token in positive_tokens) for value in values):
-        return True
-    if any(any(token in value for token in negative_tokens) for value in values):
-        return False
-    return None
-
-def _capability_label(value: Optional[bool]) -> str:
-    if value is True:
-        return "支持"
-    if value is False:
-        return "不支持"
-    return "未知"
-
-def _build_printer_capability_summary(capabilities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    duplex_supported = _capability_tristate_from_duplex(capabilities)
-    color_supported = _capability_tristate_from_color(capabilities)
-    return {
-        "duplex_supported": duplex_supported,
-        "color_supported": color_supported,
-        "capability_summary": f"单双面: {_capability_label(duplex_supported)}, 彩色: {_capability_label(color_supported)}",
-    }
 
 def _get_printer_by_id(printer_id: str):
     if not printer_manager:
@@ -1449,6 +1367,19 @@ async def get_admin_config():
     return {"success": True, **payload}
 
 
+@admin_router.get("/system/startup")
+async def get_admin_startup_state():
+    return {"success": True, "enabled": get_windows_startup_enabled()}
+
+
+@admin_router.post("/system/startup")
+async def update_admin_startup_state(request: Request):
+    body = await request.json()
+    enabled = bool(body.get("enabled"))
+    set_windows_startup_enabled(enabled)
+    return {"success": True, "enabled": enabled}
+
+
 @admin_router.post("/config")
 async def save_admin_config(request: Request):
     global node_id
@@ -1613,7 +1544,7 @@ async def get_managed_printers():
     for printer in _get_managed_printers():
         item = dict(printer)
         item["is_default"] = item.get("id") == default_id
-        item.update(_build_printer_capability_summary(printer_manager.get_printer_capabilities(item.get("name"))))
+        item.update(printer_manager.get_admin_printer_summary(item.get("name")))
         printers.append(item)
     return {
         "success": True,
@@ -1635,7 +1566,7 @@ async def get_discovered_printers():
         if printer.get("name") in managed_names:
             continue
         item = dict(printer)
-        item.update(_build_printer_capability_summary(printer_manager.get_printer_capabilities(item.get("name"))))
+        item.update(printer_manager.get_admin_printer_summary(item.get("name")))
         available.append(item)
     return {"success": True, "items": available}
 
@@ -1770,7 +1701,7 @@ async def reregister_printer(printer_id: str):
 # 注册 Admin Router
 app.include_router(admin_router)
 
-if __name__ == "__main__":
+def run_server():
     from printer_config import PrinterConfig
     config_repo = PrinterConfig()
     log_settings = configure_logging(config_repo.get_full_config())
@@ -1786,4 +1717,10 @@ if __name__ == "__main__":
         port=port,
         reload=False,
         access_log=log_settings["access_log"],
+        log_config=None,
+        use_colors=False,
     )
+
+
+if __name__ == "__main__":
+    run_server()

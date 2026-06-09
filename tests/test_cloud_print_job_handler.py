@@ -269,6 +269,40 @@ class PrintJobHandlerBindingTests(unittest.TestCase):
         failure_mock.assert_not_called()
         success_mock.assert_called_once_with("cloud-job-1", "printer-1")
 
+    def test_monitor_reports_failure_when_spooler_job_enters_error_status(self):
+        unavailable = SimpleNamespace(
+            available=False,
+            faulted=False,
+            fault_reasons=[],
+            printer_state=None,
+            printer_state_name="unknown",
+            error="connection refused",
+        )
+        printer_manager = MonitorPrinterManager([
+            {"exists": True, "status": "error"},
+        ])
+        handler = PrintJobHandler(
+            printer_manager=printer_manager,
+            api_client=None,
+            fault_probe=StaticFaultProbe(unavailable),
+        )
+
+        with patch("threading.Thread", ImmediateThread), \
+             patch("time.sleep"), \
+             patch.object(handler, "_report_job_failure") as failure_mock, \
+             patch.object(handler, "_report_job_success") as success_mock:
+            handler._monitor_job_completion(
+                "cloud-job-1",
+                "Microsoft Print to PDF",
+                42,
+                "printer-1",
+            )
+
+        self.assertEqual([("Microsoft Print to PDF", 42)], printer_manager.cancelled)
+        success_mock.assert_not_called()
+        failure_mock.assert_called_once()
+        self.assertIn("spooler job entered terminal error status", failure_mock.call_args.args[1])
+
     def test_monitor_reports_success_when_job_disappears_without_fault(self):
         printer_manager = MonitorPrinterManager([
             {"exists": False, "status": "completed_or_failed"},

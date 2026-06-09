@@ -17,13 +17,11 @@ export function bindPrinterActions(state, render) {
     const data = await requestAdmin("/printers/managed");
     state.managed = Array.isArray(data.items) ? data.items : [];
     state.defaultPrinterId = data.default_printer_id || "";
-    render();
   }
 
   async function loadDiscovered() {
     const data = await requestAdmin("/printers/discovered");
     state.discovered = Array.isArray(data.items) ? data.items : [];
-    render();
   }
 
   async function refreshPrinters(options = {}) {
@@ -34,8 +32,10 @@ export function bindPrinterActions(state, render) {
       await (showOverlay
         ? withPrinterOverlay("刷新打印机中...", () => Promise.all([loadManaged(), loadDiscovered()]))
         : Promise.all([loadManaged(), loadDiscovered()]));
+      state.printersLoadedOnce = true;
+      state.printersInvalidated = false;
       if (showToast) {
-        showAdminToast("刷新完毕", "success");
+        showAdminToast("刷新完成", "success");
       }
     } catch (error) {
       if (showToast) {
@@ -48,6 +48,17 @@ export function bindPrinterActions(state, render) {
     }
   }
 
+  async function ensurePrintersLoaded(options = {}) {
+    const { force = false, showToast = false, showOverlay = false } = options;
+    if (state.printersRefreshing) {
+      return;
+    }
+    if (!force && state.printersLoadedOnce && !state.printersInvalidated) {
+      return;
+    }
+    await refreshPrinters({ showToast, showOverlay });
+  }
+
   async function setDefaultPrinter(printerId) {
     if (!printerId || isActionPending(state, "default", printerId)) return;
     setActionPending(state, "default", printerId, true);
@@ -58,6 +69,7 @@ export function bindPrinterActions(state, render) {
         body: JSON.stringify({ printer_id: printerId }),
       });
       await loadManaged();
+      render();
       showAdminToast("默认打印机已更新", "success");
     } catch (error) {
       showAdminToast(error.message || "设置默认打印机失败", "error", 3600);
@@ -124,6 +136,7 @@ export function bindPrinterActions(state, render) {
         await loadManaged();
         return response;
       });
+      render();
       showAdminToast(result.message || "打印机已重新注册到云端", "success");
     } catch (error) {
       showAdminToast(error.message || "重新注册打印机失败", "error", 3600);
@@ -160,5 +173,5 @@ export function bindPrinterActions(state, render) {
     }
   });
 
-  return { refreshPrinters };
+  return { refreshPrinters, ensurePrintersLoaded };
 }

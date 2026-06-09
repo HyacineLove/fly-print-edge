@@ -14,6 +14,11 @@ export function createAdminState() {
     managed: [],
     discovered: [],
     defaultPrinterId: "",
+    startupEnabled: false,
+    startupLoading: false,
+    startupSaving: false,
+    printersLoadedOnce: false,
+    printersInvalidated: false,
     cloudStatus: null,
     lastApplyResult: null,
     pendingActions: new Set(),
@@ -33,8 +38,7 @@ export function configModel(state) {
   return state.config;
 }
 
-export function buildConfigPayload(state) {
-  const cfg = configModel(state);
+export function buildConfigPayloadFromConfig(cfg) {
   const rawMaxUpscale = cfg.settings.default_max_upscale;
   const normalizedMaxUpscale = rawMaxUpscale === "" || rawMaxUpscale == null ? "" : Number(rawMaxUpscale);
   const rawCopiesMin = cfg.settings.copies_min;
@@ -77,6 +81,10 @@ export function buildConfigPayload(state) {
         : [],
     },
   };
+}
+
+export function buildConfigPayload(state) {
+  return buildConfigPayloadFromConfig(configModel(state));
 }
 
 export function isDirty(state) {

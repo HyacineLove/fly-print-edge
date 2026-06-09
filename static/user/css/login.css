@@ -162,7 +162,7 @@ span {
   position: absolute;
   left: 204px;
   top: 50%;
-  transform: translateY(calc(-50% + 333px));
+  transform: translateY(calc(-50% + 305px));
   border-radius: 20px;
   overflow: hidden;
 }

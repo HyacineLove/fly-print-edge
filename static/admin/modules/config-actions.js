@@ -3,6 +3,7 @@ import { hideAdminLoading, showAdminLoading } from "./loading-overlay.js";
 import {
   addStaticPrinter,
   buildConfigPayload,
+  buildConfigPayloadFromConfig,
   deepClone,
   removeStaticPrinter,
   updateField,
@@ -29,19 +30,63 @@ export async function loadCloudStatus(state, render) {
   render();
 }
 
+export async function loadStartupState(state, render) {
+  state.startupLoading = true;
+  render();
+  try {
+    const result = await requestAdmin("/system/startup");
+    state.startupEnabled = !!result.enabled;
+  } finally {
+    state.startupLoading = false;
+    render();
+  }
+}
+
 function saveSuccessMessage(result) {
   const warnings = Array.isArray(result?.warnings) ? result.warnings.filter(Boolean) : [];
   const restartRequired = Array.isArray(result?.restart_required) ? result.restart_required : [];
   if (restartRequired.length) {
-    return `保存完毕，以下配置需重启后生效: ${restartRequired.join("、")}`;
+    return `保存完成，以下配置需重启后生效: ${restartRequired.join("、")}`;
   }
   if (warnings.length) {
-    return `保存完毕，注意: ${warnings.join("，")}`;
+    return `保存完成，请注意: ${warnings.join("；")}`;
   }
-  return "保存完毕";
+  return "保存完成";
 }
 
-export function bindConfigActions(state, render, refreshPrinters) {
+function printerSettingsSignature(config) {
+  return JSON.stringify(buildConfigPayloadFromConfig(config).printers);
+}
+
+function printerSettingsChanged(state) {
+  if (!state.config || !state.initialConfig) {
+    return false;
+  }
+  return printerSettingsSignature(state.config) !== printerSettingsSignature(state.initialConfig);
+}
+
+async function updateStartupState(state, render, enabled) {
+  if (state.startupSaving) {
+    return;
+  }
+  state.startupSaving = true;
+  render();
+  try {
+    const result = await requestAdmin("/system/startup", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+    state.startupEnabled = !!result.enabled;
+    showAdminToast(result.enabled ? "已开启开机自启" : "已关闭开机自启", "success");
+  } catch (error) {
+    showAdminToast(error.message || "更新开机自启失败", "error", 3600);
+  } finally {
+    state.startupSaving = false;
+    render();
+  }
+}
+
+export function bindConfigActions(state, render, ensurePrintersLoaded) {
   const saveBtn = document.getElementById("configSaveBtn");
   const checkBtn = document.getElementById("cloudCheckRegisterBtn");
   const nav = document.querySelector(".admin-nav");
@@ -49,6 +94,8 @@ export function bindConfigActions(state, render, refreshPrinters) {
 
   saveBtn?.addEventListener("click", async () => {
     if (!state.config || state.saving) return;
+
+    const shouldRefreshPrinters = printerSettingsChanged(state);
     state.saving = true;
     render();
     showAdminLoading("保存中...");
@@ -58,11 +105,13 @@ export function bindConfigActions(state, render, refreshPrinters) {
         body: JSON.stringify(buildConfigPayload(state)),
       });
       state.lastApplyResult = result;
-      await Promise.all([
-        loadConfig(state, render),
-        loadCloudStatus(state, render),
-        refreshPrinters({ showToast: false, showOverlay: false }),
-      ]);
+      await Promise.all([loadConfig(state, render), loadCloudStatus(state, render)]);
+      state.printersInvalidated = shouldRefreshPrinters;
+      if (shouldRefreshPrinters && state.activeSection === "printers") {
+        await ensurePrintersLoaded({ force: true, showToast: false, showOverlay: false });
+      } else {
+        render();
+      }
       showAdminToast(saveSuccessMessage(result), "success");
     } catch (error) {
       showAdminToast(error.message || "保存失败", "error", 3600);
@@ -101,6 +150,18 @@ export function bindConfigActions(state, render, refreshPrinters) {
     if (!section) return;
     state.activeSection = section;
     render();
+    if (section === "printers") {
+      ensurePrintersLoaded({ showToast: false, showOverlay: false }).catch((error) => {
+        showAdminToast(error.message || "加载打印机失败", "error", 3600);
+      });
+    }
+  });
+
+  panel?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id !== "runtime_autostart_enabled") return;
+    updateStartupState(state, render, target.checked).catch(() => {});
   });
 
   panel?.addEventListener("input", (event) => {
@@ -149,16 +210,12 @@ export function bindConfigActions(state, render, refreshPrinters) {
   });
 }
 
-export async function loadInitialAdminData(state, render, refreshPrinters) {
+export async function loadInitialAdminData(state, render) {
   state.loading = true;
   render();
   showAdminLoading("加载中...");
   try {
-    await Promise.all([
-      loadConfig(state, render),
-      loadCloudStatus(state, render),
-      refreshPrinters({ showToast: false, showOverlay: false }),
-    ]);
+    await Promise.all([loadConfig(state, render), loadCloudStatus(state, render), loadStartupState(state, render)]);
   } catch (error) {
     showAdminToast(error.message || "加载失败", "error", 3600);
   } finally {

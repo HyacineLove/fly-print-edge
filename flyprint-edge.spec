@@ -1,33 +1,43 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for FlyPrint Edge Kiosk (onedir build).
+PyInstaller spec for FlyPrint Edge.
 
-Build:
-    pyinstaller flyprint-edge.spec --clean --noconfirm
+Outputs a single onedir bundle containing:
+  - flyprint-edge.exe      (background FastAPI service)
+  - flyprint-launcher.exe  (GUI launcher + tray shell)
 """
 
-import os
+import importlib.util
 from pathlib import Path
 
 PROJECT_ROOT = Path(SPECPATH).resolve()
 
-# Hidden imports for packages with dynamic imports / C extensions
+required_modules = [
+    "pystray",
+]
+missing_required_modules = [name for name in required_modules if importlib.util.find_spec(name) is None]
+if missing_required_modules:
+    raise SystemExit(
+        "Missing required build dependencies: "
+        + ", ".join(missing_required_modules)
+        + ". Install them into the build venv before running PyInstaller."
+    )
+
 hidden_imports = [
-    # pywin32 COM modules
-    "win32print",
     "win32api",
-    "win32gui",
-    "win32timezone",
     "win32com",
     "win32com.client",
     "win32com.server",
+    "win32gui",
+    "win32print",
+    "win32timezone",
+    "win32ui",
     "pythoncom",
-    # pymupdf (fitz)
     "fitz",
-    # Pillow image plugins
     "PIL._imaging",
     "PIL._webp",
-    # FastAPI / Starlette / Uvicorn
+    "pystray",
+    "pystray._win32",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",
@@ -40,12 +50,10 @@ hidden_imports = [
     "starlette.middleware.cors",
     "pydantic",
     "pydantic.deprecated",
-    # websockets
     "websockets",
     "websockets.legacy",
     "websockets.legacy.client",
     "websockets.legacy.server",
-    # misc
     "qrcode",
     "qrcode.image",
     "qrcode.image.pil",
@@ -54,22 +62,18 @@ hidden_imports = [
     "zeroconf",
 ]
 
-# Collect entire static/ directory as data files
 static_src = PROJECT_ROOT / "static"
-static_dst = "static"
 datas = []
 if static_src.is_dir():
-    for f in sorted(static_src.rglob("*")):
-        if f.is_file():
-            rel = f.relative_to(PROJECT_ROOT)
-            datas.append((str(f), str(rel.parent)))
+    for file_path in sorted(static_src.rglob("*")):
+        if file_path.is_file():
+            rel = file_path.relative_to(PROJECT_ROOT)
+            datas.append((str(file_path), str(rel.parent)))
 
-# Include config.example.json
 config_example = PROJECT_ROOT / "config.example.json"
 if config_example.is_file():
     datas.append((str(config_example), "."))
 
-# Exclusions
 excludes = [
     "tkinter",
     "test",
@@ -81,8 +85,8 @@ excludes = [
     "pkg_resources",
 ]
 
-a = Analysis(
-    [str(PROJECT_ROOT / "main.py")],
+service_analysis = Analysis(
+    [str(PROJECT_ROOT / "service_main.py")],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,
@@ -94,11 +98,25 @@ a = Analysis(
     noarchive=False,
 )
 
-pyz = PYZ(a.pure)
+launcher_analysis = Analysis(
+    [str(PROJECT_ROOT / "launcher.py")],
+    pathex=[str(PROJECT_ROOT)],
+    binaries=[],
+    datas=[],
+    hiddenimports=hidden_imports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    noarchive=False,
+)
 
-exe = EXE(
-    pyz,
-    a.scripts,
+service_pyz = PYZ(service_analysis.pure)
+launcher_pyz = PYZ(launcher_analysis.pure)
+
+service_exe = EXE(
+    service_pyz,
+    service_analysis.scripts,
     [],
     exclude_binaries=True,
     name="flyprint-edge",
@@ -106,7 +124,26 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,   # True = shows console (for server logging). Set False for silent.
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,
+)
+
+launcher_exe = EXE(
+    launcher_pyz,
+    launcher_analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="flyprint-launcher",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -116,9 +153,12 @@ exe = EXE(
 )
 
 coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
+    service_exe,
+    launcher_exe,
+    service_analysis.binaries,
+    launcher_analysis.binaries,
+    service_analysis.datas,
+    launcher_analysis.datas,
     strip=False,
     upx=True,
     upx_exclude=[],

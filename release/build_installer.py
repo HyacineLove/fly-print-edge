@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import shutil
 import subprocess
@@ -30,7 +31,6 @@ SPEC_FILE = PROJECT_ROOT / "flyprint-edge.spec"
 ISS_FILE = PROJECT_ROOT / "installer.iss"
 DIST_DIR = PROJECT_ROOT / "dist"
 EXE_DIR = DIST_DIR / "flyprint-edge"
-VBS_FILE = PROJECT_ROOT / "launch.vbs"
 CONFIG_EXAMPLE = PROJECT_ROOT / "config.example.json"
 
 # Reasonable defaults for Inno Setup install locations
@@ -47,6 +47,10 @@ VENV_PYTHON_DIRS = [
     PROJECT_ROOT / "venv" / "Scripts",
     PROJECT_ROOT / ".venv" / "Scripts",
 ]
+REQUIRED_BUILD_MODULES = [
+    "PyInstaller",
+    "pystray",
+]
 
 
 def find_venv_python() -> str:
@@ -56,6 +60,21 @@ def find_venv_python() -> str:
         if candidate.is_file():
             return str(candidate)
     return sys.executable
+
+
+def ensure_build_dependencies() -> None:
+    missing = []
+    for module_name in REQUIRED_BUILD_MODULES:
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            missing.append(module_name)
+    if missing:
+        raise RuntimeError(
+            "Missing build dependencies in the active Python environment: "
+            + ", ".join(missing)
+            + ". Install them before building the installer."
+        )
 
 
 def find_iscc() -> str | None:
@@ -124,6 +143,7 @@ def run_pyinstaller(verbose: bool = False) -> int:
         return result.returncode
 
     print(f"  -> {EXE_DIR / 'flyprint-edge.exe'}")
+    print(f"  -> {EXE_DIR / 'flyprint-launcher.exe'}")
     return 0
 
 
@@ -156,6 +176,9 @@ def run_inno_setup(version: str, verbose: bool = False) -> int:
 
     if not (EXE_DIR / "flyprint-edge.exe").is_file():
         print(f"ERROR: PyInstaller output not found. Run PyInstaller first.", file=sys.stderr)
+        return 1
+    if not (EXE_DIR / "flyprint-launcher.exe").is_file():
+        print("ERROR: Launcher output not found. Run PyInstaller first.", file=sys.stderr)
         return 1
 
     # Pass version via define
@@ -214,6 +237,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     version = resolve_version(args.version)
+
+    try:
+        ensure_build_dependencies()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     if not args.skip_pyinstaller:
         rc = run_pyinstaller(verbose=args.verbose)

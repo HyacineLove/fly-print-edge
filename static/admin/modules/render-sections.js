@@ -55,7 +55,10 @@ function updateToolbar(state) {
   }
 
   const cloudStatusText = elements.cloudStatusText();
-  if (!cloudStatusText) return;
+  if (!cloudStatusText) {
+    return;
+  }
+
   const status = state.cloudStatus;
   cloudStatusText.classList.remove("status-ok", "status-warn", "status-info");
 
@@ -117,7 +120,14 @@ function renderCloudSection(state) {
       </div>
       <div class="field">
         <label for="cloud_client_secret">客户端密钥</label>
-        <input id="cloud_client_secret" type="password" data-section="cloud" data-key="client_secret" value="" placeholder="${cfg.client_secret_configured ? "已设置" : "未设置"}">
+        <input
+          id="cloud_client_secret"
+          type="password"
+          data-section="cloud"
+          data-key="client_secret"
+          value=""
+          placeholder="${cfg.client_secret_configured ? "已设置" : "未设置"}"
+        >
       </div>
       <div class="field">
         <label for="cloud_node_name">节点名称</label>
@@ -129,7 +139,14 @@ function renderCloudSection(state) {
       </div>
       <div class="field">
         <label for="cloud_heartbeat_interval">心跳间隔(秒)</label>
-        <input id="cloud_heartbeat_interval" type="number" min="1" data-section="cloud" data-key="heartbeat_interval" value="${escapeHtml(cfg.heartbeat_interval || 30)}">
+        <input
+          id="cloud_heartbeat_interval"
+          type="number"
+          min="1"
+          data-section="cloud"
+          data-key="heartbeat_interval"
+          value="${escapeHtml(cfg.heartbeat_interval || 30)}"
+        >
       </div>
       <div class="field">
         <label>当前节点 ID</label>
@@ -145,7 +162,7 @@ function renderSettingsSection(state) {
     <div class="section-header">
       <div>
         <h2>打印默认设置</h2>
-        <p>配置默认纸张、缩放和用户端可选的打印份数范围。</p>
+        <p>配置默认纸张、缩放和用户侧可选份数范围。</p>
       </div>
     </div>
     <div class="config-grid">
@@ -185,6 +202,8 @@ function renderSettingsSection(state) {
 
 function renderRuntimeSection(state) {
   const cfg = configModel(state).network;
+  const startupChecked = state.startupEnabled ? "checked" : "";
+  const startupDisabled = state.startupLoading || state.startupSaving ? "disabled" : "";
   return `
     <div class="section-header">
       <div>
@@ -201,6 +220,10 @@ function renderRuntimeSection(state) {
         <label for="network_port">监听端口</label>
         <input id="network_port" type="number" min="1" max="65535" data-section="network" data-key="port" value="${escapeHtml(cfg.port || 7860)}">
       </div>
+      <div class="field field-checkbox">
+        <label for="runtime_autostart_enabled">开机自启并自动打开用户页</label>
+        <input id="runtime_autostart_enabled" type="checkbox" ${startupChecked} ${startupDisabled}>
+      </div>
     </div>
   `;
 }
@@ -208,7 +231,7 @@ function renderRuntimeSection(state) {
 function renderStaticPrinterRows(state) {
   const items = configModel(state).printers.static_list || [];
   if (!items.length) {
-    return '<div class="section-note">当前没有静态打印机条目，仅在“静态发现”模式下会使用。</div>';
+    return '<div class="section-note">当前没有静态打印机条目，仅在“静态发现”模式下使用。</div>';
   }
 
   return `
@@ -362,7 +385,9 @@ function renderPrintersSection(state) {
 
 function renderPanel(state) {
   const panel = elements.configPanel();
-  if (!panel) return;
+  if (!panel) {
+    return;
+  }
 
   switch (state.activeSection) {
     case "settings":

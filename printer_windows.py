@@ -11,6 +11,8 @@ import shutil
 from typing import List, Dict, Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+from printer_capability_summary import build_printer_capability_summary
+from windows_subprocess import run_hidden
 
 # Windows特定导入
 if platform.system() == "Windows":
@@ -733,6 +735,7 @@ class WindowsEnterprisePrinter:
                     return {
                         "exists": True,
                         "status": self._get_job_status_text(job["Status"]),
+                        "status_code": job.get("Status", 0),
                         "pages_printed": job["PagesPrinted"],
                         "total_pages": job["TotalPages"]
                     }
@@ -2248,7 +2251,48 @@ class WindowsEnterprisePrinter:
         except Exception as e:
             print(f"获取打印机能力失败: {e}")
             return {}
-    
+
+    def get_printer_capability_summary(self, printer_name: str) -> Dict[str, Any]:
+        if not self.available:
+            return build_printer_capability_summary(None)
+
+        printer_handle = None
+        try:
+            printer_handle = win32print.OpenPrinter(
+                printer_name, {"DesiredAccess": win32print.PRINTER_ACCESS_USE}
+            )
+            printer_info = win32print.GetPrinter(printer_handle, 2)
+            port_name = printer_info.get("pPortName", "")
+            capabilities = {
+                "duplex_supported": None,
+                "color_supported": None,
+            }
+
+            try:
+                capabilities["duplex_supported"] = bool(
+                    win32print.DeviceCapabilities(printer_name, port_name, win32con.DC_DUPLEX)
+                )
+            except Exception:
+                logger.debug("Failed to resolve duplex support for %s", printer_name, exc_info=True)
+
+            try:
+                capabilities["color_supported"] = bool(
+                    win32print.DeviceCapabilities(printer_name, port_name, win32con.DC_COLORDEVICE)
+                )
+            except Exception:
+                logger.debug("Failed to resolve color support for %s", printer_name, exc_info=True)
+
+            return build_printer_capability_summary(capabilities)
+        except Exception as e:
+            logger.warning("获取打印机轻量摘要失败: %s", e)
+            return build_printer_capability_summary(None)
+        finally:
+            if printer_handle:
+                try:
+                    win32print.ClosePrinter(printer_handle)
+                except Exception:
+                    logger.debug("Closing printer handle failed", exc_info=True)
+
     def _get_printer_status_text(self, status: int) -> str:
         """获取打印机状态文本"""
         if status == 0:
@@ -2298,7 +2342,7 @@ class WindowsEnterprisePrinter:
                 'ExtendedPrinterStatus, DetectedErrorState, Availability '
                 '| ConvertTo-Json'
             )
-            result = subprocess.run(
+            result = run_hidden(
                 ["powershell", "-NoProfile", "-Command", powershell_cmd],
                 capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=15
             )
@@ -2400,7 +2444,7 @@ class WindowsEnterprisePrinter:
                 'DetectedErrorState, Availability '
                 '| Format-List'
             )
-            result = subprocess.run(
+            result = run_hidden(
                 ["powershell", "-NoProfile", "-Command", powershell_cmd],
                 capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=10
             )

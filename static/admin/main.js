@@ -5,9 +5,9 @@ import { createAdminState } from "./modules/state.js";
 
 const state = createAdminState();
 const render = () => renderAdminApp(state);
-const { refreshPrinters } = bindPrinterActions(state, render);
+const { ensurePrintersLoaded } = bindPrinterActions(state, render);
 
-bindConfigActions(state, render, refreshPrinters);
+bindConfigActions(state, render, ensurePrintersLoaded);
 render();
 
-void loadInitialAdminData(state, render, refreshPrinters);
+void loadInitialAdminData(state, render);
