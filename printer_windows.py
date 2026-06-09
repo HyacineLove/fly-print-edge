@@ -335,6 +335,33 @@ class WindowsEnterprisePrinter:
     def _calculate_scaled_size(self, src_w: int, src_h: int, dst_w: int, dst_h: int, scale_mode: str, max_upscale: float):
         return compute_scaled_size(src_w, src_h, dst_w, dst_h, scale_mode, max_upscale)
 
+    def _resolve_pdf_bitmap_render_dpi(self, printer_dpi_x: Any, printer_dpi_y: Any, options: Optional[Dict[str, Any]] = None) -> int:
+        try:
+            dpi_x = int(printer_dpi_x)
+            dpi_y = int(printer_dpi_y)
+        except (TypeError, ValueError):
+            dpi_x = 0
+            dpi_y = 0
+
+        printer_effective_dpi = min(dpi_x, dpi_y) if dpi_x > 0 and dpi_y > 0 else 300
+        configured_dpi = None
+        if options and options.get("pdf_bitmap_dpi") not in (None, ""):
+            configured_dpi = options.get("pdf_bitmap_dpi")
+        else:
+            setting_dpi = self._get_setting("pdf_bitmap_dpi", None)
+            if setting_dpi not in (None, ""):
+                configured_dpi = setting_dpi
+
+        if configured_dpi is None:
+            requested_dpi = printer_effective_dpi
+        else:
+            try:
+                requested_dpi = int(configured_dpi)
+            except (TypeError, ValueError):
+                requested_dpi = printer_effective_dpi
+
+        return max(120, min(printer_effective_dpi, requested_dpi))
+
     def _find_libreoffice_path(self):
         configured = self._resolve_path(self._get_setting("libreoffice_path"))
         if configured:
@@ -1609,11 +1636,13 @@ class WindowsEnterprisePrinter:
                 hdc = win32ui.CreateDC()
                 hdc.CreatePrinterDC(queue_printer_name)
 
-            dpi_setting = options.get("pdf_bitmap_dpi") or self._get_setting("pdf_bitmap_dpi", 150)
-            try:
-                render_dpi = max(120, min(300, int(dpi_setting)))
-            except (ValueError, TypeError):
-                render_dpi = 150
+            printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
+            printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
+            printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
+            printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
+            render_dpi = self._resolve_pdf_bitmap_render_dpi(printer_dpi_x, printer_dpi_y, options)
+            draw_dpi_x = printer_dpi_x if printer_dpi_x and printer_dpi_x > 0 else render_dpi
+            draw_dpi_y = printer_dpi_y if printer_dpi_y and printer_dpi_y > 0 else render_dpi
 
             zoom = render_dpi / 72.0
             matrix = fitz.Matrix(zoom, zoom)
@@ -1621,6 +1650,18 @@ class WindowsEnterprisePrinter:
             page_count = len(document)
             if page_count <= 0:
                 return {"success": False, "message": "PDF无可打印页面"}
+
+            logger.info(
+                "pdf_bitmap_print printer=%r document=%r printer_dpi=%sx%s render_dpi=%s printable=%sx%s pages=%s",
+                queue_printer_name,
+                os.path.basename(file_path),
+                printer_dpi_x,
+                printer_dpi_y,
+                render_dpi,
+                printer_width,
+                printer_height,
+                page_count,
+            )
 
             hdc.StartDoc(document_name)
             for page_index in range(page_count):
@@ -1635,10 +1676,6 @@ class WindowsEnterprisePrinter:
                 old_bmp = None
                 try:
                     hdc.StartPage()
-                    printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
-                    printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
-                    printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
-                    printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
 
                     img_width, img_height = img.size
                     page_rect = getattr(page, "rect", None) or getattr(page, "mediabox", None)
@@ -1649,7 +1686,20 @@ class WindowsEnterprisePrinter:
                     x_offset, y_offset, draw_width, draw_height, _ = compute_physical_fit_rect(
                         source_inches,
                         (printer_width, printer_height),
-                        (printer_dpi_x, printer_dpi_y),
+                        (draw_dpi_x, draw_dpi_y),
+                    )
+                    logger.info(
+                        "pdf_bitmap_page printer=%r document=%r page=%s/%s render_pixels=%sx%s target_rect=%s,%s,%sx%s",
+                        queue_printer_name,
+                        os.path.basename(file_path),
+                        page_index + 1,
+                        page_count,
+                        img_width,
+                        img_height,
+                        x_offset,
+                        y_offset,
+                        draw_width,
+                        draw_height,
                     )
 
                     hbmp = win32gui.LoadImage(0, temp_bmp, 0, 0, 0, 16)

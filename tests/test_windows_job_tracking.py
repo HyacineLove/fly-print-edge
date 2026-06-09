@@ -252,6 +252,177 @@ class WindowsJobTrackingTests(unittest.TestCase):
         bitmap_mock.assert_called_once_with("HP LaserJet Pro 3288dn", os.path.abspath("target.pdf"), "target.pdf", {})
         sumatra_mock.assert_not_called()
 
+    def run_pdf_bitmap_with_fake_printer_dpi(self, printer_dpi_x, printer_dpi_y, print_options=None):
+        printer = self.make_printer()
+        matrix_calls = []
+
+        class FakePixmap:
+            width = 600
+            height = 900
+            samples = b"\xff" * (600 * 900 * 3)
+
+        class FakePage:
+            rect = types.SimpleNamespace(width=288.0, height=432.0)
+
+            def get_pixmap(self, matrix=None, alpha=False):
+                return FakePixmap()
+
+        class FakeDocument:
+            def __len__(self):
+                return 1
+
+            def load_page(self, index):
+                return FakePage()
+
+            def close(self):
+                return None
+
+        class FakeMemDc:
+            def SelectObject(self, obj):
+                return "old"
+
+            def DeleteDC(self):
+                return None
+
+        class FakeHdc:
+            def CreatePrinterDC(self, printer_name):
+                return None
+
+            def StartDoc(self, job_name):
+                return 777
+
+            def StartPage(self):
+                return None
+
+            def GetDeviceCaps(self, cap):
+                values = {
+                    8: 2480,
+                    10: 3507,
+                    88: printer_dpi_x,
+                    90: printer_dpi_y,
+                }
+                return values[cap]
+
+            def CreateCompatibleDC(self):
+                return FakeMemDc()
+
+            def StretchBlt(self, *args):
+                return None
+
+            def EndPage(self):
+                return None
+
+            def EndDoc(self):
+                return None
+
+            def DeleteDC(self):
+                return None
+
+        fake_win32print = types.SimpleNamespace(
+            PRINTER_ACCESS_USE=8,
+            OpenPrinter=Mock(return_value="printer-handle"),
+            ClosePrinter=Mock(),
+            GetPrinter=Mock(return_value={"pDevMode": None}),
+        )
+        fake_win32ui = types.SimpleNamespace(
+            CreateDC=lambda: FakeHdc(),
+            CreateDCFromHandle=lambda handle: FakeHdc(),
+            CreateBitmapFromHandle=lambda handle: f"bitmap-{handle}",
+        )
+        fake_win32con = types.SimpleNamespace(
+            HORZRES=8,
+            VERTRES=10,
+            LOGPIXELSX=88,
+            LOGPIXELSY=90,
+            SRCCOPY=0x00CC0020,
+            DMPAPER_A4=9,
+            DMPAPER_LETTER=1,
+            DMPAPER_LEGAL=5,
+            DMPAPER_A3=8,
+            DMPAPER_A5=11,
+            DM_PAPERSIZE=0x2,
+            DMDUP_SIMPLEX=1,
+            DMDUP_VERTICAL=2,
+            DMDUP_HORIZONTAL=3,
+            DM_DUPLEX=0x1000,
+            DMCOLOR_MONOCHROME=1,
+            DMCOLOR_COLOR=2,
+            DM_COLOR=0x800,
+            DM_COPIES=0x100,
+        )
+        fake_win32gui = types.SimpleNamespace(
+            CreateDC=Mock(return_value="hdc-handle"),
+            LoadImage=Mock(return_value="hbmp"),
+            DeleteObject=Mock(),
+        )
+
+        def fake_matrix(x, y):
+            matrix_calls.append((x, y))
+            return (x, y)
+
+        fake_fitz = types.SimpleNamespace(
+            Matrix=fake_matrix,
+            open=Mock(return_value=FakeDocument()),
+        )
+
+        with patch("printer_windows.win32print", fake_win32print, create=True), \
+             patch.dict(
+                 sys.modules,
+                 {
+                     "win32ui": fake_win32ui,
+                     "win32con": fake_win32con,
+                     "win32gui": fake_win32gui,
+                     "fitz": fake_fitz,
+                 },
+             ), \
+             patch.object(
+                 printer,
+                 "_prepare_print_job_tracking",
+                 return_value={"queue_name": "HP LaserJet Pro 3288dn", "before_job_ids": {1}},
+             ), \
+             patch.object(printer, "_get_latest_job_id", return_value=42), \
+             patch.object(printer, "_get_setting", return_value=None):
+            result = printer._print_pdf_file_bitmap(
+                "HP LaserJet Pro 3288dn",
+                "target.pdf",
+                "target.pdf",
+                print_options or {},
+            )
+
+        return result, matrix_calls
+
+    def test_pdf_bitmap_default_render_dpi_uses_target_printer_dpi(self):
+        result, matrix_calls = self.run_pdf_bitmap_with_fake_printer_dpi(600, 600)
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual([(600 / 72.0, 600 / 72.0)], matrix_calls)
+
+    def test_pdf_bitmap_explicit_render_dpi_can_lower_printer_dpi(self):
+        result, matrix_calls = self.run_pdf_bitmap_with_fake_printer_dpi(
+            600,
+            600,
+            {"pdf_bitmap_dpi": 300},
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual([(300 / 72.0, 300 / 72.0)], matrix_calls)
+
+    def test_pdf_bitmap_explicit_render_dpi_is_clamped_to_printer_dpi(self):
+        result, matrix_calls = self.run_pdf_bitmap_with_fake_printer_dpi(
+            600,
+            600,
+            {"pdf_bitmap_dpi": 1200},
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual([(600 / 72.0, 600 / 72.0)], matrix_calls)
+
+    def test_pdf_bitmap_invalid_printer_dpi_falls_back_to_300(self):
+        result, matrix_calls = self.run_pdf_bitmap_with_fake_printer_dpi(0, 0)
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual([(300 / 72.0, 300 / 72.0)], matrix_calls)
+
     def test_pdf_bitmap_print_uses_queue_tracked_job_id_and_physical_draw_size(self):
         printer = self.make_printer()
         stretch_calls = []
