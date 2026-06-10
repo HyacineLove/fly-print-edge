@@ -1000,6 +1000,48 @@ class PrintJobHandler:
             },
         )
 
+    def _report_detected_printer_fault(
+        self,
+        cloud_job_id: str,
+        printer_name: str,
+        local_job_id,
+        printer_id: str,
+        fault_result,
+        cancel_local_job: bool,
+    ) -> None:
+        cancel_success = True
+        cancel_message = ""
+        if cancel_local_job:
+            cancel_success, cancel_message = self._cancel_local_print_job(
+                printer_name,
+                local_job_id,
+            )
+
+        fault_state = self.fault_state_store.update_from_probe(
+            printer_id=printer_id,
+            printer_name=printer_name,
+            result=fault_result,
+        )
+        failure_message = fault_state.get("message") or self._format_fault_failure_message(fault_result)
+        if not cancel_success:
+            failure_message = (
+                f"{failure_message}; 本地任务取消失败: {cancel_message}"
+            )
+        logger.error(
+            "job_failed_after_cancel cloud_job_id=%s printer=%r local_job_id=%s cancel_success=%s message=%r",
+            cloud_job_id,
+            printer_name,
+            local_job_id,
+            cancel_success,
+            failure_message,
+        )
+        self._report_job_failure(
+            cloud_job_id,
+            failure_message,
+            error_code="printer_fault",
+            local_extra={"printer_fault": fault_state},
+        )
+
     def _monitor_job_completion(
         self,
         cloud_job_id: str,
@@ -1042,6 +1084,18 @@ class PrintJobHandler:
                         local_job_id,
                     )
                     if not job_status.get("exists", True):
+                        fault_result = self._probe_printer_fault(printer_id, printer_name)
+                        if fault_result and getattr(fault_result, "available", False) and getattr(fault_result, "faulted", False):
+                            self._report_detected_printer_fault(
+                                cloud_job_id,
+                                printer_name,
+                                local_job_id,
+                                printer_id,
+                                fault_result,
+                                cancel_local_job=False,
+                            )
+                            self._refresh_printer_status(printer_id, printer_name)
+                            return
                         logger.info(
                             "spooler job removed; reporting completed cloud_job_id=%s local_job_id=%s",
                             cloud_job_id,
@@ -1053,33 +1107,13 @@ class PrintJobHandler:
 
                     fault_result = self._probe_printer_fault(printer_id, printer_name)
                     if fault_result and getattr(fault_result, "available", False) and getattr(fault_result, "faulted", False):
-                        cancel_success, cancel_message = self._cancel_local_print_job(
-                            printer_name,
-                            local_job_id,
-                        )
-                        fault_state = self.fault_state_store.update_from_probe(
-                            printer_id=printer_id,
-                            printer_name=printer_name,
-                            result=fault_result,
-                        )
-                        failure_message = fault_state.get("message") or self._format_fault_failure_message(fault_result)
-                        if not cancel_success:
-                            failure_message = (
-                                f"{failure_message}; 本地任务取消失败: {cancel_message}"
-                            )
-                        logger.error(
-                            "job_failed_after_cancel cloud_job_id=%s printer=%r local_job_id=%s cancel_success=%s message=%r",
+                        self._report_detected_printer_fault(
                             cloud_job_id,
                             printer_name,
                             local_job_id,
-                            cancel_success,
-                            failure_message,
-                        )
-                        self._report_job_failure(
-                            cloud_job_id,
-                            failure_message,
-                            error_code="printer_fault",
-                            local_extra={"printer_fault": fault_state},
+                            printer_id,
+                            fault_result,
+                            cancel_local_job=True,
                         )
                         self._refresh_printer_status(printer_id, printer_name)
                         return

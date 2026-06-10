@@ -370,6 +370,41 @@ class PrintJobHandlerBindingTests(unittest.TestCase):
         failure_mock.assert_not_called()
         success_mock.assert_called_once_with("cloud-job-1", "printer-1")
 
+    def test_monitor_reports_fault_when_job_disappears_but_printer_is_faulted(self):
+        printer_manager = MonitorPrinterManager([
+            {"exists": False, "status": "completed_or_failed"},
+        ])
+        fault_result = SimpleNamespace(
+            available=True,
+            faulted=True,
+            fault_reasons=["media-empty-error", "media-needed-error"],
+            printer_state=5,
+            printer_state_name="stopped",
+            printer_state_reasons=["media-empty-error", "media-needed-error"],
+            error="",
+        )
+        handler = PrintJobHandler(
+            printer_manager=printer_manager,
+            api_client=None,
+            fault_probe=StaticFaultProbe(fault_result),
+            fault_state_store=PrinterFaultStateStore(),
+        )
+
+        with patch("threading.Thread", ImmediateThread), \
+             patch("time.sleep"), \
+             patch.object(handler, "_report_job_failure") as failure_mock, \
+             patch.object(handler, "_report_job_success") as success_mock:
+            handler._monitor_job_completion(
+                "cloud-job-1",
+                "Microsoft Print to PDF",
+                42,
+                "printer-1",
+            )
+
+        success_mock.assert_not_called()
+        failure_mock.assert_called_once()
+        self.assertEqual("printer_fault", failure_mock.call_args.kwargs["error_code"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,89 @@ class PrinterFaultStateTests(unittest.TestCase):
         self.assertEqual("ready", restored["reason_code"])
         self.assertEqual([], restored["raw_reasons"])
 
+    def test_store_keeps_media_fault_until_probe_reasons_are_clean(self):
+        store = PrinterFaultStateStore()
+
+        fault = store.update_from_probe(
+            printer_id="printer-1",
+            printer_name="HP",
+            result=SimpleNamespace(
+                available=True,
+                faulted=True,
+                fault_reasons=["media-empty-error", "media-needed-error"],
+                printer_state=5,
+                printer_state_name="stopped",
+                printer_state_reasons=["media-empty-error", "media-needed-error"],
+            ),
+        )
+
+        self.assertTrue(fault["faulted"])
+        self.assertEqual("media-empty-error", fault["reason_code"])
+
+        still_faulted = store.update_from_probe(
+            printer_id="printer-1",
+            printer_name="HP",
+            result=SimpleNamespace(
+                available=True,
+                faulted=False,
+                fault_reasons=["media-empty-report"],
+                printer_state=3,
+                printer_state_name="idle",
+                printer_state_reasons=["media-empty-report"],
+            ),
+        )
+
+        self.assertTrue(still_faulted["faulted"])
+        self.assertEqual("media-empty-error", still_faulted["reason_code"])
+
+        restored = store.update_from_probe(
+            printer_id="printer-1",
+            printer_name="HP",
+            result=SimpleNamespace(
+                available=True,
+                faulted=False,
+                fault_reasons=[],
+                printer_state=3,
+                printer_state_name="idle",
+                printer_state_reasons=["none"],
+            ),
+        )
+
+        self.assertFalse(restored["faulted"])
+        self.assertEqual("ready", restored["reason_code"])
+
+    def test_store_keeps_same_fault_family_until_probe_reasons_are_clean(self):
+        store = PrinterFaultStateStore()
+
+        store.update_from_probe(
+            printer_id="printer-1",
+            printer_name="HP",
+            result=SimpleNamespace(
+                available=True,
+                faulted=True,
+                fault_reasons=["cover-open-error"],
+                printer_state=5,
+                printer_state_name="stopped",
+                printer_state_reasons=["cover-open-error"],
+            ),
+        )
+
+        still_faulted = store.update_from_probe(
+            printer_id="printer-1",
+            printer_name="HP",
+            result=SimpleNamespace(
+                available=True,
+                faulted=False,
+                fault_reasons=["cover-open-report"],
+                printer_state=3,
+                printer_state_name="idle",
+                printer_state_reasons=["cover-open-report"],
+            ),
+        )
+
+        self.assertTrue(still_faulted["faulted"])
+        self.assertEqual("cover-open-error", still_faulted["reason_code"])
+
 
 if __name__ == "__main__":
     unittest.main()

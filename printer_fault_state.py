@@ -41,6 +41,28 @@ FAULT_GROUPS = [
     ),
 ]
 
+STICKY_FAULT_REASON_FAMILIES = (
+    ("media", "paper"),
+    ("jam",),
+    ("toner", "ink", "marker-supply"),
+    ("door", "cover"),
+    ("tray",),
+    ("offline",),
+)
+
+STILL_FAULT_LIKE_TOKENS = (
+    "empty",
+    "needed",
+    "jam",
+    "low",
+    "open",
+    "missing",
+    "offline",
+    "error",
+    "warning",
+    "report",
+)
+
 
 def _normalize_reasons(reasons: Optional[Iterable[Any]]) -> list[str]:
     normalized = []
@@ -49,6 +71,22 @@ def _normalize_reasons(reasons: Optional[Iterable[Any]]) -> list[str]:
         if text and text.lower() != "none":
             normalized.append(text)
     return normalized
+
+
+def _lower_reason_set(reasons: Optional[Iterable[Any]]) -> set[str]:
+    return {reason.lower() for reason in _normalize_reasons(reasons)}
+
+
+def _has_family_reason(reasons: set[str], family: tuple[str, ...]) -> bool:
+    return any(any(token in reason for token in family) for reason in reasons)
+
+
+def _still_reports_fault(reasons: set[str], family: tuple[str, ...]) -> bool:
+    return any(
+        any(token in reason for token in family)
+        and any(marker in reason for marker in STILL_FAULT_LIKE_TOKENS)
+        for reason in reasons
+    )
 
 
 def map_ipp_fault_reasons(reasons: Optional[Iterable[Any]]) -> dict[str, Any]:
@@ -124,6 +162,26 @@ class PrinterFaultStateStore:
             self._state = state
             return deepcopy(self._state)
 
+    def _should_keep_fault_until_clean_probe(self, result: Any) -> bool:
+        with self._lock:
+            state = deepcopy(self._state)
+
+        if not state.get("faulted"):
+            return False
+
+        current_reasons = _lower_reason_set(state.get("raw_reasons", []))
+        reason_code = str(state.get("reason_code") or "").strip().lower()
+        if reason_code:
+            current_reasons.add(reason_code)
+
+        probe_reasons = _lower_reason_set(getattr(result, "fault_reasons", []))
+        probe_reasons |= _lower_reason_set(getattr(result, "printer_state_reasons", []))
+        return any(
+            _has_family_reason(current_reasons, family)
+            and _still_reports_fault(probe_reasons, family)
+            for family in STICKY_FAULT_REASON_FAMILIES
+        )
+
     def update_from_probe(
         self,
         printer_id: str = None,
@@ -137,5 +195,7 @@ class PrinterFaultStateStore:
                 raw_reasons=getattr(result, "fault_reasons", []),
             )
         if result and getattr(result, "available", False):
+            if self._should_keep_fault_until_clean_probe(result):
+                return self.get_state()
             return self.clear(printer_id=printer_id, printer_name=printer_name)
         return self.get_state()
