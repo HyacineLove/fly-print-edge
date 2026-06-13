@@ -21,6 +21,7 @@ class InteractiveSessionManager:
                 "file_url": None,
                 "file_name": None,
                 "file_type": None,
+                "content_hash": None,
                 "job_id": None,
                 "submitted": False,
                 "error_code": None,
@@ -62,6 +63,7 @@ class InteractiveSessionManager:
             self._active_session["file_url"] = file_url
             self._active_session["file_name"] = data.get("file_name")
             self._active_session["file_type"] = data.get("file_type")
+            self._active_session["content_hash"] = data.get("content_hash")
             self._active_session["state"] = "preview_ready"
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
@@ -188,7 +190,7 @@ class InteractiveSessionManager:
                     "printer_fault": None,
                 }
 
-            return {
+            snapshot = {
                 "active": True,
                 "session_id": self._active_session["session_id"],
                 "state": self._active_session.get("state") or "idle",
@@ -202,6 +204,9 @@ class InteractiveSessionManager:
                 "error_message": self._active_session.get("error_message"),
                 "printer_fault": deepcopy(self._active_session.get("printer_fault")),
             }
+            if self._active_session.get("content_hash"):
+                snapshot["content_hash"] = self._active_session.get("content_hash")
+            return snapshot
 
     def clear_session(self, session_id: Optional[str] = None) -> bool:
         with self._lock:

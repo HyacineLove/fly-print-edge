@@ -223,6 +223,7 @@ async function renderPreview(pageIndex = 0, blockUi = false) {
       file_url: state.file.file_url,
       file_name: state.file.file_name,
       file_type: state.file.file_type,
+      content_hash: state.file.content_hash,
       options: {
         ...state.options,
         page_index: pageIndex,

@@ -247,6 +247,7 @@ export function handlePreviewEvent(data, sseConnection = null) {
     file_url: data.file_url,
     file_name: data.file_name || "文档",
     file_type: data.file_type || "",
+    content_hash: data.content_hash,
     task_token: data.task_token || state.file?.task_token || null,
     job_id: data.job_id || null,
     page_count: 1,

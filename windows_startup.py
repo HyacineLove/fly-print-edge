@@ -6,6 +6,7 @@ from pathlib import Path
 
 APP_RUN_VALUE_NAME = "FlyPrint Edge"
 RUN_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+LAUNCHER_EXE_NAME = "flyprint-launcher.exe"
 
 
 def build_startup_command(launcher_path: Path) -> str:
@@ -14,8 +15,8 @@ def build_startup_command(launcher_path: Path) -> str:
 
 def get_default_launcher_path() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve()
-    return Path(__file__).resolve().with_name("flyprint-launcher.exe")
+        return Path(sys.executable).resolve().with_name(LAUNCHER_EXE_NAME)
+    return Path(__file__).resolve().with_name(LAUNCHER_EXE_NAME)
 
 
 def get_windows_startup_enabled(launcher_path: Path | None = None) -> bool:
