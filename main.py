@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from printer_utils import PrinterManager
 from cloud_service import CloudService
 from config_service import ConfigService
-from file_manager import init_file_manager, get_file_manager
+from file_manager import init_file_manager, get_file_manager, is_valid_content_hash
 from interactive_session import InteractiveSessionManager
 from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
@@ -1118,11 +1118,15 @@ async def preview(request: Request):
         file_url = body.get("file_url")
         file_name = body.get("file_name")
         file_type = body.get("file_type")
+        content_hash = body.get("content_hash")
         options = _normalize_request_options(body.get("options") or {})
 
         if not file_id or not file_url:
             logger.warning("Preview request rejected: missing file_id or file_url")
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: file_id, file_url 必需"})
+        if not is_valid_content_hash(content_hash):
+            logger.warning("Preview request rejected: missing or invalid content_hash file_id=%s", file_id)
+            return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: content_hash 必需"})
         if session_id and not interactive_session_manager.matches(session_id, file_id):
             return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
         if not printer_manager:
@@ -1131,6 +1135,8 @@ async def preview(request: Request):
 
         file_mgr = get_file_manager()
         cached = file_mgr.get_preview_resource(file_id) if file_mgr else None
+        if not cached and file_mgr:
+            cached = file_mgr.reuse_cached_resource(file_id, file_url, content_hash)
         logger.debug(
             "Preview request started: file_id=%s file_type=%s file_name=%s option_keys=%s cached=%s body_bytes=%s",
             file_id,
@@ -1178,7 +1184,7 @@ async def preview(request: Request):
                 cached_pdf = cached.get("pdf_path") if cached else None
                 if cached_pdf and not os.path.exists(cached_pdf):
                     cached_pdf = None
-                file_mgr.register_preview_resource(file_id, file_url, file_path, cached_pdf)
+                file_mgr.register_preview_resource(file_id, file_url, file_path, cached_pdf, content_hash=content_hash)
         else:
             if file_mgr:
                 file_mgr.touch_preview_resource(file_id)

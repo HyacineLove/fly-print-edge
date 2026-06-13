@@ -14,7 +14,7 @@ import os
 import base64
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
-from file_manager import get_file_manager
+from file_manager import get_file_manager, is_valid_content_hash
 from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
 from printer_fault_state import PrinterFaultStateStore
 
@@ -632,6 +632,7 @@ class PrintJobHandler:
             printer_name = data.get("printer_name")
             printer_id = data.get("printer_id")
             file_url = data.get("file_url")
+            content_hash = data.get("content_hash")
             file_access_token = data.get("file_access_token")  # 获取文件下载凭证
             job_name = data.get("name", f"CloudJob_{job_id}")  # 使用name字段作为任务名
             print_options = data.get("print_options", {})
@@ -642,6 +643,10 @@ class PrintJobHandler:
             
             if not all([job_id, printer_name, file_url]):
                 logger.warning("打印任务参数不完整")
+                return
+            if not is_valid_content_hash(content_hash):
+                logger.warning("打印任务缺少有效 content_hash: job_id=%s", job_id)
+                self._report_job_failure(job_id, "content_hash missing or invalid")
                 return
 
             try:
@@ -694,8 +699,15 @@ class PrintJobHandler:
                 elif str(duplex_val).lower() == "none":
                     print_options["duplex"] = "None"
             
+            file_mgr = get_file_manager()
+            file_path = file_mgr.get_cached_path(content_hash) if file_mgr else None
+            if file_path and file_mgr:
+                file_mgr.register_print_artifact(job_id, file_path, owns_source=False)
+                logger.info("复用本地缓存打印文件: job_id=%s content_hash=%s path=%s", job_id, content_hash, file_path)
+
             # 下载文件（优先使用file_access_token）
-            file_path = self._download_print_file(file_url, job_id, job_name, file_access_token)
+            if not file_path:
+                file_path = self._download_print_file(file_url, job_id, job_name, file_access_token, content_hash)
             if not file_path:
                 self._report_job_failure(job_id, "文件下载失败")
                 return
@@ -742,7 +754,7 @@ class PrintJobHandler:
             # 统一方法已经处理了异常清理
             self._report_job_failure(data.get("job_id"), str(e))
     
-    def _download_print_file(self, file_url: str, job_id: str, expected_filename: str = None, file_access_token: str = None) -> Optional[str]:
+    def _download_print_file(self, file_url: str, job_id: str, expected_filename: str = None, file_access_token: str = None, content_hash: str = None) -> Optional[str]:
         """下载打印文件
         
         Args:
@@ -833,6 +845,10 @@ class PrintJobHandler:
                 
                 logger.info(f"文件下载成功: {temp_file_path}")
                 file_mgr = get_file_manager()
+                if file_mgr and is_valid_content_hash(content_hash):
+                    cached_path = file_mgr.register_cached_source(content_hash, temp_file_path)
+                    file_mgr.register_print_artifact(job_id, cached_path or temp_file_path, owns_source=False)
+                    return cached_path or temp_file_path
                 if file_mgr:
                     file_mgr.register_print_artifact(job_id, temp_file_path)
                 return temp_file_path

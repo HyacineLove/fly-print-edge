@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
+from file_manager import FileManager
 from printer_fault_state import PrinterFaultStateStore
 
 
@@ -108,6 +110,7 @@ def make_print_job_message():
             "printer_name": "Microsoft Print to PDF",
             "printer_id": "printer-1",
             "file_url": "https://example.com/file.jpg",
+            "content_hash": "a" * 64,
             "name": "demo.jpg",
             "print_options": {"copies": 1},
         }
@@ -183,6 +186,48 @@ class PrintJobHandlerBindingTests(unittest.TestCase):
             "printer-1",
         )
         failure_mock.assert_not_called()
+
+    def test_handle_print_job_reuses_cached_hash_without_downloading(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cached_path = os.path.join(tmpdir, "cached.jpg")
+            with open(cached_path, "wb") as fh:
+                fh.write(b"cached")
+
+            manager = FileManager(cleanup_interval=300, file_ttl=1800)
+            manager.register_preview_resource(
+                "file-preview",
+                "https://example.com/file.jpg",
+                cached_path,
+                content_hash="a" * 64,
+            )
+            printer_manager = DummyPrinterManager({"success": True, "job_id": 123})
+            handler = PrintJobHandler(printer_manager=printer_manager, api_client=None)
+
+            with patch("cloud_websocket_client.get_file_manager", return_value=manager), \
+                 patch.object(handler, "_download_print_file") as download_mock, \
+                 patch.object(handler, "_monitor_job_completion") as monitor_mock, \
+                 patch.object(handler, "_report_job_failure") as failure_mock:
+                handler.handle_print_job(make_print_job_message())
+
+            download_mock.assert_not_called()
+            self.assertEqual(cached_path, printer_manager.submissions[0]["file_path"])
+            monitor_mock.assert_called_once()
+            failure_mock.assert_not_called()
+
+    def test_handle_print_job_reports_failure_when_content_hash_missing(self):
+        message = make_print_job_message()
+        del message["data"]["content_hash"]
+        handler = PrintJobHandler(
+            printer_manager=DummyPrinterManager({"success": True, "job_id": 123}),
+            api_client=None,
+        )
+
+        with patch.object(handler, "_download_print_file") as download_mock, \
+             patch.object(handler, "_report_job_failure") as failure_mock:
+            handler.handle_print_job(message)
+
+        download_mock.assert_not_called()
+        failure_mock.assert_called_once_with("cloud-job-1", "content_hash missing or invalid")
 
     def test_monitor_cancels_local_job_before_reporting_ipp_fault(self):
         fault_result = SimpleNamespace(

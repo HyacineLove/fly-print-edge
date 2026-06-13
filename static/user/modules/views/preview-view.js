@@ -241,6 +241,7 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
         file_url: session.file.file_url,
         file_name: session.file.file_name,
         file_type: session.file.file_type,
+        content_hash: session.file.content_hash,
         options: {
           ...session.options,
           page_index: pageIndex,

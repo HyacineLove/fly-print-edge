@@ -140,5 +140,21 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn('cfg.default_scale_mode || "actual"', admin_settings)
 
 
+    def test_preview_flow_preserves_content_hash_from_cloud_to_preview_api(self):
+        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
+        preview_view = (BASE_DIR / "modules/views/preview-view.js").read_text(encoding="utf-8")
+
+        self.assertIn("content_hash: data.content_hash", controller)
+        self.assertIn("content_hash: normalized.content_hash", controller)
+        self.assertIn("content_hash: session.file.content_hash", preview_view)
+
+    def test_legacy_preview_flow_preserves_content_hash_from_cloud_to_preview_api(self):
+        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
+        preview = (BASE_DIR / "modules/pages/preview.js").read_text(encoding="utf-8")
+
+        self.assertIn("content_hash: data.content_hash", runtime)
+        self.assertIn("content_hash: state.file.content_hash", preview)
+
+
 if __name__ == "__main__":
     unittest.main()

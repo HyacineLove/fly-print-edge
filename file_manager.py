@@ -7,10 +7,19 @@ import os
 import time
 import threading
 import logging
+import re
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_valid_content_hash(content_hash: Optional[str]) -> bool:
+    return isinstance(content_hash, str) and bool(CONTENT_HASH_RE.fullmatch(content_hash))
+
 
 class FileManager:
     """文件生命周期管理器"""
@@ -39,6 +48,8 @@ class FileManager:
         
         # 跟踪预览文件
         self.preview_files: Dict[str, Dict[str, Any]] = {}
+        self.hash_resources: Dict[str, Dict[str, Any]] = {}
+        self.file_hashes: Dict[str, str] = {}
         self.preview_lock = threading.Lock()
 
         # 访问 token
@@ -83,18 +94,123 @@ class FileManager:
             except Exception:
                 logger.exception("FileManager cleanup loop failed")
     
-    def register_preview_resource(self, file_id: str, file_url: str, source_path: str, pdf_path: Optional[str] = None):
+    def register_preview_resource(
+        self,
+        file_id: str,
+        file_url: str,
+        source_path: str,
+        pdf_path: Optional[str] = None,
+        content_hash: Optional[str] = None,
+    ):
         """注册或更新预览资源。"""
         with self.preview_lock:
             now = time.time()
+            resolved_source_path = source_path
+            resolved_pdf_path = pdf_path
+
+            if content_hash:
+                if not is_valid_content_hash(content_hash):
+                    raise ValueError("content_hash must be a 64-character lowercase sha256 hex string")
+                existing = self.hash_resources.get(content_hash)
+                if existing and os.path.exists(existing.get("source_path", "")):
+                    resolved_source_path = existing["source_path"]
+                    resolved_pdf_path = existing.get("pdf_path") or pdf_path
+                    if source_path != resolved_source_path and os.path.exists(source_path):
+                        try:
+                            os.remove(source_path)
+                        except Exception as e:
+                            logger.warning("Failed to remove duplicate preview source: file=%s error=%s", source_path, e)
+                else:
+                    self.hash_resources[content_hash] = {
+                        "source_path": source_path,
+                        "pdf_path": pdf_path,
+                        "file_ids": set(),
+                        "created_at": now,
+                        "last_access": now,
+                    }
+
+                resource = self.hash_resources[content_hash]
+                resource["source_path"] = resolved_source_path
+                if resolved_pdf_path:
+                    resource["pdf_path"] = resolved_pdf_path
+                resource["file_ids"].add(file_id)
+                resource["last_access"] = now
+                self.file_hashes[file_id] = content_hash
+
             self.preview_files[file_id] = {
                 "file_url": file_url,
-                "source_path": source_path,
-                "pdf_path": pdf_path,
+                "source_path": resolved_source_path,
+                "pdf_path": resolved_pdf_path,
+                "content_hash": content_hash,
                 "created_at": now,
                 "last_access": now
             }
-            logger.debug("Registered preview resource: file_id=%s file=%s", file_id, os.path.basename(source_path))
+            logger.debug("Registered preview resource: file_id=%s file=%s", file_id, os.path.basename(resolved_source_path))
+
+    def reuse_cached_resource(self, file_id: str, file_url: str, content_hash: str) -> Optional[Dict[str, Any]]:
+        if not is_valid_content_hash(content_hash):
+            return None
+        with self.preview_lock:
+            resource = self.hash_resources.get(content_hash)
+            if not resource:
+                return None
+            source_path = resource.get("source_path")
+            if not source_path or not os.path.exists(source_path):
+                self._drop_hash_resource_locked(content_hash, delete_files=False)
+                return None
+            now = time.time()
+            resource["file_ids"].add(file_id)
+            resource["last_access"] = now
+            self.file_hashes[file_id] = content_hash
+            self.preview_files[file_id] = {
+                "file_url": file_url,
+                "source_path": source_path,
+                "pdf_path": resource.get("pdf_path"),
+                "content_hash": content_hash,
+                "created_at": now,
+                "last_access": now,
+            }
+            return dict(self.preview_files[file_id])
+
+    def register_cached_source(self, content_hash: str, source_path: str, pdf_path: Optional[str] = None) -> Optional[str]:
+        if not is_valid_content_hash(content_hash) or not source_path:
+            return None
+        with self.preview_lock:
+            now = time.time()
+            existing = self.hash_resources.get(content_hash)
+            if existing and os.path.exists(existing.get("source_path", "")):
+                existing["last_access"] = now
+                if pdf_path:
+                    existing["pdf_path"] = pdf_path
+                if existing["source_path"] != source_path and os.path.exists(source_path):
+                    try:
+                        os.remove(source_path)
+                    except Exception as e:
+                        logger.warning("Failed to remove duplicate cached source: file=%s error=%s", source_path, e)
+                return existing["source_path"]
+
+            self.hash_resources[content_hash] = {
+                "source_path": source_path,
+                "pdf_path": pdf_path,
+                "file_ids": set(),
+                "created_at": now,
+                "last_access": now,
+            }
+            return source_path
+
+    def get_cached_path(self, content_hash: str) -> Optional[str]:
+        if not is_valid_content_hash(content_hash):
+            return None
+        with self.preview_lock:
+            resource = self.hash_resources.get(content_hash)
+            if not resource:
+                return None
+            source_path = resource.get("source_path")
+            if source_path and os.path.exists(source_path):
+                resource["last_access"] = time.time()
+                return source_path
+            self._drop_hash_resource_locked(content_hash, delete_files=False)
+            return None
     
     def register_preview_file(self, file_id: str, file_path: str, pdf_path: Optional[str] = None):
         """兼容旧接口。"""
@@ -107,6 +223,9 @@ class FileManager:
         with self.preview_lock:
             if file_id in self.preview_files:
                 self.preview_files[file_id]["last_access"] = time.time()
+                content_hash = self.preview_files[file_id].get("content_hash")
+                if content_hash in self.hash_resources:
+                    self.hash_resources[content_hash]["last_access"] = time.time()
     
     def update_file_access(self, file_id: str):
         """兼容旧接口。"""
@@ -126,12 +245,27 @@ class FileManager:
         """释放预览资源及其关联缓存。"""
         with self.preview_lock:
             file_info = self.preview_files.pop(file_id, None)
+            content_hash = self.file_hashes.pop(file_id, None)
+            should_delete_hash = False
+            if content_hash and content_hash in self.hash_resources:
+                file_ids = self.hash_resources[content_hash].get("file_ids")
+                if isinstance(file_ids, set):
+                    file_ids.discard(file_id)
+                    should_delete_hash = len(file_ids) == 0 and reason not in {"print"}
+                if reason == "print":
+                    self.hash_resources[content_hash]["last_access"] = time.time()
 
         if not file_info:
             self._clear_preview_cache_entries(file_id)
             return False
 
         success = True
+        if content_hash:
+            if should_delete_hash:
+                success = self._release_hash_resource(content_hash, reason=reason) and success
+            self._clear_preview_cache_entries(file_id)
+            return success
+
         file_path = file_info.get("source_path")
         if file_path and os.path.exists(file_path):
             try:
@@ -152,6 +286,43 @@ class FileManager:
 
         self._clear_preview_cache_entries(file_id)
         return success
+
+    def _release_hash_resource(self, content_hash: str, reason: str = "manual") -> bool:
+        with self.preview_lock:
+            resource = self.hash_resources.pop(content_hash, None)
+            if resource:
+                for file_id in list(resource.get("file_ids") or set()):
+                    self.file_hashes.pop(file_id, None)
+
+        if not resource:
+            return False
+
+        success = True
+        for path_key in ("source_path", "pdf_path"):
+            file_path = resource.get(path_key)
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.debug("Released hash resource: content_hash=%s reason=%s file=%s", content_hash, reason, os.path.basename(file_path))
+                except Exception as e:
+                    logger.warning("Failed to delete hash resource file: file=%s error=%s", file_path, e)
+                    success = False
+        return success
+
+    def _drop_hash_resource_locked(self, content_hash: str, delete_files: bool = False):
+        resource = self.hash_resources.pop(content_hash, None)
+        if not resource:
+            return
+        for file_id in list(resource.get("file_ids") or set()):
+            self.file_hashes.pop(file_id, None)
+        if delete_files:
+            for path_key in ("source_path", "pdf_path"):
+                file_path = resource.get(path_key)
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        logger.warning("Failed to delete dropped hash resource file: file=%s error=%s", file_path, e)
 
     def cleanup_file(self, file_id: str, source: str = "manual") -> bool:
         """兼容旧接口。"""
@@ -179,6 +350,17 @@ class FileManager:
             logger.info("Cleaning expired preview resources: count=%s", len(expired_files))
             for file_id in expired_files:
                 self.release_preview_resource(file_id, reason="expired")
+
+        expired_hashes = []
+        with self.preview_lock:
+            for content_hash, info in self.hash_resources.items():
+                if now - info.get("last_access", info.get("created_at", now)) > self.file_ttl:
+                    expired_hashes.append(content_hash)
+
+        if expired_hashes:
+            logger.info("Cleaning expired hash resources: count=%s", len(expired_hashes))
+            for content_hash in expired_hashes:
+                self._release_hash_resource(content_hash, reason="expired")
 
         self._cleanup_expired_preview_cache(now)
         self.cleanup_expired_tokens()
@@ -235,13 +417,20 @@ class FileManager:
             for file_id in expired_keys:
                 self.file_access_tokens.pop(file_id, None)
 
-    def register_print_artifact(self, artifact_key: str, source_path: str, converted_path: Optional[str] = None):
+    def register_print_artifact(
+        self,
+        artifact_key: str,
+        source_path: str,
+        converted_path: Optional[str] = None,
+        owns_source: bool = True,
+    ):
         if not artifact_key or not source_path:
             return
         with self.print_lock:
             self.print_artifacts[artifact_key] = {
                 "source_path": source_path,
                 "converted_path": converted_path,
+                "owns_source": owns_source,
             }
 
     def update_print_artifact(self, artifact_key: str, converted_path: Optional[str]):
@@ -258,6 +447,8 @@ class FileManager:
             return False
         success = True
         for path_key in ("source_path", "converted_path"):
+            if path_key == "source_path" and not artifact_info.get("owns_source", True):
+                continue
             file_path = artifact_info.get(path_key)
             if file_path and os.path.exists(file_path):
                 try:

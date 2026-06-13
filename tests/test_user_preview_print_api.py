@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -96,7 +97,17 @@ class DummyRequest:
         return self.payload
 
 
+class DummyBodyRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def body(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class UserPreviewPrintApiTests(unittest.TestCase):
+    CONTENT_HASH = "a" * 64
+
     def setUp(self):
         self.printer_manager = DummyPrinterManager()
         self.cloud_service = DummyCloudService()
@@ -107,6 +118,7 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         self.session_manager.accept_preview_event({
             "file_id": "file-1",
             "file_url": "https://example.com/file.pdf",
+            "content_hash": self.CONTENT_HASH,
         })
         self.file_manager = FileManager(cleanup_interval=300, file_ttl=1800)
 
@@ -152,7 +164,7 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         sent = self.cloud_service.websocket_client.sent_messages[0]["data"]["options"]
         self.assertEqual(sent["copies"], 1)
 
-    def test_submit_print_clears_registered_preview_resource(self):
+    def test_submit_print_clears_preview_cache_but_preserves_hash_source(self):
         preview_cache = {'file-1:{"page_index": 0}': {"preview_url": "data", "timestamp": 1.0}}
         preview_page_cache = {"file-1": {0: object()}}
         preview_page_meta = {"file-1": {"page_count": 1}}
@@ -171,7 +183,12 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         with open(source_path, "wb") as fh:
             fh.write(b"preview")
 
-        self.file_manager.register_preview_resource("file-1", "/api/v1/files/file-1", source_path)
+        self.file_manager.register_preview_resource(
+            "file-1",
+            "/api/v1/files/file-1",
+            source_path,
+            content_hash=self.CONTENT_HASH,
+        )
 
         request = DummyRequest({
             "session_id": self.session_id,
@@ -187,10 +204,61 @@ class UserPreviewPrintApiTests(unittest.TestCase):
             response = asyncio.run(main.submit_print(request))
 
         self.assertTrue(response["success"])
-        self.assertFalse(os.path.exists(source_path))
+        self.assertTrue(os.path.exists(source_path))
         self.assertEqual({}, main.preview_cache)
         self.assertEqual({}, main.preview_page_cache)
         self.assertEqual({}, main.preview_page_meta)
+        self.assertEqual(source_path, self.file_manager.get_cached_path(self.CONTENT_HASH))
+
+    def test_preview_rejects_missing_content_hash(self):
+        request = DummyBodyRequest({
+            "session_id": self.session_id,
+            "file_id": "file-1",
+            "file_url": "https://example.com/file.pdf",
+            "file_name": "file.pdf",
+            "file_type": "application/pdf",
+            "options": {"page_index": 0},
+        })
+
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "interactive_session_manager", self.session_manager), \
+             patch.object(main, "get_file_manager", return_value=self.file_manager):
+            response = asyncio.run(main.preview(request))
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("content_hash", response.body.decode("utf-8"))
+
+    def test_preview_reuses_cached_hash_without_download(self):
+        source_path = os.path.join(self.temp_dir.name, "preview.pdf")
+        with open(source_path, "wb") as fh:
+            fh.write(b"%PDF-1.4\n")
+
+        self.file_manager.register_preview_resource(
+            "file-existing",
+            "/api/v1/files/file-existing",
+            source_path,
+            content_hash=self.CONTENT_HASH,
+        )
+        request = DummyBodyRequest({
+            "session_id": self.session_id,
+            "file_id": "file-1",
+            "file_url": "/api/v1/files/file-1",
+            "file_name": "file.pdf",
+            "file_type": "application/pdf",
+            "content_hash": self.CONTENT_HASH,
+            "options": {"page_index": 0},
+        })
+
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "interactive_session_manager", self.session_manager), \
+             patch.object(main, "get_file_manager", return_value=self.file_manager), \
+             patch.object(main, "_download_preview_file") as download_mock, \
+             patch.object(main, "_generate_preview_image", return_value=(None, 0, 0, "render skipped")):
+            response = asyncio.run(main.preview(request))
+
+        self.assertEqual(500, response.status_code)
+        download_mock.assert_not_called()
+        self.assertEqual(source_path, self.file_manager.get_preview_resource("file-1")["source_path"])
 
     def test_printer_availability_reports_fault_from_probe_and_mapping(self):
         fault_store = PrinterFaultStateStore()

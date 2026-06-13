@@ -358,5 +358,24 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
         )
 
 
+    def test_session_current_contract_returns_content_hash_for_preview_ready_session(self):
+        session = self.manager.start_session(upload_token="token-1")
+        self.manager.accept_preview_event(
+            {
+                "file_id": "file-1",
+                "file_url": "/api/v1/files/file-1",
+                "file_name": "demo.pdf",
+                "file_type": "application/pdf",
+                "content_hash": "a" * 64,
+            }
+        )
+
+        response = self._get_current_session_snapshot()
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual(session["session_id"], body["session_id"])
+        self.assertEqual("a" * 64, body["content_hash"])
+
+
 if __name__ == "__main__":
     unittest.main()
