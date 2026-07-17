@@ -15,6 +15,20 @@ from interactive_session import InteractiveSessionManager
 STUBBABLE_THIRD_PARTY_MODULES = {"fitz", "pandas"}
 
 
+def _job_state(
+    status=None,
+    message=None,
+    current_page=None,
+    total_pages=None,
+):
+    return {
+        "job_status": status,
+        "job_message": message,
+        "current_page": current_page,
+        "total_pages": total_pages,
+    }
+
+
 def _install_minimal_module_stub(module_name):
     if module_name in sys.modules:
         return
@@ -120,6 +134,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state(),
             },
             response.json(),
         )
@@ -151,6 +166,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state(),
             },
             response.json(),
         )
@@ -182,6 +198,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state("preparing", "正在准备打印文件……"),
             },
             response.json(),
         )
@@ -214,6 +231,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state(),
             },
             response.json(),
         )
@@ -247,6 +265,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state(),
             },
             response.json(),
         )
@@ -279,6 +298,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state("preparing", "正在准备打印文件……"),
             },
             response.json(),
         )
@@ -312,6 +332,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                **_job_state("completed"),
             },
             response.json(),
         )
@@ -363,6 +384,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                     "message": "打印机缺纸，请联系管理员补纸",
                     "raw_reasons": ["media-empty-error", "media-needed-error"],
                 },
+                **_job_state("failed", "打印机缺纸，请联系管理员补纸"),
             },
             response.json(),
         )

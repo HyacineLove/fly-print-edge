@@ -28,6 +28,10 @@ class InteractiveSessionManager:
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                "job_status": None,
+                "job_message": None,
+                "current_page": None,
+                "total_pages": None,
                 "updated_at": time.time(),
             }
             return deepcopy(self._active_session)
@@ -69,6 +73,10 @@ class InteractiveSessionManager:
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
             self._active_session["printer_fault"] = None
+            self._active_session["job_status"] = None
+            self._active_session["job_message"] = None
+            self._active_session["current_page"] = None
+            self._active_session["total_pages"] = None
             self._active_session["updated_at"] = time.time()
 
             enriched = deepcopy(data)
@@ -94,6 +102,10 @@ class InteractiveSessionManager:
             self._active_session["submitted"] = True
             self._active_session["print_options"] = deepcopy(print_options) if print_options else None
             self._active_session["state"] = "print_submitted"
+            self._active_session["job_status"] = "preparing"
+            self._active_session["job_message"] = "正在准备打印文件……"
+            self._active_session["current_page"] = None
+            self._active_session["total_pages"] = None
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
             self._active_session["printer_fault"] = None
@@ -114,6 +126,8 @@ class InteractiveSessionManager:
 
             self._active_session["job_id"] = job_id
             self._active_session["state"] = "printing"
+            self._active_session["job_status"] = "preparing"
+            self._active_session["job_message"] = "正在准备打印文件……"
             self._active_session["updated_at"] = time.time()
 
             return {
@@ -138,6 +152,10 @@ class InteractiveSessionManager:
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
             self._active_session["printer_fault"] = None
+            self._active_session["job_status"] = None
+            self._active_session["job_message"] = None
+            self._active_session["current_page"] = None
+            self._active_session["total_pages"] = None
             self._active_session["updated_at"] = time.time()
             return True
 
@@ -158,13 +176,22 @@ class InteractiveSessionManager:
                 self._active_session["error_code"] = None
                 self._active_session["error_message"] = None
                 self._active_session["printer_fault"] = None
-            elif status in {"failed", "error"}:
+            elif status in {"failed", "error", "canceled", "cancelled", "unconfirmed"}:
                 self._active_session["state"] = "failed"
-                self._active_session["error_code"] = data.get("error_code")
+                default_error_code = {
+                    "canceled": "print_canceled",
+                    "cancelled": "print_canceled",
+                    "unconfirmed": "result_unconfirmed",
+                }.get(status)
+                self._active_session["error_code"] = data.get("error_code") or default_error_code
                 self._active_session["error_message"] = data.get("message") or data.get("error_message")
                 self._active_session["printer_fault"] = deepcopy(data.get("printer_fault"))
             else:
                 self._active_session["state"] = "printing"
+            self._active_session["job_status"] = status or None
+            self._active_session["job_message"] = data.get("message") or data.get("error_message")
+            self._active_session["current_page"] = data.get("current_page")
+            self._active_session["total_pages"] = data.get("total_pages")
             self._active_session["updated_at"] = time.time()
 
             enriched = deepcopy(data)
@@ -197,6 +224,10 @@ class InteractiveSessionManager:
                     "error_code": None,
                     "error_message": None,
                     "printer_fault": None,
+                    "job_status": None,
+                    "job_message": None,
+                    "current_page": None,
+                    "total_pages": None,
                 }
 
             snapshot = {
@@ -212,6 +243,10 @@ class InteractiveSessionManager:
                 "error_code": self._active_session.get("error_code"),
                 "error_message": self._active_session.get("error_message"),
                 "printer_fault": deepcopy(self._active_session.get("printer_fault")),
+                "job_status": self._active_session.get("job_status"),
+                "job_message": self._active_session.get("job_message"),
+                "current_page": self._active_session.get("current_page"),
+                "total_pages": self._active_session.get("total_pages"),
             }
             if self._active_session.get("content_hash"):
                 snapshot["content_hash"] = self._active_session.get("content_hash")

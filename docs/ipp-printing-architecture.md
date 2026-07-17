@@ -44,6 +44,9 @@ PREPARING -> SUBMITTING -> QUEUED -> PRINTING -> COMPLETED
 - 只有 `completed` 映射为 `COMPLETED`。
 - `aborted` 映射为 `FAILED`；`canceled` 映射为 `CANCELED`。
 - 提交响应丢失、作业查询失败或取消无法确认均映射为 `UNCONFIRMED`。
+- Edge 本地事件直接保留 `job-impressions-completed` 对应的页数进度。用户端按页显示“正在打印，第 N / M 页”，不将双面页数换算为物理纸张。
+- Cloud 状态消息只保留任务状态，不发送或持久化逐页进度。
+- 用户端刷新后从交互会话快照恢复当前阶段和页数进度；`UNCONFIRMED` 在管理员解除设备锁前禁止返回二维码页。
 
 ## 协议约束
 

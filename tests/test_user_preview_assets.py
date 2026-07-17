@@ -93,7 +93,7 @@ class UserPreviewAssetTests(unittest.TestCase):
 
         self.assertRegex(
             done_view,
-            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\)\s*\{[\s\S]*?return;",
+            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\|\|\s*isUnconfirmedResult\(\)\s*\)\s*\{[\s\S]*?return;",
             "printer fault result should short-circuit normal countdown restart",
         )
         self.assertIn("打印机已恢复", done_view)
@@ -104,7 +104,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("function setCountdownAccessoryVisible", done_view)
         self.assertRegex(
             done_view,
-            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\)\s*\{[\s\S]*?setCountdownAccessoryVisible\(false\)",
+            r"if\s*\(\s*isPrinterFaultResult\(\)\s*\|\|\s*isUnconfirmedResult\(\)\s*\)\s*\{[\s\S]*?setCountdownAccessoryVisible\(false\)",
         )
         self.assertRegex(
             done_view,
@@ -141,17 +141,27 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("原始尺寸/过大缩小", admin_settings)
         self.assertIn('cfg.default_scale_mode || "actual"', admin_settings)
 
-    def test_printing_indicator_is_full_width_and_not_page_progress(self):
+    def test_printing_indicator_is_full_width_and_uses_device_page_progress(self):
         view = (BASE_DIR / "modules/views/printing-view.js").read_text(encoding="utf-8")
-        legacy = (BASE_DIR / "modules/pages/printing.js").read_text(encoding="utf-8")
         runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
         controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
         css = (BASE_DIR / "css/printing.css").read_text(encoding="utf-8")
 
         self.assertIn("renderPrintingIndicator", view)
-        self.assertIn("renderPrintingIndicator", legacy)
-        self.assertNotIn("cur / all", view)
-        self.assertNotIn("cur / all", legacy)
+        self.assertIn("current_page", view)
+        self.assertIn("total_pages", view)
+        self.assertIn("正在打印，第", view)
+        self.assertIn("页……", view)
+        self.assertIn("completedPages + 1", view)
+        self.assertIn("Math.min(completedPages + 1, totalPages)", view)
+        self.assertIn("data.current_page !== null", view)
+        self.assertNotIn("张……", view)
+        self.assertNotIn("printing-indicator-label", view)
+        self.assertIn('aria-live="polite"', view)
+        self.assertIn('id="printing_status_message"', view)
+        self.assertIn('q("printing_status_message")', view)
+        self.assertRegex(css, r"\.printing-status-message\s*\{[^}]*top:\s*1148px")
+        self.assertNotIn(".Pixso-paragraph-115_26", css)
         self.assertNotIn("renderPrintingProgress", runtime)
         self.assertNotIn("progress >= 100", controller)
         self.assertRegex(css, r"\.Pixso-rectangle-77_20\s*\{[^}]*width:\s*556px")
@@ -165,12 +175,9 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("content_hash: normalized.content_hash", controller)
         self.assertIn("content_hash: session.file.content_hash", preview_view)
 
-    def test_legacy_preview_flow_preserves_content_hash_from_cloud_to_preview_api(self):
-        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
-        preview = (BASE_DIR / "modules/pages/preview.js").read_text(encoding="utf-8")
-
-        self.assertIn("content_hash: data.content_hash", runtime)
-        self.assertIn("content_hash: state.file.content_hash", preview)
+    def test_removed_legacy_pages_do_not_reintroduce_duplicate_frontend_logic(self):
+        self.assertFalse((BASE_DIR / "main.js").exists())
+        self.assertEqual([], list((BASE_DIR / "modules/pages").glob("*.js")))
 
 
 if __name__ == "__main__":

@@ -150,7 +150,7 @@ class IppDevicePolicyTests(unittest.TestCase):
         )
 
     def test_printer_alert_alone_does_not_cancel_active_job(self):
-        job = {"job-state": [5], "job-state-reasons": ["job-printing"], "job-impressions-completed": [1]}
+        job = {"job-state": [5], "job-state-reasons": ["job-printing"]}
         printer = {
             "printer-state-reasons": ["spool-area-full-report"],
             "printer-alert-description": ["allTraysEmpty", "outOfMedia"],
@@ -194,6 +194,30 @@ class IppServiceStateTests(unittest.TestCase):
              patch("printing.service.printer_snapshot", return_value={"printer-state-reasons": ["media-empty-error"]}):
             event = self.service._monitor(self.request, 1, self.ref, Mock(), threading.Event(), None)
         self.assertEqual(PrintState.COMPLETED, event.state)
+
+    def test_monitor_emits_device_completed_pages(self):
+        request = PrintRequest(
+            job_id="job-2", printer_name="Printer", printer_uuid="urn:uuid:p1",
+            ipp_uri="ipp://192.0.2.2:631/ipp/print", source_path=Path("input.pdf"),
+            source_name="input.pdf", options=PrintOptions(duplex="longedge"),
+        )
+        events = []
+        jobs = [
+            {
+                "job-state": [5],
+                "job-state-reasons": ["job-printing"],
+                "job-impressions-completed": [2],
+            },
+            {"job-state": [9]},
+        ]
+        with patch("printing.service.job_snapshot", side_effect=jobs), \
+             patch("printing.service.printer_snapshot", return_value={"printer-state-reasons": ["none"]}):
+            event = self.service._monitor(request, 4, self.ref, Mock(), threading.Event(), events.append)
+
+        self.assertEqual(2, events[0].current_page)
+        self.assertEqual(4, events[0].total_pages)
+        self.assertEqual(4, event.current_page)
+        self.assertEqual(4, event.total_pages)
 
     def test_active_fault_is_canceled_and_reported_as_original_fault(self):
         jobs = [

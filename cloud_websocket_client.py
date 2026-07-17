@@ -4,6 +4,7 @@ fly-print-cloud WebSocket客户端
 """
 
 import asyncio
+import hashlib
 import websockets
 import json
 import threading
@@ -12,6 +13,7 @@ import logging
 import requests
 import os
 import base64
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
@@ -43,7 +45,10 @@ class CloudWebSocketClient:
         self.completed_jobs = {}  # {job_id: completion_timestamp}
         self.processing_jobs = {}  # {job_id: start_timestamp}
         self.completed_jobs_ttl = 3600  # 缓存保留1小时
+        self.processing_jobs_ttl = 3600
         self._job_tracking_lock = threading.Lock()
+        self._job_cleanup_stop = threading.Event()
+        self._job_cleanup_thread = None
         self._start_cleanup_task()  # 启动定期清理任务
         
     def add_message_handler(self, message_type: str, handler: Callable[[Dict[str, Any]], None]):
@@ -72,7 +77,8 @@ class CloudWebSocketClient:
         if self.running:
             logger.warning("WebSocket客户端已经在运行")
             return
-        
+
+        self._start_cleanup_task()
         self.running = True
         self.thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self.thread.start()
@@ -92,6 +98,10 @@ class CloudWebSocketClient:
 
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
+
+        self._job_cleanup_stop.set()
+        if self._job_cleanup_thread and self._job_cleanup_thread.is_alive():
+            self._job_cleanup_thread.join(timeout=3)
 
         self.websocket = None
         logger.info("WebSocket客户端已停止")
@@ -119,28 +129,47 @@ class CloudWebSocketClient:
 
     def _start_cleanup_task(self):
         """启动定期清理过期任务记录的后台线程"""
+        if self._job_cleanup_thread and self._job_cleanup_thread.is_alive():
+            return
+        self._job_cleanup_stop.clear()
+
         def cleanup_loop():
-            while True:
+            while not self._job_cleanup_stop.wait(300):
                 try:
-                    time.sleep(300)  # 每5分钟清理一次
                     self._cleanup_completed_jobs()
                 except Exception as e:
                     logger.error(f"清理已完成任务缓存异常: {e}")
-        
-        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
-        cleanup_thread.start()
+
+        self._job_cleanup_thread = threading.Thread(
+            target=cleanup_loop,
+            name="cloud-job-cleanup",
+            daemon=True,
+        )
+        self._job_cleanup_thread.start()
     
     def _cleanup_completed_jobs(self):
-        """清理过期的已完成任务记录"""
+        """在现有任务锁内清理过期的完成与处理中记录。"""
         now = time.time()
-        expired_jobs = [job_id for job_id, timestamp in self.completed_jobs.items() 
-                       if now - timestamp > self.completed_jobs_ttl]
-        
-        for job_id in expired_jobs:
-            del self.completed_jobs[job_id]
-        
-        if expired_jobs:
-            logger.info(f"清理 {len(expired_jobs)} 个过期任务记录")
+        with self._job_tracking_lock:
+            expired_completed = [
+                job_id for job_id, timestamp in self.completed_jobs.items()
+                if now - timestamp > self.completed_jobs_ttl
+            ]
+            expired_processing = [
+                job_id for job_id, timestamp in self.processing_jobs.items()
+                if now - timestamp > self.processing_jobs_ttl
+            ]
+            for job_id in expired_completed:
+                self.completed_jobs.pop(job_id, None)
+            for job_id in expired_processing:
+                self.processing_jobs.pop(job_id, None)
+
+        if expired_completed or expired_processing:
+            logger.info(
+                "清理过期任务记录: completed=%s processing=%s",
+                len(expired_completed),
+                len(expired_processing),
+            )
     
     def _mark_job_completed(self, job_id: str):
         """标记任务为已完成"""
@@ -795,11 +824,13 @@ class PrintJobHandler:
         Returns:
             下载的临时文件路径，失败返回None
         """
+        job_dir = None
+        partial_path = None
+        registered = False
         try:
             import requests
-            import tempfile
             import os
-            from urllib.parse import urlparse, urlencode, urlunparse, parse_qs
+            from urllib.parse import urlparse, urlencode, urlunparse, parse_qs, urlsplit
             from portable_temp import get_portable_temp_dir
             
             # 如果是相对路径，拼接完整URL
@@ -810,12 +841,15 @@ class PrintJobHandler:
             # 确定认证方式
             headers = {}
             download_url = file_url
+            auth_mode = "direct"
             
             # S3签名URL不能带认证头
             if 'X-Amz-Algorithm' in file_url and 'X-Amz-Signature' in file_url:
+                auth_mode = "signed_url"
                 logger.debug("检测到S3签名URL，使用直连下载")
             # 优先使用file_access_token（API文档推荐方式）
             elif file_access_token:
+                auth_mode = "file_access_token"
                 # 将token作为查询参数添加到URL
                 parsed = urlparse(file_url)
                 query_params = parse_qs(parsed.query)
@@ -829,16 +863,25 @@ class PrintJobHandler:
             else:
                 # 回退到Bearer Token认证
                 if self.api_client and self.api_client.auth_client:
+                    auth_mode = "bearer"
                     headers = self.api_client.auth_client.get_auth_headers()
                     logger.debug("使用Bearer Token下载文件")
                 else:
                     logger.warning(f"无可用认证方式，尝试直接下载")
 
-            logger.info(f"下载打印文件: {file_url}")
+            parsed_download = urlsplit(download_url)
+            logger.info(
+                "Downloading print file: job_id=%s auth=%s host=%s path=%s",
+                job_id,
+                auth_mode,
+                parsed_download.netloc,
+                parsed_download.path,
+            )
             
-            response = requests.get(download_url, headers=headers, timeout=30)
+            response = requests.get(download_url, headers=headers, stream=True, timeout=30)
             if response.status_code != 200:
-                logger.error(f"响应内容: {response.text[:500]}")  # 打印前500字符的错误信息
+                logger.error("Print file download failed: job_id=%s status=%s", job_id, response.status_code)
+                response.close()
             
             if response.status_code == 200:
                 # 使用 portable temp 目录
@@ -867,23 +910,51 @@ class PrintJobHandler:
                 if not final_filename:
                     final_filename = f"cloud_job_{job_id}.pdf"
                 
-                temp_file_path = os.path.join(temp_dir, final_filename)
-                
-                with open(temp_file_path, 'wb') as f:
-                    f.write(response.content)
-                
-                logger.info(f"文件下载成功: {temp_file_path}")
+                final_filename = "".join(
+                    c for c in final_filename if c.isalpha() or c.isdigit() or c in "._- "
+                ).strip() or f"cloud_job_{job_id}.pdf"
+                safe_prefix = "".join(c for c in str(job_id) if c.isalnum() or c in "-_")[:48] or "job"
+                job_digest = hashlib.sha256(str(job_id).encode("utf-8")).hexdigest()[:16]
+                job_dir = os.path.join(temp_dir, "downloads", f"{safe_prefix}-{job_digest}")
+                os.makedirs(job_dir, exist_ok=True)
+                temp_file_path = os.path.join(job_dir, final_filename)
+                partial_path = f"{temp_file_path}.part"
+                try:
+                    os.remove(partial_path)
+                except FileNotFoundError:
+                    pass
+
+                try:
+                    with open(partial_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                    os.replace(partial_path, temp_file_path)
+                finally:
+                    response.close()
+
                 file_mgr = get_file_manager()
-                if file_mgr:
-                    file_mgr.register_print_artifact(job_id, temp_file_path)
+                if not file_mgr:
+                    raise RuntimeError("file manager is unavailable")
+                file_mgr.register_print_artifact(job_id, temp_file_path)
+                registered = True
+                logger.info("Print file downloaded: job_id=%s file=%s", job_id, final_filename)
                 return temp_file_path
             else:
                 logger.error(f"文件下载失败: {response.status_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"下载打印文件异常: {e}")
+            logger.error("Print file download failed: job_id=%s error=%s", job_id, e)
             return None
+        finally:
+            if partial_path:
+                try:
+                    os.remove(partial_path)
+                except OSError:
+                    pass
+            if job_dir and not registered:
+                shutil.rmtree(job_dir, ignore_errors=True)
     
     def _refresh_printer_status(self, printer_id: str = None, printer_name: str = None):
         if self.status_reporter and printer_id:
@@ -918,30 +989,31 @@ class PrintJobHandler:
             try:
                 from datetime import datetime, timezone
                 
-                job_data = {
+                cloud_job_data = {
                     "job_id": job_id,
                     "status": status,
                     "progress": progress,
                     "error_message": None,
                     "message": message_text
                 }
+                local_job_data = dict(cloud_job_data)
                 if current_page is not None:
-                    job_data["current_page"] = current_page
+                    local_job_data["current_page"] = current_page
                 if total_pages is not None:
-                    job_data["total_pages"] = total_pages
+                    local_job_data["total_pages"] = total_pages
                 
                 message = {
                     "type": "job_update",
                     "node_id": self.api_client.node_id if self.api_client else "unknown",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": job_data
+                    "data": cloud_job_data
                 }
                 
                 if self.websocket_client:
                     self.websocket_client.send_message_sync(message)
                     self.websocket_client.dispatch_local_message(
                         "job_status",
-                        {"type": "job_status", "data": job_data},
+                        {"type": "job_status", "data": local_job_data},
                     )
                     logger.debug(f"任务状态({status})已通过WebSocket上报: {job_id}")
                 

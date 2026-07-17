@@ -91,6 +91,11 @@ export function isActionPending(state, action, value) {
   return state.pendingActions.has(actionKey(action, value));
 }
 
+export function isPrinterActionPending(state, printerId) {
+  return ["default", "test", "reregister", "delete", "clear-unconfirmed"]
+    .some((action) => isActionPending(state, action, printerId));
+}
+
 export function setActionPending(state, action, value, pending) {
   const key = actionKey(action, value);
   if (pending) {

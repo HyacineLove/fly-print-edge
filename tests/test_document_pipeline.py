@@ -122,6 +122,7 @@ class DocumentPipelineTests(unittest.TestCase):
                 thread.join()
             self.assertEqual(1, calls)
             self.assertEqual(1, len({item.pdf_path for item in results}))
+            self.assertEqual({}, pipeline._key_locks)
 
     def test_cache_survives_pipeline_recreation_and_sliding_ttl(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -142,6 +142,10 @@ export function mapPrintErrorMessage(errorCode, message) {
     printer_offline: "打印机连接已断开，请联系工作人员。",
     printer_user_intervention: "打印机需要处理，请联系工作人员。",
     printer_rejected_document: "打印机无法处理该文档，请联系工作人员。",
+    print_canceled: "打印任务已取消。",
+    ipp_submission_unconfirmed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
+    ipp_job_query_failed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
+    ipp_cancel_failed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
     result_unconfirmed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
     print_timeout: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
   };

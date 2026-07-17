@@ -4,9 +4,9 @@ Portable 临时目录管理
 """
 
 import os
+from pathlib import Path
 import stat
 import sys
-import tempfile
 
 
 # 项目根目录（main.py 所在目录）
@@ -67,32 +67,55 @@ def cleanup_temp_dir(max_age_hours=24):
         max_age_hours: 文件最大存活时间（小时）
     """
     import time
-    import glob
-    
-    temp_dir = get_portable_temp_dir()
-    if not os.path.exists(temp_dir):
-        return
-    
-    pattern = os.path.join(temp_dir, "*")
-    files = glob.glob(pattern)
-    
+
+    temp_dir = Path(get_portable_temp_dir())
     now = time.time()
     max_age_seconds = max_age_hours * 3600
     cleaned_count = 0
-    
-    for file_path in files:
+
+    def is_expired(path: Path) -> bool:
         try:
-            if os.path.isfile(file_path):
-                file_age = now - os.path.getmtime(file_path)
-                if file_age > max_age_seconds:
-                    os.remove(file_path)
+            return now - path.stat().st_mtime > max_age_seconds
+        except OSError:
+            return False
+
+    # Root files are preview/download leftovers created before job-scoped
+    # directories were introduced. Known subtrees are cleaned recursively;
+    # canonical PDFs and the LibreOffice profile are deliberately excluded.
+    for path in temp_dir.iterdir():
+        if path.is_file() and is_expired(path):
+            try:
+                path.unlink()
+                cleaned_count += 1
+            except OSError:
+                pass
+
+    for subtree in (temp_dir / "downloads", temp_dir / "ipp-printing" / "jobs"):
+        if not subtree.is_dir():
+            continue
+        directories = sorted(
+            (path for path in subtree.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        )
+        for path in subtree.rglob("*"):
+            if path.is_file() and is_expired(path):
+                try:
+                    path.unlink()
                     cleaned_count += 1
-        except Exception as e:
-            # 忽略单个文件清理失败
-            pass
-    
+                except OSError:
+                    pass
+        for directory in directories:
+            if is_expired(directory):
+                try:
+                    directory.rmdir()
+                    cleaned_count += 1
+                except OSError:
+                    pass
+
     if cleaned_count > 0:
         print(f" [PortableTemp] 清理 {cleaned_count} 个过期文件")
+    return cleaned_count
 
 
 # 兼容性函数：提供与 tempfile.gettempdir() 相同的接口

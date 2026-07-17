@@ -86,6 +86,7 @@ export function createAppController({ mountNode }) {
         page_index: 0,
       };
       state.session.doneResult = null;
+      state.printing = {};
       state.sessionPhase = "preview_ready";
       saveSessionState();
       void router.go("preview");
@@ -128,12 +129,23 @@ export function createAppController({ mountNode }) {
       saveSessionState();
     }
 
-    currentViewApi?.handleJobStatus?.(data);
-
     const status = String(data?.status || "").toLowerCase();
-    if (status.includes("failed") || status.includes("error")) {
-      finishWithResult("error", mapPrintErrorMessage(data?.error_code, data?.message || data?.error_message), {
-        error_code: data?.error_code || null,
+    state.printing = {
+      status,
+      message: data?.message || "",
+      current_page: data?.current_page ?? null,
+      total_pages: data?.total_pages ?? null,
+    };
+    currentViewApi?.handleJobStatus?.(state.printing);
+
+    if (["failed", "error", "canceled", "cancelled", "unconfirmed"].includes(status)) {
+      const terminalErrorCode = data?.error_code || {
+        canceled: "print_canceled",
+        cancelled: "print_canceled",
+        unconfirmed: "result_unconfirmed",
+      }[status] || null;
+      finishWithResult("error", mapPrintErrorMessage(terminalErrorCode, data?.message || data?.error_message), {
+        error_code: terminalErrorCode,
         printer_fault: data?.printer_fault || null,
       });
       return;
@@ -141,7 +153,7 @@ export function createAppController({ mountNode }) {
 
     if (
       state.currentView === "printing" &&
-      (status.includes("complete") || status.includes("success") || status.includes("done"))
+      ["completed", "complete", "success", "done"].includes(status)
     ) {
       finishWithResult("success", "");
     }
@@ -149,6 +161,12 @@ export function createAppController({ mountNode }) {
 
   function queuePrintRequest(request) {
     setPendingPrintRequest(request);
+    state.printing = {
+      status: "preparing",
+      message: "正在准备打印文件……",
+      current_page: null,
+      total_pages: null,
+    };
     state.sessionPhase = "printing";
     void router.go("printing");
   }
@@ -171,6 +189,12 @@ export function createAppController({ mountNode }) {
         }
       : {};
     sessionState.doneResult = null;
+    state.printing = {
+      status: normalized.job_status || (normalized.state === "print_submitted" ? "preparing" : ""),
+      message: normalized.job_message || "",
+      current_page: normalized.current_page ?? null,
+      total_pages: normalized.total_pages ?? null,
+    };
     saveSessionState();
   }
 
@@ -215,9 +239,11 @@ export function createAppController({ mountNode }) {
 
     if (phase === "completed") {
       setDoneResult("success", "");
+      await router.go("done");
+      return;
     }
 
-    if (phase === "failed") {
+    if (["failed", "canceled", "cancelled", "unconfirmed"].includes(phase)) {
       setDoneResult(
         "error",
         mapPrintErrorMessage(snapshot.error_code, snapshot.error_message || "打印失败，请联系管理员"),

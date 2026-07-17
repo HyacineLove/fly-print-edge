@@ -1,9 +1,11 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from cloud_websocket_client import PrintJobHandler
+from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
+from file_manager import FileManager
 
 
 VALID_HASH = "a" * 64
@@ -78,6 +80,60 @@ class CloudPrintAdapterTests(unittest.TestCase):
                 handler.handle_print_job(self.message())
 
         self.assertEqual("actual", start.call_args.kwargs["print_options"]["scale_mode"])
+
+    @staticmethod
+    def download_response(chunks):
+        response = Mock(status_code=200)
+        response.iter_content.return_value = iter(chunks)
+        return response
+
+    def test_same_filename_downloads_are_streamed_into_distinct_job_directories(self):
+        handler = self.make_handler()
+        manager = FileManager()
+        responses = [self.download_response([b"first"]), self.download_response([b"second"])]
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "portable_temp._PORTABLE_TEMP_DIR", tmp
+        ), patch("cloud_websocket_client.get_file_manager", return_value=manager), patch(
+            "cloud_websocket_client.requests.get", side_effect=responses
+        ) as request_get:
+            first = handler._download_print_file("https://example.invalid/file.pdf", "job-1", "same.pdf")
+            second = handler._download_print_file("https://example.invalid/file.pdf", "job-2", "same.pdf")
+
+            self.assertNotEqual(Path(first).parent, Path(second).parent)
+            self.assertEqual(b"first", Path(first).read_bytes())
+            self.assertEqual(b"second", Path(second).read_bytes())
+            self.assertTrue(all(call.kwargs["stream"] for call in request_get.call_args_list))
+            self.assertEqual([], list(Path(tmp).rglob("*.part")))
+
+    def test_failed_stream_download_removes_part_and_job_directory(self):
+        handler = self.make_handler()
+        manager = FileManager()
+        response = self.download_response([])
+        response.iter_content.side_effect = OSError("network interrupted")
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "portable_temp._PORTABLE_TEMP_DIR", tmp
+        ), patch("cloud_websocket_client.get_file_manager", return_value=manager), patch(
+            "cloud_websocket_client.requests.get", return_value=response
+        ):
+            result = handler._download_print_file(
+                "https://example.invalid/file.pdf", "job-failed", "same.pdf"
+            )
+            self.assertIsNone(result)
+            self.assertEqual([], list(Path(tmp).rglob("*.part")))
+            self.assertEqual([], list((Path(tmp) / "downloads").glob("*")))
+
+
+class CloudJobCleanupTests(unittest.TestCase):
+    def test_cleanup_thread_stops_and_expired_processing_markers_are_released(self):
+        client = CloudWebSocketClient("ws://example.invalid", Mock())
+        client.completed_jobs["completed"] = time.time() - 7200
+        client.processing_jobs["processing"] = time.time() - 7200
+        client._cleanup_completed_jobs()
+        self.assertEqual({}, client.completed_jobs)
+        self.assertEqual({}, client.processing_jobs)
+        thread = client._job_cleanup_thread
+        client.stop()
+        self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

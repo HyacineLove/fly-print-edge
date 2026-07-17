@@ -106,6 +106,10 @@ class InteractiveSessionManagerTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                "job_status": None,
+                "job_message": None,
+                "current_page": None,
+                "total_pages": None,
             },
             self.manager.build_snapshot(),
         )
@@ -133,9 +137,46 @@ class InteractiveSessionManagerTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
                 "printer_fault": None,
+                "job_status": None,
+                "job_message": None,
+                "current_page": None,
+                "total_pages": None,
             },
             self.manager.build_snapshot(),
         )
+
+    def test_snapshot_preserves_live_ipp_stage_and_page_counts(self):
+        session = self.manager.start_session(upload_token="token-1")
+        file_url = "https://example.com/file-1.pdf"
+        self.manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+        self.manager.mark_print_submitted(session["session_id"], "file-1")
+        self.manager.attach_cloud_job(file_url, "job-1")
+
+        self.manager.accept_job_status_event({
+            "job_id": "job-1",
+            "status": "printing",
+            "message": "打印机正在打印……",
+            "current_page": 2,
+            "total_pages": 5,
+        })
+
+        snapshot = self.manager.build_snapshot()
+        self.assertEqual("printing", snapshot["job_status"])
+        self.assertEqual("打印机正在打印……", snapshot["job_message"])
+        self.assertEqual(2, snapshot["current_page"])
+        self.assertEqual(5, snapshot["total_pages"])
+
+    def test_canceled_and_unconfirmed_are_terminal_failures(self):
+        for status in ("canceled", "unconfirmed"):
+            with self.subTest(status=status):
+                manager = InteractiveSessionManager()
+                session = manager.start_session(upload_token="token-1")
+                file_url = "https://example.com/file-1.pdf"
+                manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+                manager.mark_print_submitted(session["session_id"], "file-1")
+                manager.attach_cloud_job(file_url, "job-1")
+                manager.accept_job_status_event({"job_id": "job-1", "status": status})
+                self.assertEqual("failed", manager.build_snapshot()["state"])
 
 
 if __name__ == "__main__":

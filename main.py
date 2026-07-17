@@ -66,6 +66,7 @@ printer_manager: Optional[PrinterManager] = None
 cloud_service: Optional[CloudService] = None
 # sse_clients 存储所有活跃的 SSE 连接队列
 sse_clients: list[asyncio.Queue] = []
+SSE_QUEUE_MAXSIZE = 32
 node_id: Optional[str] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 preview_cache: Dict[str, Dict[str, Any]] = {}
@@ -101,6 +102,24 @@ def _configure_runtime_logging_from_disk():
     config_repo = PrinterConfig()
     return configure_logging(config_repo.get_full_config())
 
+
+def _enqueue_sse_latest(queue: asyncio.Queue, message: Dict[str, Any]) -> None:
+    try:
+        queue.put_nowait(message)
+        return
+    except asyncio.QueueFull:
+        pass
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+    try:
+        queue.put_nowait(message)
+    except asyncio.QueueFull:
+        # The event loop is the sole queue writer in production. This guard
+        # keeps the helper safe if a test or future caller introduces a race.
+        pass
+
 @app.on_event("startup")
 async def startup_event():
     global printer_manager, cloud_service, node_id, sse_clients, main_loop, qr_code_request_lock, config_service
@@ -128,8 +147,7 @@ async def startup_event():
     # 清理 portable temp 目录中的遗留文件
     cleanup_temp_dir(max_age_hours=24)
     file_mgr.start()
-    document_pipeline = build_document_pipeline(printer_manager.config, logger)
-    document_pipeline.start()
+    build_document_pipeline(printer_manager.config, logger)
     logger.info(" 文件管理器已启动（包含预览图缓存清理）")
     
     # 初始化云端服务
@@ -170,10 +188,7 @@ async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
         logger.debug(f" 广播SSE事件: {event_type} -> {client_count} 客户端")
         
         for q in sse_clients:
-            try:
-                q.put_nowait(message)
-            except asyncio.QueueFull:
-                pass
+            _enqueue_sse_latest(q, message)
     except Exception as e:
         logger.error(f" 广播SSE事件失败: {e}")
 
@@ -240,10 +255,7 @@ def handle_cloud_message(data: Dict[str, Any]):
 
         def push_to_queues():
             for q in sse_clients:
-                try:
-                    q.put_nowait(enriched_message)
-                except asyncio.QueueFull:
-                    pass
+                _enqueue_sse_latest(q, enriched_message)
 
         if main_loop:
             main_loop.call_soon_threadsafe(push_to_queues)
@@ -506,6 +518,7 @@ def _build_file_url(file_url: str):
     return f"{base_url}/{file_url}"
 
 def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Optional[str] = None):
+    path = None
     try:
         headers = cloud_service.auth_client.get_auth_headers() if cloud_service and cloud_service.auth_client else {}
 
@@ -541,14 +554,16 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
 
         ext = os.path.splitext(file_name or "")[1].lower() or ".bin"
         path = get_temp_file_path(prefix="preview", suffix=ext)
+        from urllib.parse import urlsplit
+        parsed_download = urlsplit(download_url)
         logger.debug(
-            "Downloading preview source: file_id=%s file_name=%s auth=%s url=%s path=%s headers=%s",
+            "Downloading preview source: file_id=%s file_name=%s auth=%s host=%s path=%s target=%s",
             file_id,
             file_name,
             auth_mode,
-            download_url,
+            parsed_download.netloc,
+            parsed_download.path,
             path,
-            headers,
         )
 
         resp = requests.get(download_url, headers=headers, stream=True, timeout=60)
@@ -573,6 +588,11 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
         )
         return path, None
     except Exception as e:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         logger.exception("Preview file download failed: file_id=%s file_name=%s", file_id, file_name)
         return None, str(e)
 
@@ -831,7 +851,7 @@ async def get_qr_code():
 async def events(request: Request):
     """SSE 事件流"""
     # 为当前连接创建一个专用队列
-    client_queue = asyncio.Queue()
+    client_queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
     sse_clients.append(client_queue)
     logger.debug(f" 新的SSE连接建立，当前客户端数: {len(sse_clients)}")
     
@@ -919,9 +939,12 @@ async def preview(request: Request):
         options_for_cache["page_index"] = page_index
         key = f"{file_id}:{json.dumps(options_for_cache, sort_keys=True, ensure_ascii=False)}"
 
-        if key in preview_cache:
+        file_mgr = get_file_manager()
+        if not file_mgr:
+            return JSONResponse(status_code=503, content={"success": False, "message": "文件服务未就绪"})
+        cached_payload = file_mgr.get_preview(key)
+        if cached_payload:
             logger.info("Preview cache hit: file_id=%s page_index=%s", file_id, page_index)
-            cached_payload = preview_cache[key]
             return {
                 "success": True,
                 "preview_url": cached_payload["preview_url"],
@@ -955,12 +978,11 @@ async def preview(request: Request):
         encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
         data_url = f"data:image/png;base64,{encoded}"
         cache_key = f"{file_id}:{json.dumps({**options_for_cache, 'page_index': resolved_page_index}, sort_keys=True, ensure_ascii=False)}"
-        preview_cache[cache_key] = {
+        file_mgr.put_preview(cache_key, {
             "preview_url": data_url,
             "page_count": page_count,
             "page_index": resolved_page_index,
-            "timestamp": time.time(),
-        }
+        })
         logger.info(
             "Preview generated: file_id=%s page_index=%s page_count=%s download_ms=%.1f prepare_render_ms=%.1f total_ms=%.1f",
             file_id,

@@ -1,6 +1,7 @@
 import {
   configModel,
   isActionPending,
+  isPrinterActionPending,
   isDirty,
   printerAddr,
   printerName,
@@ -228,6 +229,23 @@ function renderRuntimeSection(state) {
   `;
 }
 
+function printerStatusLabel(item) {
+  const labels = {
+    idle: "可用",
+    processing: "打印中",
+    stopped: "已停止",
+    offline: "离线",
+    unknown: "状态未知",
+    printer_out_of_paper: "缺纸",
+    printer_out_of_toner: "碳粉已用尽",
+    printer_jammed: "卡纸",
+    printer_cover_open: "机盖打开",
+    printer_user_intervention: "需要处理",
+  };
+  const status = item.status || (item.enabled === false ? "已禁用" : "unknown");
+  return labels[status] || status;
+}
+
 function renderManagedTable(state) {
   if (!state.managed.length) {
     return '<tr><td class="muted" colspan="6">暂无已管理打印机</td></tr>';
@@ -238,21 +256,27 @@ function renderManagedTable(state) {
     const isDefaultPrinter = id && id === state.defaultPrinterId;
     const test = state.printerTests?.[id];
     const testRunning = test?.status === "running" || isActionPending(state, "test", id);
-    const testMessage = test?.current?.message || test?.result?.message || "";
+    const currentPage = Number(test?.current?.current_page);
+    const totalPages = Number(test?.current?.total_pages);
+    const hasPages = Number.isInteger(currentPage) && currentPage > 0 && Number.isInteger(totalPages) && totalPages > 0;
+    const testMessage = testRunning && hasPages
+      ? `正在打印，第 ${Math.min(currentPage, totalPages)} / ${totalPages} 页……`
+      : test?.current?.message || test?.result?.message || "";
+    const rowLocked = state.printersRefreshing || state.ippProbing || testRunning || isPrinterActionPending(state, id);
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}${isDefaultPrinter ? '<span class="default-tag">默认</span>' : ""}</td>
         <td class="muted">${escapeHtml(id || "-")}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
-        <td>${escapeHtml(item.status || (item.enabled === false ? "已禁用" : "未知"))}</td>
+        <td>${escapeHtml(printerStatusLabel(item))}</td>
         <td class="capability-cell">${escapeHtml(printerCapabilitySummary(item))}</td>
         <td>
           <div class="ops">
-            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isDefaultPrinter || isActionPending(state, "default", id) ? "disabled" : ""}>设为默认</button>
-            <button type="button" class="btn" data-action="test-printer" data-id="${escapeHtml(id)}" ${state.printersRefreshing || testRunning ? "disabled" : ""}>${testRunning ? "测试中…" : "测试打印"}</button>
-            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isActionPending(state, "reregister", id) ? "disabled" : ""}>重新注册云端</button>
-            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isActionPending(state, "delete", id) ? "disabled" : ""}>删除</button>
-            ${item.uncertain ? `<button type="button" class="btn" data-action="clear-unconfirmed" data-id="${escapeHtml(id)}" ${isActionPending(state, "clear-unconfirmed", id) ? "disabled" : ""}>解除结果未知锁定</button>` : ""}
+            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(id)}" ${rowLocked || isDefaultPrinter ? "disabled" : ""}>设为默认</button>
+            <button type="button" class="btn" data-action="test-printer" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>${testRunning ? "测试中…" : "测试打印"}</button>
+            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>重新注册云端</button>
+            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>删除</button>
+            ${item.uncertain ? `<button type="button" class="btn" data-action="clear-unconfirmed" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>解除结果未知锁定</button>` : ""}
           </div>
           ${testMessage ? `<p class="muted">${escapeHtml(testMessage)}</p>` : ""}
         </td>
@@ -276,7 +300,7 @@ function renderDiscoveredTable(state) {
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
         <td class="capability-cell">${escapeHtml(item.compatible === false ? issues || "不兼容" : printerCapabilitySummary(item))}</td>
         <td>
-          <button type="button" class="btn btn-primary" data-action="add" data-index="${index}" ${state.printersRefreshing || item.compatible === false || isActionPending(state, "add", index) ? "disabled" : ""}>添加</button>
+          <button type="button" class="btn btn-primary" data-action="add" data-index="${index}" ${state.printersRefreshing || state.ippProbing || item.compatible === false || isActionPending(state, "add", index) ? "disabled" : ""}>添加</button>
         </td>
       </tr>
     `;
@@ -306,7 +330,10 @@ function renderPrintersSection(state) {
           <button type="button" class="btn btn-primary" data-action="probe-ipp" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>${state.ippProbing ? "正在检测…" : "检测 IPP 打印机"}</button>
         </div>
       </div>
-      ${state.ippProbeResult ? `<p class="muted">${escapeHtml(state.ippProbeResult.message || "检测完成")}</p>` : ""}
+      ${state.ippProbeResult ? `
+        <p class="muted">${escapeHtml(state.ippProbeResult.message || "检测完成")}</p>
+        ${state.ippProbeResult.item?.compatible ? `<button type="button" class="btn btn-primary" data-action="add-probed" ${state.printersRefreshing || state.ippProbing || isActionPending(state, "add-probed", state.ippProbeResult.item.ipp_uri) ? "disabled" : ""}>添加此打印机</button>` : ""}
+      ` : ""}
     </section>
     <section class="admin-card">
       <div class="card-header">

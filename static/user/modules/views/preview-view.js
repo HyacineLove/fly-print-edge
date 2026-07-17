@@ -114,6 +114,7 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
   let previewPageCount = 0;
   let previewFailureMode = false;
   let printSubmitting = false;
+  let previewControlsLocked = true;
 
   function setPreviewCountdownDisplay(value) {
     setText(["77_44", "97_449"], String(Math.max(0, value)));
@@ -142,20 +143,35 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
     const enabled = previewFirstLoadDone && !previewLoading && !previewFailureMode && previewPageCount > 1;
     prevBtn.disabled = !enabled || previewCurrentPage <= 0;
     nextBtn.disabled = !enabled || previewCurrentPage >= previewPageCount - 1;
+    updatePrintButtonState();
+  }
+
+  function setInteractionDisabled(element, disabled) {
+    if (!element) return;
+    element.classList.toggle("is-disabled", disabled);
+    element.style.pointerEvents = disabled ? "none" : "auto";
+    element.setAttribute("aria-disabled", disabled ? "true" : "false");
+  }
+
+  function updatePrintButtonState() {
+    const locked =
+      previewControlsLocked ||
+      !previewFirstLoadDone ||
+      previewLoading ||
+      previewFailureMode ||
+      printSubmitting ||
+      Boolean(previewRefreshTimer);
+    setInteractionDisabled(q("97_460"), locked);
   }
 
   function setPreviewControlsLocked(locked, allowBackWhenLocked = false) {
+    previewControlsLocked = locked;
     const optionsGroup = q("115_60");
     const backBtn = q("97_454");
-    const printBtn = q("97_460");
 
-    optionsGroup?.classList.toggle("is-disabled", locked);
-    backBtn?.classList.toggle("is-disabled", locked && !allowBackWhenLocked);
-    printBtn?.classList.toggle("is-disabled", locked);
-
-    if (optionsGroup) optionsGroup.style.pointerEvents = locked ? "none" : "auto";
-    if (backBtn) backBtn.style.pointerEvents = locked && !allowBackWhenLocked ? "none" : "auto";
-    if (printBtn) printBtn.style.pointerEvents = locked ? "none" : "auto";
+    setInteractionDisabled(optionsGroup, locked);
+    setInteractionDisabled(backBtn, locked && !allowBackWhenLocked);
+    updatePrintButtonState();
     updatePreviewPageButtons();
   }
 
@@ -300,6 +316,7 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
         resumePreviewCountdown(true);
       }
     }, 120);
+    updatePrintButtonState();
   }
 
   previewCountdownTimer = window.setInterval(() => {
@@ -374,26 +391,29 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
     await renderPreview(previewCurrentPage + 1, false);
   });
   on("97_460", () => {
-    if (!previewFirstLoadDone || previewFailureMode || !session.file?.file_id || printSubmitting) return;
+    if (
+      !previewFirstLoadDone ||
+      previewLoading ||
+      previewFailureMode ||
+      previewRefreshTimer ||
+      !session.file?.file_id ||
+      printSubmitting
+    ) return;
     printSubmitting = true;
     setPreviewControlsLocked(true);
-    try {
-      queuePrintRequest({
-        session_id: currentSessionId() || undefined,
-        file_id: session.file.file_id,
-        task_token: session.file.task_token || undefined,
-        options: {
-          copies: Number(session.options.copies || 1),
-          duplex: normalizeDuplexForApi(session.options.duplex),
-          color_mode: session.options.color_mode || "color",
-          scale_mode: normalizeScaleMode(session.options.scale_mode),
-          paper_size: String(session.options.paper_size || defaultPaperSize),
-          max_upscale: normalizeMaxUpscale(session.options.max_upscale || defaultMaxUpscale),
-        },
-      });
-    } finally {
-      printSubmitting = false;
-    }
+    queuePrintRequest({
+      session_id: currentSessionId() || undefined,
+      file_id: session.file.file_id,
+      task_token: session.file.task_token || undefined,
+      options: {
+        copies: Number(session.options.copies || 1),
+        duplex: normalizeDuplexForApi(session.options.duplex),
+        color_mode: session.options.color_mode || "color",
+        scale_mode: normalizeScaleMode(session.options.scale_mode),
+        paper_size: String(session.options.paper_size || defaultPaperSize),
+        max_upscale: normalizeMaxUpscale(session.options.max_upscale || defaultMaxUpscale),
+      },
+    });
   });
 
   renderOptionsUI();

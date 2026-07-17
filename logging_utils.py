@@ -1,5 +1,7 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+import re
 import sys
 from typing import Any, Dict, Mapping, Optional
 
@@ -12,6 +14,32 @@ NOISY_DEPENDENCY_LOGGERS = {
     "websockets": logging.INFO,
     "websockets.client": logging.INFO,
 }
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
+
+def redact_sensitive_text(value: str) -> str:
+    text = str(value)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"(?i)([?&](?:token|access_token|file_access_token|client_secret)=)[^&\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\b(?:authorization|token|access_token|file_access_token|client_secret)\b\s*[:=]\s*)"
+        r"([^\s,;}\]]+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    return text
+
+
+class SensitiveDataFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_sensitive_text(record.getMessage())
+        record.args = ()
+        return True
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
@@ -67,11 +95,21 @@ def configure_logging(
         _log_dir = os.path.join(_app_dir, "logs")
         os.makedirs(_log_dir, exist_ok=True)
         _log_path = os.path.join(_log_dir, "edge.log")
-        handlers.append(logging.FileHandler(_log_path, encoding="utf-8"))
+        handlers.append(
+            RotatingFileHandler(
+                _log_path,
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+        )
     except Exception:
         pass  # never let logging setup crash the server
     if not handlers:
         handlers.append(logging.NullHandler())
+    sensitive_filter = SensitiveDataFilter()
+    for handler in handlers:
+        handler.addFilter(sensitive_filter)
     logging.basicConfig(
         level=resolved["level"],
         format=fmt,

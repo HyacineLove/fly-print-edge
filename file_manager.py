@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -13,6 +14,8 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+DEFAULT_PREVIEW_MAX_ENTRIES = 64
+DEFAULT_PREVIEW_MAX_BYTES = 128 * 1024 * 1024
 
 
 def is_valid_content_hash(content_hash: Optional[str]) -> bool:
@@ -27,10 +30,14 @@ class FileManager:
         cleanup_interval: int = 300,
         file_ttl: int = 1800,
         preview_cache: Optional[Dict] = None,
+        preview_max_entries: int = DEFAULT_PREVIEW_MAX_ENTRIES,
+        preview_max_bytes: int = DEFAULT_PREVIEW_MAX_BYTES,
     ):
         self.cleanup_interval = cleanup_interval
         self.file_ttl = file_ttl
         self.preview_cache = preview_cache if preview_cache is not None else {}
+        self.preview_max_entries = max(1, int(preview_max_entries))
+        self.preview_max_bytes = max(1, int(preview_max_bytes))
         self.preview_lock = threading.Lock()
         self.file_access_tokens: Dict[str, Dict[str, str]] = {}
         self.token_lock = threading.Lock()
@@ -57,7 +64,59 @@ class FileManager:
 
     def _cleanup_loop(self) -> None:
         while not self._stop_event.wait(self.cleanup_interval):
-            self.cleanup_expired_files()
+            try:
+                self.cleanup_expired_files()
+            except Exception:
+                logger.exception("Session file cleanup failed")
+
+    @staticmethod
+    def _preview_size(value: Dict[str, Any]) -> int:
+        stored = value.get("size_bytes")
+        if isinstance(stored, int) and stored >= 0:
+            return stored
+        return len(str(value.get("preview_url") or "").encode("utf-8"))
+
+    def _enforce_preview_limits_locked(self) -> None:
+        total_bytes = sum(
+            self._preview_size(value)
+            for value in self.preview_cache.values()
+            if isinstance(value, dict)
+        )
+        while self.preview_cache and (
+            len(self.preview_cache) > self.preview_max_entries
+            or total_bytes > self.preview_max_bytes
+        ):
+            oldest_key = next(iter(self.preview_cache))
+            removed = self.preview_cache.pop(oldest_key, None)
+            if isinstance(removed, dict):
+                total_bytes -= self._preview_size(removed)
+
+    def get_preview(self, key: str) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self.preview_lock:
+            value = self.preview_cache.pop(key, None)
+            if not isinstance(value, dict):
+                return None
+            try:
+                expired = now - float(value.get("timestamp", 0)) > self.file_ttl
+            except (TypeError, ValueError):
+                expired = True
+            if expired:
+                return None
+            refreshed = dict(value)
+            refreshed["timestamp"] = now
+            refreshed["size_bytes"] = self._preview_size(refreshed)
+            self.preview_cache[key] = refreshed
+            return dict(refreshed)
+
+    def put_preview(self, key: str, value: Dict[str, Any]) -> None:
+        stored = dict(value)
+        stored["timestamp"] = time.time()
+        stored["size_bytes"] = self._preview_size(stored)
+        with self.preview_lock:
+            self.preview_cache.pop(key, None)
+            self.preview_cache[key] = stored
+            self._enforce_preview_limits_locked()
 
     def release_preview_resource(self, file_id: str, reason: str = "manual") -> bool:
         del reason
@@ -81,7 +140,11 @@ class FileManager:
             ]
             for key in expired:
                 self.preview_cache.pop(key, None)
+            self._enforce_preview_limits_locked()
         self.cleanup_expired_tokens()
+        from portable_temp import cleanup_temp_dir
+
+        cleanup_temp_dir(max_age_hours=24)
 
     def cleanup_all_preview_files(self) -> None:
         with self.preview_lock:
@@ -137,10 +200,13 @@ class FileManager:
         if not artifact:
             return False
         success = True
+        artifact_paths = []
         for path_key in ("source_path", "converted_path"):
             if path_key == "source_path" and not artifact.get("owns_source", True):
                 continue
             path = artifact.get(path_key)
+            if path:
+                artifact_paths.append(path)
             if path and os.path.exists(path):
                 try:
                     os.remove(path)
@@ -153,7 +219,24 @@ class FileManager:
                 except OSError as exc:
                     logger.warning("Failed to delete print artifact: file=%s error=%s", path, exc)
                     success = False
+        for path in artifact_paths:
+            self._remove_empty_download_parents(path)
         return success
+
+    @staticmethod
+    def _remove_empty_download_parents(file_path: str) -> None:
+        from portable_temp import get_portable_temp_dir
+
+        try:
+            downloads_root = (Path(get_portable_temp_dir()) / "downloads").resolve()
+            parent = Path(file_path).resolve().parent
+            if downloads_root not in parent.parents:
+                return
+            while parent != downloads_root:
+                parent.rmdir()
+                parent = parent.parent
+        except OSError:
+            return
 
     @staticmethod
     def _token_is_expired(expires_at: Optional[str]) -> bool:
@@ -171,6 +254,13 @@ class FileManager:
         with self.preview_lock:
             return {
                 "preview_entries": len(self.preview_cache),
+                "preview_bytes": sum(
+                    self._preview_size(value)
+                    for value in self.preview_cache.values()
+                    if isinstance(value, dict)
+                ),
+                "preview_max_entries": self.preview_max_entries,
+                "preview_max_bytes": self.preview_max_bytes,
                 "file_ttl": self.file_ttl,
                 "cleanup_interval": self.cleanup_interval,
             }
@@ -187,11 +277,15 @@ def init_file_manager(
     cleanup_interval: int = 300,
     file_ttl: int = 1800,
     preview_cache: Optional[Dict] = None,
+    preview_max_entries: int = DEFAULT_PREVIEW_MAX_ENTRIES,
+    preview_max_bytes: int = DEFAULT_PREVIEW_MAX_BYTES,
 ) -> FileManager:
     global file_manager
     file_manager = FileManager(
         cleanup_interval,
         file_ttl,
         preview_cache,
+        preview_max_entries,
+        preview_max_bytes,
     )
     return file_manager

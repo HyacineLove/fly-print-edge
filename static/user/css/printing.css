@@ -251,24 +251,24 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   }
 }
 
-.Pixso-paragraph-115_26 {
-  font-size: 24px;
+.printing-status-message {
+  font-size: 32px;
   font-family: "Microsoft YaHei-Bold";
   font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
   letter-spacing: 0em;
   color: rgba(96.85095977783203, 96.85095977783203, 96.85095977783203, 1);
-  width: auto;
+  width: 700px;
   height: auto;
   position: absolute;
-  left: 50%;
-  top: 1857px;
-  transform: translateX(calc(-50% + 0px));
-  white-space: pre;
+  left: 190px;
+  top: 1148px;
+  white-space: normal;
   flex-grow: 0;
 }
 
-.Pixso-rectangle-115_17,
-.Pixso-paragraph-115_26 {
+.Pixso-rectangle-115_17 {
   display: none;
 }
 

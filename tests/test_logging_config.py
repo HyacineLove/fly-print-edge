@@ -1,8 +1,17 @@
 import unittest
 import logging
+from logging.handlers import RotatingFileHandler
+import tempfile
+from pathlib import Path
 
 from config_service import ConfigService
-from logging_utils import configure_logging, resolve_log_settings
+from logging_utils import (
+    LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES,
+    configure_logging,
+    redact_sensitive_text,
+    resolve_log_settings,
+)
 
 
 class LoggingConfigTests(unittest.TestCase):
@@ -44,6 +53,23 @@ class LoggingConfigTests(unittest.TestCase):
         self.assertEqual(logging.INFO, logging.getLogger("urllib3").level)
         self.assertEqual(logging.INFO, logging.getLogger("websockets").level)
         self.assertEqual(logging.INFO, logging.getLogger("asyncio").level)
+
+    def test_file_logging_rotates_and_sensitive_values_are_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rotating = RotatingFileHandler(
+                Path(tmp) / "edge.log",
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            self.assertEqual(LOG_MAX_BYTES, rotating.maxBytes)
+            self.assertEqual(LOG_BACKUP_COUNT, rotating.backupCount)
+            rotating.close()
+        redacted = redact_sensitive_text(
+            "Authorization: Bearer abc token=one&access_token=two client_secret=three"
+        )
+        for secret in ("abc", "one", "two", "three"):
+            self.assertNotIn(secret, redacted)
 
 
 class ConfigServiceLoggingValidationTests(unittest.TestCase):

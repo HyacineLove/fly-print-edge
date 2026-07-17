@@ -105,14 +105,7 @@ export function bindPrinterActions(state, render) {
     setActionPending(state, "add", index, true);
     render();
     try {
-      const result = await withPrinterOverlay("添加中...", async () => {
-        const response = await requestAdmin("/printers/add", {
-          method: "POST",
-          body: JSON.stringify({ ipp_uri: item.ipp_uri }),
-        });
-        await refreshPrinters({ showToast: false, showOverlay: false });
-        return response;
-      });
+      const result = await addPrinter(item.ipp_uri);
       if (result.cloud_error) {
         showAdminToast(`打印机已添加，但云端注册失败: ${result.cloud_error}`, "error", 4200);
       } else {
@@ -149,22 +142,46 @@ export function bindPrinterActions(state, render) {
         showAdminToast(state.ippProbeResult.message, "error", 4200);
         return;
       }
-      state.ippProbeResult = { message: `检测通过：${item.name}` };
-      const added = await requestAdmin("/printers/add", {
-        method: "POST",
-        body: JSON.stringify({ ipp_uri: ippUri }),
-      });
-      await refreshPrinters({ showToast: false, showOverlay: false });
-      showAdminToast(
-        added.cloud_error ? `打印机已添加，但云端注册失败: ${added.cloud_error}` : "IPP 打印机已添加",
-        added.cloud_error ? "error" : "success",
-        4200,
-      );
+      state.ippProbeResult = { message: `检测通过：${item.name}，确认后可添加。`, item };
+      showAdminToast("IPP 打印机检测通过", "success", 3200);
     } catch (error) {
       state.ippProbeResult = { message: error.message || "IPP 检测失败" };
       showAdminToast(state.ippProbeResult.message, "error", 4200);
     } finally {
       state.ippProbing = false;
+      render();
+    }
+  }
+
+  async function addPrinter(ippUri) {
+    return withPrinterOverlay("添加中...", async () => {
+      const response = await requestAdmin("/printers/add", {
+        method: "POST",
+        body: JSON.stringify({ ipp_uri: ippUri }),
+      });
+      await refreshPrinters({ showToast: false, showOverlay: false });
+      return response;
+    });
+  }
+
+  async function addProbedPrinter() {
+    const item = state.ippProbeResult?.item;
+    const ippUri = item?.ipp_uri;
+    if (!ippUri || isActionPending(state, "add-probed", ippUri)) return;
+    setActionPending(state, "add-probed", ippUri, true);
+    render();
+    try {
+      const result = await addPrinter(ippUri);
+      state.ippProbeResult = null;
+      showAdminToast(
+        result.cloud_error ? `打印机已添加，但云端注册失败: ${result.cloud_error}` : "IPP 打印机已添加",
+        result.cloud_error ? "error" : "success",
+        4200,
+      );
+    } catch (error) {
+      showAdminToast(error.message || "添加打印机失败", "error", 4200);
+    } finally {
+      setActionPending(state, "add-probed", ippUri, false);
       render();
     }
   }
@@ -220,7 +237,7 @@ export function bindPrinterActions(state, render) {
       });
       let task;
       do {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
         task = await requestAdmin(`/printer-tests/${encodeURIComponent(started.task_id)}`);
         state.printerTests[printerId] = task;
         render();
@@ -272,12 +289,27 @@ export function bindPrinterActions(state, render) {
       probeIppPrinter();
       return;
     }
+    if (action === "add-probed") {
+      addProbedPrinter();
+      return;
+    }
     if (action === "test-printer") {
       testPrinter(target.dataset.id || "");
       return;
     }
     if (action === "clear-unconfirmed") {
       clearUnconfirmed(target.dataset.id || "");
+    }
+  });
+
+  document.getElementById("configPanel")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "manualIppUri") return;
+    const nextUri = target.value.trim();
+    state.ippProbeUri = nextUri;
+    if (state.ippProbeResult?.item?.ipp_uri !== nextUri) {
+      state.ippProbeResult = null;
+      render();
     }
   });
 

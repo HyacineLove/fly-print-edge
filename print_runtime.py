@@ -25,13 +25,15 @@ def build_document_pipeline(config_repo, logger) -> DocumentPipeline:
         if _PIPELINE is None or _PIPELINE_KEY != key:
             if _PIPELINE is not None:
                 _PIPELINE.stop()
-            _PIPELINE = DocumentPipeline(
+            pipeline = DocumentPipeline(
                 libreoffice_path,
                 root / "document-cache",
                 root / "jobs",
                 root / "libreoffice-profile",
                 logger,
             )
+            pipeline.start()
+            _PIPELINE = pipeline
             _PIPELINE_KEY = key
         return _PIPELINE
 

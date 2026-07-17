@@ -28,7 +28,7 @@ PRINTER_ATTRIBUTES = [
 ]
 JOB_ATTRIBUTES = [
     "job-id", "job-uri", "job-name", "job-state", "job-state-reasons", "job-state-message",
-    "job-impressions", "job-impressions-completed", "job-media-sheets-completed",
+    "job-impressions", "job-impressions-completed",
     "copies", "copies-actual", "sides", "sides-actual", "print-color-mode",
     "print-color-mode-actual", "media", "media-actual", "time-at-creation",
     "time-at-processing", "time-at-completed",

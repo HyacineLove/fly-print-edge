@@ -14,8 +14,8 @@ export function renderPrintingView() {
       <div id="77_19" class="Pixso-rectangle-77_19">
         <div class="shadow-blend-77_19-0"></div>
       </div>
-      <div id="77_20" class="Pixso-rectangle-77_20 fill-primary-gradient"></div>
-      <p id="115_26" class="Pixso-paragraph-115_26"></p>
+      <div id="77_20" class="Pixso-rectangle-77_20 fill-primary-gradient" aria-hidden="true"></div>
+      <p id="printing_status_message" class="printing-status-message" role="status" aria-live="polite"></p>
     </div>
   </div>
 </div>
@@ -40,6 +40,31 @@ export function bindPrintingViewEvents({ appState, finishWithResult }) {
 
   renderPrintingIndicator();
 
+  function renderJobStatus(data = {}) {
+    const status = String(data.status || "").toLowerCase();
+    const completedPages = Number(data.current_page);
+    const totalPages = Number(data.total_pages);
+    const hasPageProgress =
+      data.current_page !== null &&
+      data.current_page !== undefined &&
+      Number.isInteger(completedPages) &&
+      completedPages >= 0 &&
+      Number.isInteger(totalPages) &&
+      totalPages > 0;
+    const activePage = hasPageProgress ? Math.min(completedPages + 1, totalPages) : null;
+    const messages = {
+      preparing: "正在准备打印文件……",
+      submitting: "正在发送到打印机……",
+      queued: "打印机正在处理任务……",
+      printing: hasPageProgress ? `正在打印，第 ${activePage} / ${totalPages} 页……` : "打印机正在打印……",
+    };
+    const message = messages[status] || data.message || "正在等待打印状态……";
+    const label = q("printing_status_message");
+    if (label) label.textContent = message;
+  }
+
+  renderJobStatus(appState.printing);
+
   if (!pendingPrintRequest && !waitingExistingJob) {
     finishWithResult("error", "打印请求已丢失，请重新扫码上传");
     return {
@@ -57,7 +82,7 @@ export function bindPrintingViewEvents({ appState, finishWithResult }) {
   }
 
   return {
-    handleJobStatus() {},
+    handleJobStatus: renderJobStatus,
     destroy() {},
   };
 }

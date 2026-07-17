@@ -109,6 +109,7 @@ class InnoSetupScriptTests(unittest.TestCase):
         self.assertIn('RunOnceId: "StopFlyPrintEdge"', text)
         self.assertIn("CloseApplications=yes", text)
         self.assertIn("RestartApplications=no", text)
+        self.assertIn('Name: "{localappdata}\\FlyPrint Edge"', text)
 
 
 if __name__ == "__main__":

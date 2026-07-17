@@ -60,6 +60,9 @@ class AdminShellStructureTests(unittest.TestCase):
         self.assertNotIn("打印就绪", render_script)
         self.assertIn("IPP", render_script)
         self.assertIn("probe-ipp", render_script)
+        self.assertIn("add-probed", render_script)
+        self.assertIn("isPrinterActionPending", render_script)
+        self.assertIn("确认后可添加", printer_script)
         self.assertNotIn("WSD", render_script)
         self.assertNotIn("Windows 队列", render_script)
 

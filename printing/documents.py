@@ -79,7 +79,7 @@ class DocumentPipeline:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._guard = threading.Lock()
-        self._key_locks: dict[str, threading.Lock] = {}
+        self._key_locks: dict[str, tuple[threading.Lock, int]] = {}
         self._leases: dict[str, int] = {}
         self._stop_event = threading.Event()
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -132,8 +132,7 @@ class DocumentPipeline:
         extension, version = self._resolve_kind(identity)
         cache_key = f"{identity.content_hash}-{version}"
         cached = self.cache_dir / f"{cache_key}.pdf"
-        lock = self._lock_for(cache_key)
-        with lock:
+        with self._key_lock(cache_key):
             if cached.is_file():
                 try:
                     page_count = self._validate_pdf(cached)
@@ -426,9 +425,25 @@ class DocumentPipeline:
             return extension, IMAGE_CONVERSION_VERSION
         raise PrintError(ErrorCode.DOCUMENT_UNSUPPORTED, f"unsupported source kind: {identity.source_name!r} {identity.source_kind!r}")
 
-    def _lock_for(self, cache_key: str) -> threading.Lock:
+    @contextmanager
+    def _key_lock(self, cache_key: str):
         with self._guard:
-            return self._key_locks.setdefault(cache_key, threading.Lock())
+            entry = self._key_locks.get(cache_key)
+            lock, references = entry if entry else (threading.Lock(), 0)
+            self._key_locks[cache_key] = (lock, references + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._guard:
+                current = self._key_locks.get(cache_key)
+                if not current or current[0] is not lock:
+                    return
+                remaining = current[1] - 1
+                if remaining > 0:
+                    self._key_locks[cache_key] = (lock, remaining)
+                else:
+                    self._key_locks.pop(cache_key, None)
 
     def _cleanup_loop(self) -> None:
         while not self._stop_event.wait(self.cleanup_interval_seconds):

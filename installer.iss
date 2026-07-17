@@ -6,7 +6,7 @@
 #define MyLauncherExeName "flyprint-launcher.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.17"
+  #define MyAppVersion "1.0.18"
 #endif
 
 [Setup]
@@ -71,3 +71,4 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\temp"
+Type: filesandordirs; Name: "{localappdata}\FlyPrint Edge"

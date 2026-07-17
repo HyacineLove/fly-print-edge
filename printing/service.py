@@ -21,7 +21,6 @@ STATE_MESSAGES = {
     PrintState.UNCONFIRMED: USER_MESSAGES[ErrorCode.RESULT_UNCONFIRMED],
 }
 
-
 class DeviceJobRegistry:
     """Process-local serialization and duplicate-print protection per physical device."""
 
@@ -131,7 +130,14 @@ class IppPrintService:
                 (time.perf_counter() - submit_started_at) * 1000,
                 (time.perf_counter() - execute_started_at) * 1000,
             )
-            self._emit(request, callback, PrintState.QUEUED, total_pages=prepared.page_count * request.options.copies, details={"ipp_job_id": ref.job_id})
+            total_pages = prepared.page_count * request.options.copies
+            self._emit(
+                request,
+                callback,
+                PrintState.QUEUED,
+                total_pages=total_pages,
+                details={"ipp_job_id": ref.job_id},
+            )
             return self._monitor(request, prepared.page_count, ref, client, cancel_event, callback)
         except PrintError as exc:
             if exc.state == PrintState.UNCONFIRMED:
@@ -164,11 +170,27 @@ class IppPrintService:
             current_page = min(total_pages, max(0, int(current_page_raw))) if current_page_raw is not None else None
             signature = (state, current_page, tuple(job.get("job-state-reasons", [])), tuple(printer.get("printer-state-reasons", [])))
             if signature != last_signature:
-                self.logger.info("ipp_job_status job_id=%s device_job_id=%s state=%s current=%s total=%s job_reasons=%r printer_reasons=%r", request.job_id, ref.job_id, state, current_page, total_pages, job.get("job-state-reasons", []), printer.get("printer-state-reasons", []))
+                self.logger.info(
+                    "ipp_job_status job_id=%s device_job_id=%s state=%s pages=%s/%s job_reasons=%r printer_reasons=%r",
+                    request.job_id,
+                    ref.job_id,
+                    state,
+                    current_page,
+                    total_pages,
+                    job.get("job-state-reasons", []),
+                    printer.get("printer-state-reasons", []),
+                )
                 last_signature = signature
 
             if state == 9:
-                event = PrintEvent(PrintState.COMPLETED, STATE_MESSAGES[PrintState.COMPLETED], request.job_id, current_page=total_pages, total_pages=total_pages, details={"ipp_job_id": ref.job_id, "completion_basis": "ipp_job_completed"})
+                event = PrintEvent(
+                    PrintState.COMPLETED,
+                    STATE_MESSAGES[PrintState.COMPLETED],
+                    request.job_id,
+                    current_page=total_pages,
+                    total_pages=total_pages,
+                    details={"ipp_job_id": ref.job_id, "completion_basis": "ipp_job_completed"},
+                )
                 if callback:
                     callback(event)
                 return event
@@ -177,7 +199,14 @@ class IppPrintService:
             if state == 7:
                 if detected_fault:
                     raise PrintError(detected_fault, "faulted IPP job was canceled", details={"job_reasons": job.get("job-state-reasons", [])})
-                event = PrintEvent(PrintState.CANCELED, STATE_MESSAGES[PrintState.CANCELED], request.job_id, current_page=current_page, total_pages=total_pages, error_code=ErrorCode.PRINT_CANCELED)
+                event = PrintEvent(
+                    PrintState.CANCELED,
+                    STATE_MESSAGES[PrintState.CANCELED],
+                    request.job_id,
+                    current_page=current_page,
+                    total_pages=total_pages,
+                    error_code=ErrorCode.PRINT_CANCELED,
+                )
                 if callback:
                     callback(event)
                 return event
@@ -193,7 +222,14 @@ class IppPrintService:
                 cancel_sent = True
 
             event_state = PrintState.PRINTING if state == 5 else PrintState.QUEUED
-            self._emit(request, callback, event_state, current_page=current_page, total_pages=total_pages, details={"ipp_job_id": ref.job_id, "ipp_job_state": state})
+            self._emit(
+                request,
+                callback,
+                event_state,
+                current_page=current_page,
+                total_pages=total_pages,
+                details={"ipp_job_id": ref.job_id, "ipp_job_state": state},
+            )
             time.sleep(self.poll_seconds)
 
         try:
@@ -238,8 +274,23 @@ class IppPrintService:
         return event
 
     @staticmethod
-    def _emit(request, callback, state, message=None, current_page=None, total_pages=None, details=None) -> PrintEvent:
-        event = PrintEvent(state, message or STATE_MESSAGES[state], request.job_id, current_page, total_pages, details=details or {})
+    def _emit(
+        request,
+        callback,
+        state,
+        message=None,
+        current_page=None,
+        total_pages=None,
+        details=None,
+    ) -> PrintEvent:
+        event = PrintEvent(
+            state,
+            message or STATE_MESSAGES[state],
+            request.job_id,
+            current_page=current_page,
+            total_pages=total_pages,
+            details=details or {},
+        )
         if callback:
             callback(event)
         return event

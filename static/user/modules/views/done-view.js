@@ -38,9 +38,19 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
     "printer_offline",
     "printer_user_intervention",
   ]);
+  const unconfirmedCodes = new Set([
+    "result_unconfirmed",
+    "ipp_submission_unconfirmed",
+    "ipp_job_query_failed",
+    "ipp_cancel_failed",
+  ]);
 
   function isPrinterFaultResult() {
     return result.type === "error" && printerFaultCodes.has(result.error_code);
+  }
+
+  function isUnconfirmedResult() {
+    return result.type === "error" && unconfirmedCodes.has(result.error_code);
   }
 
   function setReturnEnabled(enabled) {
@@ -57,10 +67,11 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
     if (!visible) setText(["115_39"], "");
   }
 
-  if (isPrinterFaultResult()) {
-    setText(["77_18"], "设备维护中");
-    setText(["77_21"], result.message || "打印机故障，请联系管理员处理");
-    setText(["115_42"], "等待恢复");
+  if (isPrinterFaultResult() || isUnconfirmedResult()) {
+    const unconfirmed = isUnconfirmedResult();
+    setText(["77_18"], unconfirmed ? "结果待确认" : "设备维护中");
+    setText(["77_21"], result.message || (unconfirmed ? "请勿重复提交，请联系工作人员。" : "打印机故障，请联系管理员处理"));
+    setText(["115_42"], unconfirmed ? "等待管理员处理" : "等待恢复");
     setCountdownAccessoryVisible(false);
     setReturnEnabled(false);
 
@@ -72,7 +83,7 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
             window.clearInterval(availabilityPollTimer);
             availabilityPollTimer = null;
           }
-          setText(["77_21"], "打印机已恢复，可返回首页继续使用");
+          setText(["77_21"], unconfirmed ? "管理员已解除锁定，可返回首页继续使用" : "打印机已恢复，可返回首页继续使用");
           setText(["115_42"], "返回首页");
           setCountdownAccessoryVisible(false);
           setReturnEnabled(true);
