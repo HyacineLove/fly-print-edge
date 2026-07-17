@@ -29,20 +29,16 @@ export function bindPrintingViewEvents({ appState, finishWithResult }) {
   const waitingExistingJob =
     !pendingPrintRequest && (phase === "print_submitted" || phase === "printing");
 
-  function renderPrintingProgress(current, total) {
-    const cur = Math.max(1, Number(current || 1));
-    const all = Math.max(cur, Number(total || 1));
+  function renderPrintingIndicator() {
     const bar = q("77_20");
     const rail = q("77_19");
     if (bar && rail) {
       const railWidth = rail.clientWidth || 556;
-      bar.style.width = `${Math.max(20, Math.round((cur / all) * railWidth))}px`;
+      bar.style.width = `${railWidth}px`;
     }
   }
 
-  appState.printing.renderProgress = renderPrintingProgress;
-  const total = Math.max(1, Number(session.file?.page_count || 1));
-  renderPrintingProgress(1, total);
+  renderPrintingIndicator();
 
   if (!pendingPrintRequest && !waitingExistingJob) {
     finishWithResult("error", "打印请求已丢失，请重新扫码上传");
@@ -61,19 +57,7 @@ export function bindPrintingViewEvents({ appState, finishWithResult }) {
   }
 
   return {
-    handleJobStatus(data) {
-      const progress = Number(data?.progress || 0);
-      const totalPages = Number(data?.total_pages || session.file?.page_count || 1);
-      const currentPage = Number(data?.current_page || data?.page_index || 1);
-      if (progress > 0 && progress < 100) {
-        const estimatedCurrent = Math.max(1, Math.round((progress / 100) * totalPages));
-        renderPrintingProgress(estimatedCurrent, totalPages);
-      } else {
-        renderPrintingProgress(currentPage, totalPages);
-      }
-    },
-    destroy() {
-      appState.printing.renderProgress = null;
-    },
+    handleJobStatus() {},
+    destroy() {},
   };
 }

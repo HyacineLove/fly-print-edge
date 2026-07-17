@@ -48,6 +48,24 @@ class LauncherHelpersTests(unittest.TestCase):
         self.assertEqual(launcher.normalize_launcher_action(""), launcher.ACTION_OPEN_USER)
         self.assertEqual(launcher.normalize_launcher_action("--open-admin"), launcher.ACTION_OPEN_ADMIN)
 
+    def test_runtime_profile_matches_only_flyprint_edge_processes(self):
+        runtime_dir = Path(r"C:\FlyPrint Edge\runtime")
+        self.assertTrue(
+            launcher.command_uses_runtime_profile(
+                [
+                    "msedge.exe",
+                    r"--user-data-dir=C:\FlyPrint Edge\runtime\user-browser-profile",
+                ],
+                runtime_dir,
+            )
+        )
+        self.assertFalse(
+            launcher.command_uses_runtime_profile(
+                ["msedge.exe", r"--user-data-dir=C:\Users\PC\EdgeProfile"],
+                runtime_dir,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

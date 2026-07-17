@@ -37,9 +37,10 @@ CONFIG_EXAMPLE = PROJECT_ROOT / "config.example.json"
 INNO_SETUP_DIRS = [
     Path(r"C:\Program Files (x86)\Inno Setup 6"),
     Path(r"C:\Program Files\Inno Setup 6"),
+    Path(r"D:\Inno Setup 6"),
 ]
 
-DEFAULT_VERSION = "1.0.0"
+DEFAULT_VERSION = "1.0.14"
 
 # Venv Python detection — PyInstaller must run with the project's venv
 # Python so it can discover all dependencies (fitz, zeroconf, etc.).
@@ -55,6 +56,8 @@ REQUIRED_BUILD_MODULES = [
 
 def find_venv_python() -> str:
     """Find the venv Python executable, falling back to system Python."""
+    if sys.prefix != sys.base_prefix:
+        return sys.executable
     for d in VENV_PYTHON_DIRS:
         candidate = d / "python.exe"
         if candidate.is_file():
@@ -79,6 +82,12 @@ def ensure_build_dependencies() -> None:
 
 def find_iscc() -> str | None:
     """Locate the Inno Setup compiler (iscc.exe)."""
+    configured_dir = os.environ.get("INNO_SETUP_DIR")
+    if configured_dir:
+        candidate = Path(configured_dir) / "iscc.exe"
+        if candidate.is_file():
+            return str(candidate)
+
     # Check explicit PATH first
     result = shutil.which("iscc")
     if result:

@@ -23,6 +23,7 @@ class InteractiveSessionManager:
                 "file_type": None,
                 "content_hash": None,
                 "job_id": None,
+                "print_options": None,
                 "submitted": False,
                 "error_code": None,
                 "error_message": None,
@@ -74,7 +75,12 @@ class InteractiveSessionManager:
             enriched["session_id"] = self._active_session["session_id"]
             return enriched
 
-    def mark_print_submitted(self, session_id: str, file_id: str) -> bool:
+    def mark_print_submitted(
+        self,
+        session_id: str,
+        file_id: str,
+        print_options: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         with self._lock:
             if not self._active_session:
                 return False
@@ -86,6 +92,7 @@ class InteractiveSessionManager:
                 return False
 
             self._active_session["submitted"] = True
+            self._active_session["print_options"] = deepcopy(print_options) if print_options else None
             self._active_session["state"] = "print_submitted"
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
@@ -112,6 +119,7 @@ class InteractiveSessionManager:
             return {
                 "session_id": self._active_session["session_id"],
                 "job_id": job_id,
+                "print_options": deepcopy(self._active_session.get("print_options")),
             }
 
     def revert_print_submission(self, session_id: str, file_id: str) -> bool:
@@ -125,6 +133,7 @@ class InteractiveSessionManager:
 
             self._active_session["submitted"] = False
             self._active_session["job_id"] = None
+            self._active_session["print_options"] = None
             self._active_session["state"] = "preview_ready"
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
@@ -144,7 +153,7 @@ class InteractiveSessionManager:
                 return None
 
             status = str(data.get("status") or "").lower()
-            if status in {"completed", "complete", "done", "success"} or int(data.get("progress") or 0) >= 100:
+            if status in {"completed", "complete", "done", "success"}:
                 self._active_session["state"] = "completed"
                 self._active_session["error_code"] = None
                 self._active_session["error_message"] = None

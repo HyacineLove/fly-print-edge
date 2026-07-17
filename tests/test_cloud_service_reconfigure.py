@@ -10,6 +10,40 @@ from cloud_service import CloudService, PrinterStatusReporter
 
 
 class CloudServiceReconfigureTests(unittest.TestCase):
+    def test_managed_printer_registration_sends_string_port_info(self):
+        config = Mock()
+        config.update_printer_id.return_value = True
+        manager = Mock()
+        manager.config = config
+        manager.get_printer_capabilities.return_value = {
+            "page_size": ["A4"],
+            "color_model": ["color"],
+            "duplex": ["simplex", "longedge"],
+            "resolution": ["600dpi"],
+            "media_type": ["Plain"],
+        }
+        manager.get_printer_port_info.return_value = {
+            "name": "Office",
+            "protocol": "ipp",
+            "host": "192.168.50.2",
+            "port": "631",
+            "resource": "/ipp/print",
+        }
+        service = CloudService({"node_id": "node-1"}, printer_manager=manager)
+        service.api_client = Mock()
+        service.api_client.register_printers.return_value = {
+            "success": True,
+            "failed_printers": [],
+            "registered_printers": {"Office": "cloud-printer-1"},
+        }
+
+        result = service.register_managed_printer({"name": "Office", "make_model": "HP"})
+
+        self.assertTrue(result["success"])
+        payload = service.api_client.register_printers.call_args.args[0][0]
+        self.assertEqual("631", payload["port_info"])
+        self.assertIsInstance(payload["port_info"], str)
+
     def test_reconfigure_preserves_existing_node_id(self):
         service = CloudService(
             {

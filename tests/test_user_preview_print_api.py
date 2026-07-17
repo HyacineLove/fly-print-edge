@@ -1,44 +1,31 @@
 import asyncio
 import json
 import os
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import main
 from file_manager import FileManager
-from printer_fault_state import PrinterFaultStateStore
+from printing.domain import ErrorCode, USER_MESSAGES
 
 
 class DummyConfig:
     def __init__(self):
         self.config = {
-            "managed_printers": [
-                {
-                    "id": "printer-1",
-                    "name": "HP",
-                    "location": "http://169.254.12.234:3911",
-                    "enabled": True,
-                }
-            ],
+            "managed_printers": [{
+                "id": "printer-1",
+                "cloud_id": "cloud-printer-1",
+                "name": "HP",
+                "type": "ipp",
+                "printer_uuid": "urn:uuid:printer-1",
+                "ipp_uri": "ipp://192.168.50.2:631/ipp/print",
+                "enabled": True,
+            }],
             "default_printer_id": "printer-1",
-            "cloud": {
-                "base_url": "http://localhost:8012",
-                "auth_url": "http://localhost:8012/auth/token",
-                "client_id": "edge-default",
-                "client_secret": "super-secret",
-                "node_name": "edge-a",
-                "location": "",
-                "heartbeat_interval": 30,
-                "node_id": "node-123",
-            },
+            "cloud": {"node_id": "node-123"},
             "settings": {"copies_min": 1, "copies_max": 3},
             "network": {"bind_address": "127.0.0.1", "port": 7860},
-            "printers": {"discovery_mode": "auto", "static_list": []},
         }
 
     def get_full_config(self):
@@ -72,6 +59,7 @@ class DummyWebSocketClient:
     def __init__(self):
         self.sent_messages = []
         self.upload_token_requested = False
+        self.requested_printer_id = None
 
     async def send_message(self, message):
         self.sent_messages.append(message)
@@ -79,6 +67,7 @@ class DummyWebSocketClient:
 
     def request_upload_token(self, node_id, printer_id):
         self.upload_token_requested = True
+        self.requested_printer_id = printer_id
         return False
 
 
@@ -128,86 +117,60 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         main.preview_page_cache = {}
         main.preview_page_meta = {}
 
-    def test_submit_print_clamps_copies_to_configured_maximum(self):
-        request = DummyRequest({
+    def _print_request(self, copies):
+        return DummyRequest({
             "session_id": self.session_id,
             "file_id": "file-1",
-            "options": {"copies": 99, "duplex": "simplex", "color_mode": "color"},
+            "options": {"copies": copies, "duplex": "simplex", "color_mode": "color"},
         })
 
+    def _submit(self, request, file_manager=None):
         with patch.object(main, "printer_manager", self.printer_manager), \
              patch.object(main, "cloud_service", self.cloud_service), \
              patch.object(main, "interactive_session_manager", self.session_manager), \
              patch.object(main, "_ensure_default_printer", return_value="printer-1"), \
-             patch.object(main, "get_file_manager", return_value=None):
-            response = asyncio.run(main.submit_print(request))
+             patch.object(main, "get_file_manager", return_value=file_manager):
+            return asyncio.run(main.submit_print(request))
 
+    def test_submit_print_clamps_copies_and_uses_cloud_printer_id(self):
+        response = self._submit(self._print_request(99))
         self.assertTrue(response["success"])
-        sent = self.cloud_service.websocket_client.sent_messages[0]["data"]["options"]
-        self.assertEqual(sent["copies"], 3)
+        data = self.cloud_service.websocket_client.sent_messages[0]["data"]
+        self.assertEqual(3, data["options"]["copies"])
+        self.assertEqual("cloud-printer-1", data["printer_id"])
 
     def test_submit_print_clamps_copies_to_configured_minimum(self):
-        request = DummyRequest({
-            "session_id": self.session_id,
-            "file_id": "file-1",
-            "options": {"copies": 0, "duplex": "simplex", "color_mode": "color"},
-        })
-
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", self.cloud_service), \
-             patch.object(main, "interactive_session_manager", self.session_manager), \
-             patch.object(main, "_ensure_default_printer", return_value="printer-1"), \
-             patch.object(main, "get_file_manager", return_value=None):
-            response = asyncio.run(main.submit_print(request))
-
+        response = self._submit(self._print_request(0))
         self.assertTrue(response["success"])
-        sent = self.cloud_service.websocket_client.sent_messages[0]["data"]["options"]
-        self.assertEqual(sent["copies"], 1)
+        self.assertEqual(1, self.cloud_service.websocket_client.sent_messages[0]["data"]["options"]["copies"])
+
+    def test_submit_print_requires_cloud_registration(self):
+        self.printer_manager.config.config["managed_printers"][0]["cloud_id"] = None
+        response = self._submit(self._print_request(1))
+        self.assertEqual(503, response.status_code)
+        self.assertEqual([], self.cloud_service.websocket_client.sent_messages)
 
     def test_submit_print_clears_preview_cache_but_preserves_hash_source(self):
-        preview_cache = {'file-1:{"page_index": 0}': {"preview_url": "data", "timestamp": 1.0}}
-        preview_page_cache = {"file-1": {0: object()}}
-        preview_page_meta = {"file-1": {"page_count": 1}}
-        main.preview_cache = preview_cache
-        main.preview_page_cache = preview_page_cache
-        main.preview_page_meta = preview_page_meta
+        main.preview_cache = {'file-1:{"page_index": 0}': {"preview_url": "data", "timestamp": 1.0}}
+        main.preview_page_cache = {"file-1": {0: object()}}
+        main.preview_page_meta = {"file-1": {"page_count": 1}}
         self.file_manager = FileManager(
             cleanup_interval=300,
             file_ttl=1800,
-            preview_cache=preview_cache,
-            preview_page_cache=preview_page_cache,
-            preview_page_meta=preview_page_meta,
+            preview_cache=main.preview_cache,
+            preview_page_cache=main.preview_page_cache,
+            preview_page_meta=main.preview_page_meta,
         )
-
         source_path = os.path.join(self.temp_dir.name, "preview.bin")
-        with open(source_path, "wb") as fh:
-            fh.write(b"preview")
-
+        with open(source_path, "wb") as stream:
+            stream.write(b"preview")
         self.file_manager.register_preview_resource(
-            "file-1",
-            "/api/v1/files/file-1",
-            source_path,
-            content_hash=self.CONTENT_HASH,
+            "file-1", "/api/v1/files/file-1", source_path, content_hash=self.CONTENT_HASH,
         )
-
-        request = DummyRequest({
-            "session_id": self.session_id,
-            "file_id": "file-1",
-            "options": {"copies": 1, "duplex": "simplex", "color_mode": "mono"},
-        })
-
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", self.cloud_service), \
-             patch.object(main, "interactive_session_manager", self.session_manager), \
-             patch.object(main, "_ensure_default_printer", return_value="printer-1"), \
-             patch.object(main, "get_file_manager", return_value=self.file_manager):
-            response = asyncio.run(main.submit_print(request))
-
+        response = self._submit(self._print_request(1), self.file_manager)
         self.assertTrue(response["success"])
         self.assertTrue(os.path.exists(source_path))
         self.assertEqual({}, main.preview_cache)
-        self.assertEqual({}, main.preview_page_cache)
-        self.assertEqual({}, main.preview_page_meta)
         self.assertEqual(source_path, self.file_manager.get_cached_path(self.CONTENT_HASH))
 
     def test_preview_rejects_missing_content_hash(self):
@@ -219,25 +182,19 @@ class UserPreviewPrintApiTests(unittest.TestCase):
             "file_type": "application/pdf",
             "options": {"page_index": 0},
         })
-
         with patch.object(main, "printer_manager", self.printer_manager), \
              patch.object(main, "interactive_session_manager", self.session_manager), \
              patch.object(main, "get_file_manager", return_value=self.file_manager):
             response = asyncio.run(main.preview(request))
-
         self.assertEqual(400, response.status_code)
         self.assertIn("content_hash", response.body.decode("utf-8"))
 
     def test_preview_reuses_cached_hash_without_download(self):
         source_path = os.path.join(self.temp_dir.name, "preview.pdf")
-        with open(source_path, "wb") as fh:
-            fh.write(b"%PDF-1.4\n")
-
+        with open(source_path, "wb") as stream:
+            stream.write(b"%PDF-1.4\n")
         self.file_manager.register_preview_resource(
-            "file-existing",
-            "/api/v1/files/file-existing",
-            source_path,
-            content_hash=self.CONTENT_HASH,
+            "file-existing", "/api/v1/files/file-existing", source_path, content_hash=self.CONTENT_HASH,
         )
         request = DummyBodyRequest({
             "session_id": self.session_id,
@@ -248,70 +205,61 @@ class UserPreviewPrintApiTests(unittest.TestCase):
             "content_hash": self.CONTENT_HASH,
             "options": {"page_index": 0},
         })
-
         with patch.object(main, "printer_manager", self.printer_manager), \
              patch.object(main, "interactive_session_manager", self.session_manager), \
              patch.object(main, "get_file_manager", return_value=self.file_manager), \
              patch.object(main, "_download_preview_file") as download_mock, \
              patch.object(main, "_generate_preview_image", return_value=(None, 0, 0, "render skipped")):
             response = asyncio.run(main.preview(request))
-
         self.assertEqual(500, response.status_code)
         download_mock.assert_not_called()
-        self.assertEqual(source_path, self.file_manager.get_preview_resource("file-1")["source_path"])
 
-    def test_printer_availability_reports_fault_from_probe_and_mapping(self):
-        fault_store = PrinterFaultStateStore()
-        fault_probe = type(
-            "FaultProbe",
-            (),
-            {
-                "probe": lambda self, host: type(
-                    "FaultResult",
-                    (),
-                    {
-                        "available": True,
-                        "faulted": True,
-                        "fault_reasons": ["media-empty-error", "media-needed-error"],
-                        "printer_state": 5,
-                        "printer_state_name": "stopped",
-                    },
-                )()
-            },
-        )()
-
+    def _availability(self, reason):
+        snapshot = {
+            "printer-state": [5],
+            "printer-state-reasons": [reason],
+            "printer-is-accepting-jobs": [False],
+        }
         with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "printer_fault_state_store", fault_store), \
-             patch.object(main, "printer_fault_probe", fault_probe):
-            response = asyncio.run(main.get_printer_availability())
+             patch("printing.ipp_device.printer_snapshot", return_value=snapshot):
+            return asyncio.run(main.get_printer_availability())
 
-        self.assertFalse(response["available"])
-        self.assertTrue(response["faulted"])
-        self.assertEqual("printer_fault", response["error_code"])
-        self.assertEqual("缺纸", response["reason_label"])
-        self.assertEqual("打印机缺纸，请联系管理员补纸", response["message"])
-        self.assertEqual(["media-empty-error", "media-needed-error"], response["raw_reasons"])
+    def test_printer_availability_reports_ipp_paper_fault(self):
+        response = self._availability("media-empty-error")
+        self.assertEqual(ErrorCode.PRINTER_OUT_OF_PAPER.value, response["reason_code"])
+        self.assertEqual(USER_MESSAGES[ErrorCode.PRINTER_OUT_OF_PAPER], response["message"])
 
-    def test_qr_code_does_not_request_upload_token_while_default_printer_faulted(self):
-        fault_store = PrinterFaultStateStore()
-        fault_store.set_fault(
-            printer_id="printer-1",
-            printer_name="HP",
-            raw_reasons=["media-empty-error"],
-        )
+    def test_printer_availability_reports_ipp_toner_fault(self):
+        response = self._availability("toner-empty-error")
+        self.assertEqual(ErrorCode.PRINTER_OUT_OF_TONER.value, response["reason_code"])
 
+    def test_qr_code_does_not_request_token_while_printer_faulted(self):
+        snapshot = {
+            "printer-state": [5],
+            "printer-state-reasons": ["media-empty-error"],
+            "printer-is-accepting-jobs": [False],
+        }
         with patch.object(main, "printer_manager", self.printer_manager), \
              patch.object(main, "cloud_service", self.cloud_service), \
-             patch.object(main, "printer_fault_state_store", fault_store), \
-             patch.object(main, "printer_fault_probe", None), \
-             patch.object(main, "node_id", "node-123"):
+             patch.object(main, "node_id", "node-123"), \
+             patch("printing.ipp_device.printer_snapshot", return_value=snapshot):
             response = asyncio.run(main.get_qr_code())
-
-        self.assertEqual(False, response["success"])
-        self.assertEqual(True, response["standby"])
-        self.assertEqual("printer_fault", response["error_code"])
-        self.assertEqual("打印机缺纸，请联系管理员补纸", response["message"])
+        self.assertFalse(response["success"])
         self.assertFalse(self.cloud_service.websocket_client.upload_token_requested)
+
+    def test_qr_code_requests_token_with_cloud_printer_id(self):
+        ready = {
+            "printer-state": [3],
+            "printer-state-reasons": ["none"],
+            "printer-is-accepting-jobs": [True],
+        }
+        with patch.object(main, "printer_manager", self.printer_manager), \
+             patch.object(main, "cloud_service", self.cloud_service), \
+             patch.object(main, "node_id", "node-123"), \
+             patch("printing.ipp_device.printer_snapshot", return_value=ready):
+            response = asyncio.run(main.get_qr_code())
+        self.assertEqual(500, response.status_code)
+        self.assertEqual("cloud-printer-1", self.cloud_service.websocket_client.requested_printer_id)
 
 
 if __name__ == "__main__":

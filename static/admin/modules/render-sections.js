@@ -196,10 +196,6 @@ function renderSettingsSection(state) {
         <label for="settings_libreoffice_path">LibreOffice 路径</label>
         <input id="settings_libreoffice_path" data-section="settings" data-key="libreoffice_path" value="${escapeHtml(cfg.libreoffice_path || "")}">
       </div>
-      <div class="field">
-        <label for="settings_pdf_printer_path">PDF 打印工具路径</label>
-        <input id="settings_pdf_printer_path" data-section="settings" data-key="pdf_printer_path" value="${escapeHtml(cfg.pdf_printer_path || "")}">
-      </div>
     </div>
   `;
 }
@@ -232,43 +228,6 @@ function renderRuntimeSection(state) {
   `;
 }
 
-function renderStaticPrinterRows(state) {
-  const items = configModel(state).printers.static_list || [];
-  if (!items.length) {
-    return '<div class="section-note">当前没有静态打印机条目，仅在“静态发现”模式下使用。</div>';
-  }
-
-  return `
-    <div class="static-list">
-      ${items.map((item, index) => `
-        <div class="static-item" data-static-index="${index}">
-          <div class="field">
-            <label>名称</label>
-            <input data-static-key="name" value="${escapeHtml(item.name || "")}">
-          </div>
-          <div class="field">
-            <label>IP</label>
-            <input data-static-key="ip" value="${escapeHtml(item.ip || "")}">
-          </div>
-          <div class="field">
-            <label>协议</label>
-            <select data-static-key="protocol">
-              ${["ipp", "socket", "raw", "hp_jetdirect"].map((protocol) => `<option value="${protocol}" ${String(item.protocol || "ipp") === protocol ? "selected" : ""}>${protocol}</option>`).join("")}
-            </select>
-          </div>
-          <div class="field">
-            <label>端口</label>
-            <input type="number" min="1" max="65535" data-static-key="port" value="${escapeHtml(item.port ?? "")}">
-          </div>
-          <div class="inline-actions">
-            <button type="button" class="btn btn-danger" data-action="remove-static" data-index="${index}">删除</button>
-          </div>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
-
 function renderManagedTable(state) {
   if (!state.managed.length) {
     return '<tr><td class="muted" colspan="6">暂无已管理打印机</td></tr>';
@@ -277,19 +236,25 @@ function renderManagedTable(state) {
   return state.managed.map((item) => {
     const id = item.id || "";
     const isDefaultPrinter = id && id === state.defaultPrinterId;
+    const test = state.printerTests?.[id];
+    const testRunning = test?.status === "running" || isActionPending(state, "test", id);
+    const testMessage = test?.current?.message || test?.result?.message || "";
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}${isDefaultPrinter ? '<span class="default-tag">默认</span>' : ""}</td>
         <td class="muted">${escapeHtml(id || "-")}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
-        <td>${item.enabled === false ? "已禁用" : "可用"}</td>
+        <td>${escapeHtml(item.status || (item.enabled === false ? "已禁用" : "未知"))}</td>
         <td class="capability-cell">${escapeHtml(printerCapabilitySummary(item))}</td>
         <td>
           <div class="ops">
-            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(id)}" ${isDefaultPrinter || isActionPending(state, "default", id) ? "disabled" : ""}>设为默认</button>
-            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(id)}" ${isActionPending(state, "reregister", id) ? "disabled" : ""}>重新注册云端</button>
-            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(id)}" ${isActionPending(state, "delete", id) ? "disabled" : ""}>删除</button>
+            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isDefaultPrinter || isActionPending(state, "default", id) ? "disabled" : ""}>设为默认</button>
+            <button type="button" class="btn" data-action="test-printer" data-id="${escapeHtml(id)}" ${state.printersRefreshing || testRunning ? "disabled" : ""}>${testRunning ? "测试中…" : "测试打印"}</button>
+            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isActionPending(state, "reregister", id) ? "disabled" : ""}>重新注册云端</button>
+            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(id)}" ${state.printersRefreshing || isActionPending(state, "delete", id) ? "disabled" : ""}>删除</button>
+            ${item.uncertain ? `<button type="button" class="btn" data-action="clear-unconfirmed" data-id="${escapeHtml(id)}" ${isActionPending(state, "clear-unconfirmed", id) ? "disabled" : ""}>解除结果未知锁定</button>` : ""}
           </div>
+          ${testMessage ? `<p class="muted">${escapeHtml(testMessage)}</p>` : ""}
         </td>
       </tr>
     `;
@@ -302,15 +267,16 @@ function renderDiscoveredTable(state) {
   }
 
   return state.discovered.map((item, index) => {
-    const type = item.type || (item.is_network ? "网络打印机" : "本地打印机");
+    const type = "IPP";
+    const issues = Array.isArray(item.issues) ? item.issues.join("；") : "";
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}</td>
         <td class="muted">${escapeHtml(type)}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
-        <td class="capability-cell">${escapeHtml(printerCapabilitySummary(item))}</td>
+        <td class="capability-cell">${escapeHtml(item.compatible === false ? issues || "不兼容" : printerCapabilitySummary(item))}</td>
         <td>
-          <button type="button" class="btn btn-primary" data-action="add" data-index="${index}" ${isActionPending(state, "add", index) ? "disabled" : ""}>添加</button>
+          <button type="button" class="btn btn-primary" data-action="add" data-index="${index}" ${state.printersRefreshing || item.compatible === false || isActionPending(state, "add", index) ? "disabled" : ""}>添加</button>
         </td>
       </tr>
     `;
@@ -318,17 +284,30 @@ function renderDiscoveredTable(state) {
 }
 
 function renderPrintersSection(state) {
-  const cfg = configModel(state).printers;
   return `
     <div class="section-header">
       <div>
         <h2>打印机管理</h2>
-        <p>集中查看已管理打印机、可添加打印机以及发现设置。</p>
+        <p>发现并管理支持直接 PDF 打印和设备作业状态的 IPP 打印机。</p>
       </div>
     </div>
     <div class="table-toolbar">
-      <button type="button" class="btn btn-primary" data-action="refresh-printers" ${state.printersRefreshing ? "disabled" : ""}>刷新</button>
+      <button type="button" class="btn btn-primary" data-action="refresh-printers" ${state.printersRefreshing || state.ippProbing ? "disabled" : ""}>${state.printersRefreshing ? "正在发现并检测…" : "刷新 IPP 打印机"}</button>
     </div>
+    <section class="admin-card">
+      <div class="card-header"><h3>手动添加 IPP 打印机</h3></div>
+      <div class="config-grid">
+        <div class="field">
+          <label for="manualIppUri">完整 IPP URI</label>
+          <input id="manualIppUri" value="${escapeHtml(state.ippProbeUri || "")}" placeholder="ipp://192.168.50.2:631/ipp/print" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" class="btn btn-primary" data-action="probe-ipp" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>${state.ippProbing ? "正在检测…" : "检测 IPP 打印机"}</button>
+        </div>
+      </div>
+      ${state.ippProbeResult ? `<p class="muted">${escapeHtml(state.ippProbeResult.message || "检测完成")}</p>` : ""}
+    </section>
     <section class="admin-card">
       <div class="card-header">
         <h3>已管理打印机</h3>
@@ -367,22 +346,6 @@ function renderPrintersSection(state) {
           <tbody>${renderDiscoveredTable(state)}</tbody>
         </table>
       </div>
-    </section>
-    <section class="admin-card">
-      <div class="card-header">
-        <h3>发现设置</h3>
-        <button type="button" class="btn" data-action="add-static">新增静态打印机</button>
-      </div>
-      <div class="config-grid">
-        <div class="field">
-          <label for="printers_discovery_mode">发现模式</label>
-          <select id="printers_discovery_mode" data-section="printers" data-key="discovery_mode">
-            <option value="auto" ${String(cfg.discovery_mode || "auto") === "auto" ? "selected" : ""}>auto</option>
-            <option value="static" ${String(cfg.discovery_mode || "auto") === "static" ? "selected" : ""}>static</option>
-          </select>
-        </div>
-      </div>
-      ${renderStaticPrinterRows(state)}
     </section>
   `;
 }

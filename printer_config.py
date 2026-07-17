@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 
 class PrinterConfig:
     """打印机配置管理"""
+
+    @staticmethod
+    def _migrate_printer_schema(config: Dict) -> bool:
+        """Migrate once to the direct-IPP inventory schema."""
+        if int(config.get("printer_schema_version") or 0) >= 2:
+            return False
+        config["printer_schema_version"] = 2
+        config["managed_printers"] = []
+        config["default_printer_id"] = None
+        config.pop("printers", None)
+        return True
     
     def __init__(self, config_file="config.json"):
         self.config_file = config_file
@@ -26,6 +37,7 @@ class PrinterConfig:
             logger.debug("Loading config file: %s", self.config_file)
             with open(self.config_file, 'r', encoding='utf-8-sig') as f:
                 config = json.load(f)
+                config_updated = self._migrate_printer_schema(config)
                 if "default_printer_id" not in config:
                     config["default_printer_id"] = None
                 
@@ -36,23 +48,17 @@ class PrinterConfig:
                         "port": 7860
                     }
                 
-                # 初始化打印机发现配置
-                if "printers" not in config:
-                    config["printers"] = {
-                        "discovery_mode": "auto",  # auto 或 static
-                        "static_list": []  # 静态打印机列表
-                    }
-                elif "discovery_mode" not in config["printers"]:
-                    config["printers"]["discovery_mode"] = "auto"
-                    config["printers"]["static_list"] = []
                 if "cloud" in config:
                     config["cloud"].pop("enabled", None)
                     config["cloud"].pop("auto_register", None)
 
                 # (已移除环境变量读取逻辑，完全依赖 config.json)
                 
-                config_updated = False
                 settings = config.setdefault("settings", {})
+                for removed_key in ("pdf_printer_path", "sumatra_path"):
+                    if removed_key in settings:
+                        settings.pop(removed_key, None)
+                        config_updated = True
                 if "copies_min" not in settings:
                     settings["copies_min"] = 1
                     config_updated = True
@@ -84,6 +90,7 @@ class PrinterConfig:
         except FileNotFoundError:
             logger.warning("Config file missing, creating default config: %s", self.config_file)
             default_config = {
+                "printer_schema_version": 2,
                 "managed_printers": [], 
                 "settings": {
                     "copies_min": 1,
@@ -94,10 +101,6 @@ class PrinterConfig:
                 "network": {
                     "bind_address": "127.0.0.1",
                     "port": 7860
-                },
-                "printers": {
-                    "discovery_mode": "auto",
-                    "static_list": []
                 },
                 "cloud": {
                     "base_url": "",
@@ -127,16 +130,23 @@ class PrinterConfig:
 
     def replace_full_config(self, new_config: Dict):
         self.config = deepcopy(new_config)
+        self._migrate_printer_schema(self.config)
+        settings = self.config.setdefault("settings", {})
+        settings.pop("pdf_printer_path", None)
+        settings.pop("sumatra_path", None)
         self.save_config()
     
     def add_printer(self, printer_info: Dict):
         """添加打印机到管理列表"""
         printer_info["added_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        printer_info["id"] = str(uuid.uuid4())
+        printer_info["id"] = str(printer_info.get("id") or uuid.uuid4())
+        printer_info.setdefault("cloud_id", None)
         if "enabled" not in printer_info:
             printer_info["enabled"] = True
         if "cloud_registered" not in printer_info:
             printer_info["cloud_registered"] = False
+        for key in ("print_readiness", "uri", "device_uri", "port", "driver"):
+            printer_info.pop(key, None)
         logger.debug("Adding printer to config: name=%s id=%s", printer_info["name"], printer_info["id"])
         self.config["managed_printers"].append(printer_info)
         self.save_config()
@@ -158,7 +168,7 @@ class PrinterConfig:
         updated = False
         for printer in self.config["managed_printers"]:
             if printer.get("name") == printer_name:
-                old_id = printer.get("id")
+                old_id = printer.get("cloud_id")
                 if old_id != new_id:
                     logger.debug(
                         "Updating printer id: name=%s old_id=%s new_id=%s",
@@ -166,7 +176,7 @@ class PrinterConfig:
                         old_id,
                         new_id,
                     )
-                    printer["id"] = new_id
+                    printer["cloud_id"] = new_id
                 # 无论ID是否变化，都标记为已在云端注册，避免重复注册
                 printer["cloud_registered"] = True
                 updated = True
@@ -193,6 +203,9 @@ class PrinterConfig:
         return self.config.get("default_printer_id")
 
     def set_default_printer_id(self, printer_id: str):
+        printer = self.get_printer_by_id(printer_id)
+        if not printer or not printer.get("enabled", True):
+            raise ValueError("default printer must exist and be enabled")
         self.config["default_printer_id"] = printer_id
         for printer in self.config["managed_printers"]:
             printer["is_default"] = printer.get("id") == printer_id
@@ -206,9 +219,26 @@ class PrinterConfig:
 
     def get_printer_by_id(self, printer_id: str):
         for printer in self.config.get("managed_printers", []):
-            if printer.get("id") == printer_id:
+            if printer.get("id") == printer_id or printer.get("cloud_id") == printer_id:
                 return printer
         return None
+
+    def get_printer_by_uuid(self, printer_uuid: str):
+        identity = str(printer_uuid or "").casefold()
+        for printer in self.config.get("managed_printers", []):
+            if str(printer.get("printer_uuid") or "").casefold() == identity:
+                return printer
+        return None
+
+    def update_ipp_uri(self, printer_uuid: str, ipp_uri: str, capabilities: Dict = None) -> bool:
+        printer = self.get_printer_by_uuid(printer_uuid)
+        if not printer:
+            return False
+        printer["ipp_uri"] = ipp_uri
+        if capabilities is not None:
+            printer["capabilities"] = deepcopy(capabilities)
+        self.save_config()
+        return True
 
     def get_printer_by_name(self, printer_name: str):
         for printer in self.config.get("managed_printers", []):

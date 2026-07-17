@@ -3,7 +3,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -57,15 +57,25 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
         def stop(self):
             return None
 
+    @staticmethod
+    def _printer_manager_stub():
+        config = MagicMock()
+        config.config = {"cloud": {}}
+        return MagicMock(config=config)
+
     def _get_current_session_snapshot(self):
         with patch.object(self.main, "CloudService", self.NoopCloudService), \
-             patch.object(self.main, "interactive_session_manager", self.manager):
+             patch.object(self.main, "interactive_session_manager", self.manager), \
+             patch.object(self.main, "_configure_runtime_logging_from_disk", return_value={"level_name": "INFO", "debug_logging": False}), \
+             patch.object(self.main, "PrinterManager", return_value=self._printer_manager_stub()):
             with TestClient(self.main.app) as client:
                 response = client.get("/api/session/current")
         return response
 
     def _get_root_page(self):
-        with patch.object(self.main, "CloudService", self.NoopCloudService):
+        with patch.object(self.main, "CloudService", self.NoopCloudService), \
+             patch.object(self.main, "_configure_runtime_logging_from_disk", return_value={"level_name": "INFO", "debug_logging": False}), \
+             patch.object(self.main, "PrinterManager", return_value=self._printer_manager_stub()):
             with TestClient(self.main.app) as client:
                 response = client.get("/")
         return response

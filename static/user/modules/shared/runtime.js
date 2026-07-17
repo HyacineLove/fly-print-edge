@@ -131,55 +131,23 @@ export function mapPrintErrorMessage(errorCode, message) {
   const code = String(errorCode || "").toLowerCase();
   const msg = String(message || "").trim();
   const lowerMsg = msg.toLowerCase();
+  const safeMessages = {
+    service_not_ready: "打印服务暂不可用，请联系工作人员。",
+    config_incomplete: "打印服务尚未配置完成，请联系工作人员。",
+    document_conversion_failed: "文档处理失败，请重新上传；如仍然失败，请联系工作人员。",
+    printer_out_of_paper: "打印机缺纸，请联系工作人员补纸。",
+    printer_out_of_toner: "打印机碳粉不足，请联系工作人员处理。",
+    printer_jammed: "打印机发生卡纸，请联系工作人员处理。",
+    printer_cover_open: "打印机机盖未关闭，请联系工作人员处理。",
+    printer_offline: "打印机连接已断开，请联系工作人员。",
+    printer_user_intervention: "打印机需要处理，请联系工作人员。",
+    printer_rejected_document: "打印机无法处理该文档，请联系工作人员。",
+    result_unconfirmed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
+    print_timeout: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
+  };
+  if (safeMessages[code]) return safeMessages[code];
 
-  if (code === "printer_fault") return msg || "打印机故障，请联系管理员处理";
-
-  if (code === "printer_disabled") return "打印机已被禁用，请联系管理员";
-  if (code === "printer_not_found") return "打印机已被删除或不存在，请联系管理员";
-  if (code === "node_disabled") return "节点已被禁用，请联系管理员";
-  if (code === "node_not_found") return "节点已被删除或不存在，请联系管理员";
-  if (code === "printer_not_belong_to_node") return "打印机与节点绑定异常，请联系管理员";
-  if (code === "token_generation_failed") return "云端凭证生成失败，请稍后重试";
-  if (code === "print_spooler_error") {
-    return "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态";
-  }
-
-  if (
-    msg.includes("PCL XL") ||
-    msg.includes("MemAllocError") ||
-    msg.includes("ReadImage") ||
-    lowerMsg.includes("memallocerror") ||
-    lowerMsg.includes("readimage") ||
-    lowerMsg.includes("spooler job entered terminal error status")
-  ) {
-    return "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态";
-  }
-  if (msg.includes("无法获取本地打印任务ID")) {
-    return "打印任务提交失败，请联系管理员检查打印机队列";
-  }
-
-  if (msg.includes("打印机已被管理员禁用") || msg.includes("打印机禁用")) {
-    return "打印机已被禁用，请联系管理员";
-  }
-  if (msg.includes("打印机不存在") || msg.includes("打印机删除")) {
-    return "打印机已被删除或不存在，请联系管理员";
-  }
-  if (msg.includes("节点已被管理员禁用") || msg.includes("节点禁用")) {
-    return "节点已被禁用，请联系管理员";
-  }
-  if (msg.includes("节点不存在") || msg.includes("节点删除")) {
-    return "节点已被删除或不存在，请联系管理员";
-  }
-  if (
-    msg.includes("云端服务未连接") ||
-    msg.includes("无法连接") ||
-    msg.includes("连接不上") ||
-    msg.includes("websocket")
-  ) {
-    return "无法连接到云端服务器";
-  }
-
-  return msg || "打印失败，请稍后重试";
+  return "打印失败，请联系工作人员。";
 }
 
 export function mapPreviewErrorMessage(errorCode, message) {
@@ -257,12 +225,9 @@ export function handlePreviewEvent(data, sseConnection = null) {
   gotoPage("preview", sseConnection);
 }
 
-export function handleJobStatusEvent(data, { page, sseConnection, renderPrintingProgress: renderProgress } = {}) {
+export function handleJobStatusEvent(data, { page, sseConnection } = {}) {
   if (currentSessionId() && data?.session_id !== currentSessionId()) return;
   const status = String(data?.status || "").toLowerCase();
-  const progress = Number(data?.progress || 0);
-  const total = Number(data?.total_pages || state.file?.page_count || 1);
-  const current = Number(data?.current_page || data?.page_index || 1);
   if (data?.job_id) {
     state.file.job_id = data.job_id;
     saveSessionState();
@@ -283,18 +248,17 @@ export function handleJobStatusEvent(data, { page, sseConnection, renderPrinting
   }
 
   if (page === "printing") {
-    if (progress > 0 && progress < 100) {
-      const estimatedCurrent = Math.max(1, Math.round((progress / 100) * total));
-      renderProgress?.(estimatedCurrent, total);
-    } else {
-      renderProgress?.(current, total);
-    }
-
+    const stageMessages = {
+      preparing: "正在准备打印文件……",
+      submitting: "正在发送到打印机……",
+      queued: "打印机正在处理任务……",
+      printing: data?.message || "打印机正在打印……",
+    };
+    if (stageMessages[status]) setText(["77_18"], stageMessages[status]);
     if (
       status.includes("complete") ||
       status.includes("success") ||
-      status.includes("done") ||
-      progress >= 100
+      status.includes("done")
     ) {
       setDoneResult("success", "");
       gotoPage("done", sseConnection);

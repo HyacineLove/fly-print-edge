@@ -6,7 +6,7 @@
 #define MyLauncherExeName "flyprint-launcher.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.0.14"
 #endif
 
 [Setup]
@@ -24,6 +24,9 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 UninstallDisplayName={#MyAppName}
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -41,6 +44,7 @@ Source: "dist\flyprint-edge\{#MyLauncherExeName}"; DestDir: "{app}"; Flags: igno
 Source: "dist\flyprint-edge\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\flyprint-edge\_internal\config.example.json"; DestDir: "{app}"; DestName: "config.example.json"; Flags: ignoreversion
 Source: "dist\flyprint-edge\_internal\config.example.json"; DestDir: "{app}"; DestName: "config.json"; Flags: ignoreversion onlyifdoesntexist
+Source: "dist\flyprint-edge\_internal\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 Name: "{app}\logs"
@@ -56,6 +60,9 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\{#MyLauncherExeName}"; Parameters: "--open-user"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Description: "{cm:LaunchProgram,{#MyAppName}}"
+
+[UninstallRun]
+Filename: "{app}\{#MyLauncherExeName}"; Parameters: "--exit"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "StopFlyPrintEdge"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyLauncherExeName}"""; Flags: uninsdeletevalue; Tasks: autostart

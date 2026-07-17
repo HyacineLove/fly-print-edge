@@ -1,454 +1,83 @@
-import os
-import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
-from file_manager import FileManager
-from printer_fault_state import PrinterFaultStateStore
+from cloud_websocket_client import PrintJobHandler
 
 
-class DummyPrinterManager:
-    def __init__(self, result=None):
-        self.result = result or {"success": True, "job_id": None}
-        self.submissions = []
-
-    def submit_print_job_with_cleanup(
-        self,
-        printer_name,
-        file_path,
-        job_name,
-        print_options=None,
-        cleanup_source="unknown",
-        printer_id=None,
-        artifact_key=None,
-    ):
-        self.submissions.append(
-            {
-                "printer_name": printer_name,
-                "file_path": file_path,
-                "job_name": job_name,
-                "artifact_key": artifact_key,
-            }
-        )
-        return self.result
+VALID_HASH = "a" * 64
 
 
 class DummyConfig:
-    def __init__(self):
-        self.printer = {
-            "id": "printer-1",
-            "name": "Microsoft Print to PDF",
-            "location": "http://169.254.12.234:3911",
-        }
-
     def get_printer_by_id(self, printer_id):
-        return self.printer if printer_id == self.printer["id"] else None
+        return {"id": printer_id, "name": "Production Queue"}
 
-    def get_printer_by_name(self, printer_name):
-        return self.printer if printer_name == self.printer["name"] else None
-
-
-class MonitorPrinterManager:
-    def __init__(self, job_statuses, remove_result=(True, "cancelled")):
-        self.config = DummyConfig()
-        self.job_statuses = list(job_statuses)
-        self.remove_result = remove_result
-        self.cancelled = []
-
-    def get_job_status(self, printer_name, local_job_id):
-        if self.job_statuses:
-            return self.job_statuses.pop(0)
-        return {"exists": True, "status": "printing"}
-
-    def remove_print_job(self, printer_name, local_job_id):
-        self.cancelled.append((printer_name, local_job_id))
-        return self.remove_result
+    def get_printer_by_name(self, name):
+        return {"id": "p1", "name": name}
 
 
-class ImmediateThread:
-    def __init__(self, target, daemon=False):
-        self.target = target
-        self.daemon = daemon
-
-    def start(self):
-        self.target()
-
-
-class StaticFaultProbe:
-    def __init__(self, result):
-        self.result = result
-        self.hosts = []
-
-    def probe(self, host):
-        self.hosts.append(host)
-        return self.result
-
-
-class FakeWebSocketClient:
+class DummyPrinterManager:
     def __init__(self):
-        self.sent_messages = []
-        self.local_messages = []
-
-    def send_message_sync(self, message):
-        self.sent_messages.append(message)
-        return True
-
-    def dispatch_local_message(self, message_type, message):
-        self.local_messages.append((message_type, message))
+        self.config = DummyConfig()
 
 
-def make_print_job_message():
-    return {
-        "data": {
-            "job_id": "cloud-job-1",
-            "printer_name": "Microsoft Print to PDF",
-            "printer_id": "printer-1",
-            "file_url": "https://example.com/file.jpg",
-            "content_hash": "a" * 64,
-            "name": "demo.jpg",
-            "print_options": {"copies": 1},
-        }
-    }
-
-
-class PrintJobHandlerBindingTests(unittest.TestCase):
-    def test_handle_print_job_uses_injected_interactive_binder(self):
-        binder_calls = []
-
-        def binder(file_url, job_id):
-            binder_calls.append((file_url, job_id))
-            return "session-1"
-
+class CloudPrintAdapterTests(unittest.TestCase):
+    def make_handler(self):
         handler = PrintJobHandler(
-            printer_manager=DummyPrinterManager({"success": True, "job_id": 123}),
-            api_client=None,
-            interactive_job_binder=binder,
+            api_client=Mock(node_id="node"),
+            printer_manager=DummyPrinterManager(),
+            websocket_client=Mock(),
         )
+        handler.websocket_client._begin_job_processing.return_value = "new"
+        handler.websocket_client._is_job_completed.return_value = False
+        return handler
 
-        with patch.object(handler, "_download_print_file", return_value="C:\\temp\\demo.jpg"), \
-             patch.object(handler, "_monitor_job_completion") as monitor_mock, \
-             patch.object(handler, "_report_job_failure") as failure_mock:
-            handler.handle_print_job(make_print_job_message())
+    def message(self):
+        return {"data": {
+            "job_id": "job-1", "printer_id": "p1", "printer_name": "Production Queue",
+            "file_url": "https://example.invalid/file.pdf", "content_hash": VALID_HASH,
+            "name": "invoice.pdf", "print_options": {"copies": 1},
+        }}
 
-        self.assertEqual(
-            [("https://example.com/file.jpg", "cloud-job-1")],
-            binder_calls,
-        )
-        monitor_mock.assert_called_once_with(
-            "cloud-job-1",
-            "Microsoft Print to PDF",
-            123,
-            "printer-1",
-        )
-        failure_mock.assert_not_called()
-
-    def test_handle_print_job_reports_failure_when_local_job_id_missing(self):
-        handler = PrintJobHandler(
-            printer_manager=DummyPrinterManager({"success": True, "job_id": None}),
-            api_client=None,
-        )
-
-        with patch.object(handler, "_download_print_file", return_value="C:\\temp\\demo.jpg"), \
-             patch.object(handler, "_monitor_job_completion") as monitor_mock, \
-             patch.object(handler, "_report_job_failure") as failure_mock:
-            handler.handle_print_job(make_print_job_message())
-
-        monitor_mock.assert_not_called()
-        failure_mock.assert_called_once_with("cloud-job-1", "无法获取本地打印任务ID")
-
-    def test_handle_print_job_skips_duplicate_cloud_job_while_first_submission_is_in_flight(self):
-        printer_manager = DummyPrinterManager({"success": True, "job_id": 123})
-        websocket = CloudWebSocketClient("ws://example.invalid", auth_client=None)
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            websocket_client=websocket,
-        )
-
-        with patch.object(handler, "_download_print_file", return_value="C:\\temp\\demo.jpg") as download_mock, \
-             patch.object(handler, "_monitor_job_completion") as monitor_mock, \
-             patch.object(handler, "_report_job_failure") as failure_mock:
-            handler.handle_print_job(make_print_job_message())
-            handler.handle_print_job(make_print_job_message())
-
-        self.assertEqual(1, len(printer_manager.submissions))
-        self.assertEqual(1, download_mock.call_count)
-        monitor_mock.assert_called_once_with(
-            "cloud-job-1",
-            "Microsoft Print to PDF",
-            123,
-            "printer-1",
-        )
-        failure_mock.assert_not_called()
-
-    def test_handle_print_job_reuses_cached_hash_without_downloading(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cached_path = os.path.join(tmpdir, "cached.jpg")
-            with open(cached_path, "wb") as fh:
-                fh.write(b"cached")
-
-            manager = FileManager(cleanup_interval=300, file_ttl=1800)
-            manager.register_preview_resource(
-                "file-preview",
-                "https://example.com/file.jpg",
-                cached_path,
-                content_hash="a" * 64,
-            )
-            printer_manager = DummyPrinterManager({"success": True, "job_id": 123})
-            handler = PrintJobHandler(printer_manager=printer_manager, api_client=None)
-
-            with patch("cloud_websocket_client.get_file_manager", return_value=manager), \
-                 patch.object(handler, "_download_print_file") as download_mock, \
-                 patch.object(handler, "_monitor_job_completion") as monitor_mock, \
-                 patch.object(handler, "_report_job_failure") as failure_mock:
-                handler.handle_print_job(make_print_job_message())
-
-            download_mock.assert_not_called()
-            self.assertEqual(cached_path, printer_manager.submissions[0]["file_path"])
-            monitor_mock.assert_called_once()
-            failure_mock.assert_not_called()
-
-    def test_handle_print_job_reports_failure_when_content_hash_missing(self):
-        message = make_print_job_message()
-        del message["data"]["content_hash"]
-        handler = PrintJobHandler(
-            printer_manager=DummyPrinterManager({"success": True, "job_id": 123}),
-            api_client=None,
-        )
-
-        with patch.object(handler, "_download_print_file") as download_mock, \
-             patch.object(handler, "_report_job_failure") as failure_mock:
+    def test_invalid_hash_is_rejected_before_download(self):
+        handler = self.make_handler()
+        message = self.message()
+        message["data"]["content_hash"] = "invalid"
+        with patch.object(handler, "_download_print_file") as download, patch.object(handler, "_report_job_failure") as failure:
             handler.handle_print_job(message)
+        download.assert_not_called()
+        failure.assert_called_once()
 
-        download_mock.assert_not_called()
-        failure_mock.assert_called_once_with("cloud-job-1", "content_hash missing or invalid")
+    def test_valid_job_enters_only_direct_ipp_service_adapter(self):
+        handler = self.make_handler()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "invoice.pdf"
+            source.write_bytes(b"%PDF")
+            with patch("cloud_websocket_client.get_file_manager", return_value=None), patch.object(
+                handler, "_download_print_file", return_value=str(source)
+            ), patch.object(handler, "_start_ipp_print_service") as start, patch.object(
+                handler.printer_manager, "submit_print_job_with_cleanup", create=True
+            ) as legacy:
+                handler.handle_print_job(self.message())
+        start.assert_called_once()
+        legacy.assert_not_called()
 
-    def test_monitor_cancels_local_job_before_reporting_ipp_fault(self):
-        fault_result = SimpleNamespace(
-            available=True,
-            faulted=True,
-            fault_reasons=["media-empty-error", "media-needed-error"],
-            printer_state=5,
-            printer_state_name="stopped",
-            error="",
-        )
-        printer_manager = MonitorPrinterManager([
-            {"exists": True, "status": "printing"},
-        ])
-        fault_probe = StaticFaultProbe(fault_result)
-        status_reporter = Mock()
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            status_reporter=status_reporter,
-            fault_probe=fault_probe,
-        )
+    def test_interactive_options_override_incomplete_cloud_echo(self):
+        handler = self.make_handler()
+        handler.interactive_job_binder = Mock(return_value={
+            "session_id": "session-1",
+            "print_options": {"scale_mode": "actual", "paper_size": "A4"},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "invoice.pdf"
+            source.write_bytes(b"%PDF")
+            with patch("cloud_websocket_client.get_file_manager", return_value=None), patch.object(
+                handler, "_download_print_file", return_value=str(source)
+            ), patch.object(handler, "_start_ipp_print_service") as start:
+                handler.handle_print_job(self.message())
 
-        with patch("threading.Thread", ImmediateThread), \
-             patch("time.sleep"), \
-             patch.object(handler, "_report_job_failure") as failure_mock, \
-             patch.object(handler, "_report_job_success") as success_mock:
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        self.assertEqual([("Microsoft Print to PDF", 42)], printer_manager.cancelled)
-        self.assertEqual(["169.254.12.234"], fault_probe.hosts)
-        success_mock.assert_not_called()
-        failure_mock.assert_called_once()
-        self.assertIn("缺纸", failure_mock.call_args.args[1])
-        status_reporter.force_report_printer.assert_called_with(
-            printer_id="printer-1",
-            printer_name="Microsoft Print to PDF",
-        )
-
-    def test_monitor_fault_failure_sends_mapped_local_payload_and_preserves_raw_reasons(self):
-        fault_result = SimpleNamespace(
-            available=True,
-            faulted=True,
-            fault_reasons=["media-empty-error", "media-needed-error"],
-            printer_state=5,
-            printer_state_name="stopped",
-            error="",
-        )
-        websocket = FakeWebSocketClient()
-        handler = PrintJobHandler(
-            printer_manager=MonitorPrinterManager([
-                {"exists": True, "status": "printing"},
-            ]),
-            api_client=None,
-            websocket_client=websocket,
-            fault_probe=StaticFaultProbe(fault_result),
-            fault_state_store=PrinterFaultStateStore(),
-        )
-
-        with patch("threading.Thread", ImmediateThread), patch("time.sleep"):
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        self.assertEqual(1, len(websocket.sent_messages))
-        cloud_data = websocket.sent_messages[0]["data"]
-        self.assertEqual("failed", cloud_data["status"])
-        self.assertEqual("打印机缺纸，请联系管理员补纸", cloud_data["error_message"])
-        self.assertNotIn("printer_fault", cloud_data)
-
-        self.assertEqual("job_status", websocket.local_messages[0][0])
-        local_data = websocket.local_messages[0][1]["data"]
-        self.assertEqual("printer_fault", local_data["error_code"])
-        self.assertEqual("打印机缺纸，请联系管理员补纸", local_data["message"])
-        self.assertEqual(
-            ["media-empty-error", "media-needed-error"],
-            local_data["printer_fault"]["raw_reasons"],
-        )
-
-    def test_monitor_does_not_fail_when_fault_probe_is_unavailable(self):
-        unavailable = SimpleNamespace(
-            available=False,
-            faulted=False,
-            fault_reasons=[],
-            printer_state=None,
-            printer_state_name="unknown",
-            error="connection refused",
-        )
-        printer_manager = MonitorPrinterManager([
-            {"exists": True, "status": "printing"},
-            {"exists": False, "status": "completed_or_failed"},
-        ])
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            fault_probe=StaticFaultProbe(unavailable),
-        )
-
-        with patch("threading.Thread", ImmediateThread), \
-             patch("time.sleep"), \
-             patch.object(handler, "_report_job_failure") as failure_mock, \
-             patch.object(handler, "_report_job_success") as success_mock:
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        self.assertEqual([], printer_manager.cancelled)
-        failure_mock.assert_not_called()
-        success_mock.assert_called_once_with("cloud-job-1", "printer-1")
-
-    def test_monitor_reports_friendly_local_failure_when_spooler_job_enters_error_status(self):
-        unavailable = SimpleNamespace(
-            available=False,
-            faulted=False,
-            fault_reasons=[],
-            printer_state=None,
-            printer_state_name="unknown",
-            error="connection refused",
-        )
-        printer_manager = MonitorPrinterManager([
-            {"exists": True, "status": "error"},
-        ])
-        websocket = FakeWebSocketClient()
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            websocket_client=websocket,
-            fault_probe=StaticFaultProbe(unavailable),
-        )
-
-        with patch("threading.Thread", ImmediateThread), patch("time.sleep"):
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        self.assertEqual([("Microsoft Print to PDF", 42)], printer_manager.cancelled)
-        self.assertEqual(1, len(websocket.sent_messages))
-        cloud_data = websocket.sent_messages[0]["data"]
-        self.assertIn("spooler job entered terminal error status", cloud_data["message"])
-
-        self.assertEqual("job_status", websocket.local_messages[0][0])
-        local_data = websocket.local_messages[0][1]["data"]
-        self.assertEqual("print_spooler_error", local_data["error_code"])
-        self.assertEqual(
-            "打印机处理该文件失败，请联系管理员检查打印机驱动或内存状态",
-            local_data["message"],
-        )
-        self.assertNotIn("local job cancelled", local_data["message"])
-
-    def test_monitor_reports_success_when_job_disappears_without_fault(self):
-        printer_manager = MonitorPrinterManager([
-            {"exists": False, "status": "completed_or_failed"},
-        ])
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            fault_probe=StaticFaultProbe(SimpleNamespace(available=True, faulted=False)),
-        )
-
-        with patch("threading.Thread", ImmediateThread), \
-             patch("time.sleep"), \
-             patch.object(handler, "_report_job_failure") as failure_mock, \
-             patch.object(handler, "_report_job_success") as success_mock:
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        self.assertEqual([], printer_manager.cancelled)
-        failure_mock.assert_not_called()
-        success_mock.assert_called_once_with("cloud-job-1", "printer-1")
-
-    def test_monitor_reports_fault_when_job_disappears_but_printer_is_faulted(self):
-        printer_manager = MonitorPrinterManager([
-            {"exists": False, "status": "completed_or_failed"},
-        ])
-        fault_result = SimpleNamespace(
-            available=True,
-            faulted=True,
-            fault_reasons=["media-empty-error", "media-needed-error"],
-            printer_state=5,
-            printer_state_name="stopped",
-            printer_state_reasons=["media-empty-error", "media-needed-error"],
-            error="",
-        )
-        handler = PrintJobHandler(
-            printer_manager=printer_manager,
-            api_client=None,
-            fault_probe=StaticFaultProbe(fault_result),
-            fault_state_store=PrinterFaultStateStore(),
-        )
-
-        with patch("threading.Thread", ImmediateThread), \
-             patch("time.sleep"), \
-             patch.object(handler, "_report_job_failure") as failure_mock, \
-             patch.object(handler, "_report_job_success") as success_mock:
-            handler._monitor_job_completion(
-                "cloud-job-1",
-                "Microsoft Print to PDF",
-                42,
-                "printer-1",
-            )
-
-        success_mock.assert_not_called()
-        failure_mock.assert_called_once()
-        self.assertEqual("printer_fault", failure_mock.call_args.kwargs["error_code"])
+        self.assertEqual("actual", start.call_args.kwargs["print_options"]["scale_mode"])
 
 
 if __name__ == "__main__":

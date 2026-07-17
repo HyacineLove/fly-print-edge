@@ -131,7 +131,6 @@ export function createAppController({ mountNode }) {
     currentViewApi?.handleJobStatus?.(data);
 
     const status = String(data?.status || "").toLowerCase();
-    const progress = Number(data?.progress || 0);
     if (status.includes("failed") || status.includes("error")) {
       finishWithResult("error", mapPrintErrorMessage(data?.error_code, data?.message || data?.error_message), {
         error_code: data?.error_code || null,
@@ -142,7 +141,7 @@ export function createAppController({ mountNode }) {
 
     if (
       state.currentView === "printing" &&
-      (status.includes("complete") || status.includes("success") || status.includes("done") || progress >= 100)
+      (status.includes("complete") || status.includes("success") || status.includes("done"))
     ) {
       finishWithResult("success", "");
     }

@@ -26,7 +26,6 @@ class ConfigServiceTests(unittest.TestCase):
             },
             "settings": {},
             "network": {"bind_address": "127.0.0.1", "port": 7860},
-            "printers": {"discovery_mode": "auto", "static_list": []},
         }
         self.service = ConfigService(config_repo=None)
 

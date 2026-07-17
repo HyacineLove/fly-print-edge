@@ -27,7 +27,6 @@ class DummyConfig:
             },
             "settings": {"copies_min": 1, "copies_max": 3, "log_level": "INFO", "debug_logging": False},
             "network": {"bind_address": "127.0.0.1", "port": 7860},
-            "printers": {"discovery_mode": "auto", "static_list": []},
         }
 
     def get_full_config(self):

@@ -24,15 +24,7 @@ if missing_required_modules:
     )
 
 hidden_imports = [
-    "win32api",
-    "win32com",
-    "win32com.client",
-    "win32com.server",
-    "win32gui",
-    "win32print",
-    "win32timezone",
-    "win32ui",
-    "pythoncom",
+    "zeroconf",
     "fitz",
     "PIL._imaging",
     "PIL._webp",
@@ -57,10 +49,10 @@ hidden_imports = [
     "qrcode",
     "qrcode.image",
     "qrcode.image.pil",
-    "pandas",
     "psutil",
-    "zeroconf",
 ]
+
+service_binaries = []
 
 static_src = PROJECT_ROOT / "static"
 datas = []
@@ -73,6 +65,11 @@ if static_src.is_dir():
 config_example = PROJECT_ROOT / "config.example.json"
 if config_example.is_file():
     datas.append((str(config_example), "."))
+
+for document_name in ("ipp-printing-architecture.md", "ipp-printing-operations.md"):
+    document_path = PROJECT_ROOT / "docs" / document_name
+    if document_path.is_file():
+        datas.append((str(document_path), "docs"))
 
 excludes = [
     "tkinter",
@@ -88,7 +85,7 @@ excludes = [
 service_analysis = Analysis(
     [str(PROJECT_ROOT / "service_main.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=service_binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],

@@ -25,6 +25,11 @@ PRINTER_STATUS_TO_CLOUD = {
     "error": "error",
     "offline": "offline",
     "unknown": "offline",
+    "printer_out_of_paper": "error",
+    "printer_out_of_toner": "error",
+    "printer_jammed": "error",
+    "printer_cover_open": "error",
+    "printer_user_intervention": "error",
     # Chinese ready states
     "在线": "ready",
     "空闲": "ready",
@@ -70,12 +75,10 @@ class CloudService:
         config: Dict[str, Any],
         printer_manager=None,
         interactive_job_binder=None,
-        fault_state_store=None,
     ):
         self.config = dict(config or {})
         self.printer_manager = printer_manager
         self.interactive_job_binder = interactive_job_binder
-        self.fault_state_store = fault_state_store
 
         self.auth_client = None
         self.api_client = None
@@ -88,6 +91,13 @@ class CloudService:
 
         self.node_id = self.config.get("node_id")
         self.registered = bool(self.node_id)
+
+    @staticmethod
+    def _cloud_port_info(port_info: Any) -> str:
+        """Return the string value required by the cloud printer schema."""
+        if isinstance(port_info, dict):
+            return str(port_info.get("port") or "")
+        return str(port_info or "")
 
     def _cloud_config_ready(self) -> tuple[bool, list[str]]:
         required_fields = ("base_url", "auth_url", "client_id", "client_secret")
@@ -175,7 +185,6 @@ class CloudService:
                     auth_client=self.auth_client,
                     node_id=self.node_id,
                     interactive_job_binder=self.interactive_job_binder,
-                    fault_state_store=self.fault_state_store,
                 )
 
             self.last_error = None
@@ -429,7 +438,7 @@ class CloudService:
                     "model": printer.get("make_model", ""),
                     "serial_number": "",
                     "firmware_version": "",
-                    "port_info": port_info,
+                    "port_info": self._cloud_port_info(port_info),
                     "ip_address": None,
                     "mac_address": "",
                     "capabilities": cloud_capabilities
@@ -622,8 +631,8 @@ class CloudService:
             port_info = self.printer_manager.get_printer_port_info(printer_name)
             cloud_capabilities = {
                 "paper_sizes": raw_capabilities.get("page_size", ["A4"])[:10],
-                "color_support": "RGB" in str(raw_capabilities.get("color_model", [])) or "Color" in str(raw_capabilities.get("color_model", [])),
-                "duplex_support": any(d != "None" for d in raw_capabilities.get("duplex", ["None"])),
+                "color_support": bool(raw_capabilities.get("color_supported")),
+                "duplex_support": bool(raw_capabilities.get("duplex_supported")),
                 "resolution": self._get_resolution_string(raw_capabilities.get("resolution", ["600dpi"])),
                 "print_speed": "unknown",
                 "media_types": raw_capabilities.get("media_type", ["Plain"])[:8]
@@ -633,8 +642,8 @@ class CloudService:
                 "model": managed_printer.get("make_model", ""),
                 "serial_number": "",
                 "firmware_version": "",
-                "port_info": port_info,
-                "ip_address": None,
+                "port_info": self._cloud_port_info(port_info),
+                "ip_address": port_info.get("host") if isinstance(port_info, dict) else None,
                 "mac_address": "",
                 "capabilities": cloud_capabilities
             }
@@ -756,7 +765,7 @@ class PrinterStatusReporter:
             # 查找目标打印机
             target_printer = None
             for printer in managed_printers:
-                if printer_id and printer.get("id") == printer_id:
+                if printer_id and printer_id in {printer.get("id"), printer.get("cloud_id")}:
                     target_printer = printer
                     break
                 elif printer_name and printer.get("name") == printer_name:
@@ -767,7 +776,7 @@ class PrinterStatusReporter:
                 logger.debug("Printer not found for forced status report: id=%s name=%s", printer_id, printer_name)
                 return
             
-            p_id = target_printer.get("id")
+            p_id = target_printer.get("cloud_id") or target_printer.get("id")
             p_name = target_printer.get("name")
             
             # 获取当前状态
@@ -823,7 +832,7 @@ class PrinterStatusReporter:
             
             for printer in managed_printers:
                 printer_name = printer.get("name")
-                printer_id = printer.get("id")
+                printer_id = printer.get("cloud_id") or printer.get("id")
                 if not printer_name or not printer_id:
                     continue
                 

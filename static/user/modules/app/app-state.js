@@ -26,8 +26,6 @@ export function createAppState() {
       retryCount: 0,
       lastMessageAt: 0,
     },
-    printing: {
-      renderProgress: null,
-    },
+    printing: {},
   };
 }

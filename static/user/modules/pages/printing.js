@@ -9,22 +9,18 @@ import {
   state,
 } from "../shared/session-state.js";
 
-export function renderPrintingProgress(current, total) {
-  const cur = Math.max(1, Number(current || 1));
-  const all = Math.max(cur, Number(total || 1));
-
+export function renderPrintingIndicator() {
   const bar = q("77_20");
   const rail = q("77_19");
   if (bar && rail) {
     const railW = rail.clientWidth || 556;
-    bar.style.width = `${Math.max(20, Math.round((cur / all) * railW))}px`;
+    bar.style.width = `${railW}px`;
   }
 }
 
 export function initPrintingPage() {
   setDoneResult("success", "");
-  const total = Math.max(1, Number(state.file?.page_count || 1));
-  renderPrintingProgress(total, total);
+  renderPrintingIndicator();
 
   const sseConnection = createSseConnection({
     onMessage: ({ type, data }) => {
@@ -42,11 +38,7 @@ export function initPrintingPage() {
         return;
       }
       if (type === "job_status") {
-        handleJobStatusEvent(data, {
-          page: "printing",
-          sseConnection,
-          renderPrintingProgress,
-        });
+        handleJobStatusEvent(data, { page: "printing", sseConnection });
       }
     },
   });

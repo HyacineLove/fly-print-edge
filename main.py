@@ -34,8 +34,6 @@ from file_manager import init_file_manager, get_file_manager, is_valid_content_h
 from interactive_session import InteractiveSessionManager
 from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
-from printer_fault_probe import IPPPrinterFaultProbe, resolve_printer_host
-from printer_fault_state import PrinterFaultStateStore
 from windows_startup import get_windows_startup_enabled, set_windows_startup_enabled
 from print_layout import (
     compute_physical_fit_rect,
@@ -48,6 +46,8 @@ from print_layout import (
     resolve_layout_options,
     safe_float,
 )
+from print_options import normalize_print_options, to_cloud_duplex
+from libreoffice_converter import convert_document_to_pdf
 
 logger = logging.getLogger("EdgeServer")
 
@@ -79,10 +79,10 @@ preview_cache: Dict[str, Dict[str, Any]] = {}
 preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
 preview_page_meta: Dict[str, Dict[str, int]] = {}
 interactive_session_manager = InteractiveSessionManager()
-printer_fault_state_store = PrinterFaultStateStore()
-printer_fault_probe = IPPPrinterFaultProbe()
 qr_code_request_lock: Optional[asyncio.Lock] = None
 config_service: Optional[ConfigService] = None
+printer_test_tasks: Dict[str, Dict[str, Any]] = {}
+active_printer_tests: Dict[str, str] = {}
 
 # CORS设置
 # 仅允许本地和受信域名访问
@@ -147,7 +147,6 @@ async def startup_event():
         cloud_config,
         printer_manager,
         interactive_job_binder=bind_interactive_cloud_job,
-        fault_state_store=printer_fault_state_store,
     )
 
     if cloud_service:
@@ -223,13 +222,13 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
 
     return message
 
-def bind_interactive_cloud_job(file_url: Optional[str], job_id: Optional[str]) -> Optional[str]:
+def bind_interactive_cloud_job(file_url: Optional[str], job_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if not file_url or not job_id:
         return None
     bound = interactive_session_manager.attach_cloud_job(file_url, job_id)
     if not bound:
         return None
-    return bound.get("session_id")
+    return bound
 
 def handle_cloud_message(data: Dict[str, Any]):
     """处理云端消息并推送到所有SSE客户端"""
@@ -296,7 +295,7 @@ async def get_status():
 
 @app.get("/api/printer/availability")
 async def get_printer_availability():
-    return _get_default_printer_availability_state()
+    return await asyncio.to_thread(_get_default_printer_availability_state)
 
 def get_host_ip():
     """获取本机局域网 IP"""
@@ -332,9 +331,13 @@ def _get_printer_by_id(printer_id: str):
     if not printer_manager:
         return None
     for printer in _get_managed_printers():
-        if printer.get("id") == printer_id:
+        if printer.get("id") == printer_id or printer.get("cloud_id") == printer_id:
             return printer
     return None
+
+def _get_cloud_printer_id(printer: Optional[Dict[str, Any]]) -> Optional[str]:
+    cloud_id = str((printer or {}).get("cloud_id") or "").strip()
+    return cloud_id or None
 
 def _ensure_default_printer():
     if not printer_manager:
@@ -344,12 +347,15 @@ def _ensure_default_printer():
         printer_manager.config.clear_default_printer_id()
         return None
     default_id = printer_manager.config.get_default_printer_id()
-    valid_ids = {p.get("id") for p in printers}
+    eligible = [p for p in printers if p.get("enabled", True)]
+    valid_ids = {p.get("id") for p in eligible}
     if default_id in valid_ids:
         return default_id
-    new_default_id = printers[0].get("id")
+    new_default_id = eligible[0].get("id") if eligible else None
     if new_default_id:
         printer_manager.config.set_default_printer_id(new_default_id)
+    else:
+        printer_manager.config.clear_default_printer_id()
     return new_default_id
 
 def _get_default_printer_record():
@@ -375,20 +381,88 @@ def _get_default_printer_availability_state():
 
     printer_id = default_printer.get("id")
     printer_name = default_printer.get("name")
-    host = resolve_printer_host(default_printer)
-    if printer_fault_probe and host:
-        result = printer_fault_probe.probe(host)
-        if getattr(result, "available", False):
-            return printer_fault_state_store.update_from_probe(
-                printer_id=printer_id,
-                printer_name=printer_name,
-                result=result,
-            )
+    printer_uuid = str(default_printer.get("printer_uuid") or "")
+    ipp_uri = str(default_printer.get("ipp_uri") or "")
+    try:
+        from printing.domain import ErrorCode, USER_MESSAGES
+        from printing.ipp_device import printer_fault, printer_snapshot
+        from printing.ipp_protocol import IppClient
+        from printing.service import DEVICE_JOBS
 
-    state = printer_fault_state_store.get_state()
-    state["printer_id"] = printer_id
-    state["printer_name"] = printer_name
-    return state
+        if not printer_uuid or not ipp_uri or default_printer.get("type") != "ipp":
+            return {
+                "available": False,
+                "faulted": True,
+                "error_code": "printer_unavailable",
+                "reason_code": "ipp_configuration_invalid",
+                "reason_label": "打印机配置无效",
+                "message": "当前打印机暂不可用，请联系工作人员。",
+                "raw_reasons": [],
+                "printer_id": printer_id,
+                "printer_name": printer_name,
+            }
+        if DEVICE_JOBS.is_uncertain(printer_uuid):
+            return {
+                "available": False,
+                "faulted": True,
+                "error_code": "printer_unconfirmed",
+                "reason_code": ErrorCode.RESULT_UNCONFIRMED.value,
+                "reason_label": USER_MESSAGES[ErrorCode.RESULT_UNCONFIRMED],
+                "message": USER_MESSAGES[ErrorCode.RESULT_UNCONFIRMED],
+                "raw_reasons": [],
+                "printer_id": printer_id,
+                "printer_name": printer_name,
+            }
+        snapshot = printer_snapshot(IppClient(ipp_uri, timeout=5.0))
+        error_code = printer_fault(snapshot, include_reports_and_alerts=True)
+        if error_code:
+            return {
+                "available": False,
+                "faulted": True,
+                "error_code": "printer_fault",
+                "reason_code": error_code.value,
+                "reason_label": USER_MESSAGES[error_code],
+                "message": USER_MESSAGES[error_code],
+                "raw_reasons": list(snapshot.get("printer-state-reasons", [])),
+                "printer_id": printer_id,
+                "printer_name": printer_name,
+            }
+        if not bool((snapshot.get("printer-is-accepting-jobs") or [False])[0]):
+            return {
+                "available": False,
+                "faulted": True,
+                "error_code": "printer_fault",
+                "reason_code": ErrorCode.PRINTER_USER_INTERVENTION.value,
+                "reason_label": USER_MESSAGES[ErrorCode.PRINTER_USER_INTERVENTION],
+                "message": USER_MESSAGES[ErrorCode.PRINTER_USER_INTERVENTION],
+                "raw_reasons": list(snapshot.get("printer-state-reasons", [])),
+                "printer_id": printer_id,
+                "printer_name": printer_name,
+            }
+        return {
+            "available": True,
+            "faulted": False,
+            "error_code": None,
+            "reason_code": "ready",
+            "reason_label": "可用",
+            "message": "打印机可用",
+            "raw_reasons": [],
+            "printer_id": printer_id,
+            "printer_name": printer_name,
+        }
+    except Exception as exc:
+        logger.warning("default IPP printer unavailable printer=%r error=%s", printer_name, exc)
+        return {
+            "available": False,
+            "faulted": True,
+            "error_code": "printer_fault",
+            "reason_code": "ipp_unreachable",
+            "reason_label": "打印机不可用",
+            "message": "当前打印机暂不可用，请联系工作人员。",
+            "raw_reasons": [],
+            "printer_id": printer_id,
+            "printer_name": printer_name,
+        }
 
 def _get_settings():
     if not printer_manager:
@@ -694,87 +768,38 @@ def _render_pdf_to_image(file_path: str, page_index: int):
 def _find_libreoffice_path():
     settings = _get_settings()
     configured = _resolve_path(settings.get("libreoffice_path"))
-    if configured:
-        return configured
-    candidates = [
-        r"C:\Program Files\LibreOffice\program\soffice.exe",
-        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return shutil.which("soffice")
+    return configured
+
 
 def _convert_word_to_pdf(file_path: str):
-    import pythoncom
-    from win32com import client
-    import subprocess
-    pdf_path = None
-    try:
-        pythoncom.CoInitialize()
-        # 使用 portable temp 目录
-        temp_dir = get_portable_temp_dir()
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        pdf_path = os.path.join(temp_dir, f"{base_name}.pdf")
-        if os.path.exists(pdf_path):
-            try:
-                os.remove(pdf_path)
-            except Exception:
-                pass
-        abs_file_path = os.path.abspath(file_path)
+    # 使用固定的 portable temp 目录
+    temp_dir = get_portable_temp_dir()
+    abs_file_path = os.path.abspath(file_path)
+    logger.info(
+        "DOCX conversion started: source=%s exists=%s temp_dir=%s",
+        abs_file_path,
+        os.path.exists(abs_file_path),
+        temp_dir,
+    )
 
-        def convert_with_com(prog_id: str):
-            word = None
-            doc = None
-            try:
-                word = client.Dispatch(prog_id)
-                word.Visible = False
-                try:
-                    word.DisplayAlerts = False
-                except Exception:
-                    pass
-                doc = word.Documents.Open(abs_file_path)
-                doc.SaveAs(pdf_path, FileFormat=17)
-                doc.Close()
-                return True, None
-            except Exception as e:
-                try:
-                    if doc:
-                        doc.Close()
-                except Exception:
-                    pass
-                return False, str(e)
-            finally:
-                try:
-                    if word:
-                        word.Quit()
-                except Exception:
-                    pass
+    soffice = _find_libreoffice_path()
+    logger.info("LibreOffice configured path resolved: %r", soffice)
+    if not soffice:
+        error = "LibreOffice path is not configured or does not exist"
+        logger.error("DOCX conversion failed: %s", error)
+        return None, error
 
-        wps_prog_ids = ["Kwps.Application", "WPS.Application", "wps.application"]
-        for prog_id in wps_prog_ids:
-            ok, _ = convert_with_com(prog_id)
-            if ok and os.path.exists(pdf_path):
-                return pdf_path, None
-
-        soffice = _find_libreoffice_path()
-        if soffice:
-            try:
-                result = subprocess.run(
-                    [soffice, "--headless", "--convert-to", "pdf", "--outdir", temp_dir, abs_file_path],
-                    capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=60
-                )
-                if result.returncode == 0 and os.path.exists(pdf_path):
-                    return pdf_path, None
-            except Exception as e:
-                return None, str(e)
-
-        ok, err = convert_with_com("Word.Application")
-        if ok and os.path.exists(pdf_path):
-            return pdf_path, None
-        return None, err or "文档转PDF失败"
-    finally:
-        pythoncom.CoUninitialize()
+    pdf_path, error = convert_document_to_pdf(
+        soffice,
+        abs_file_path,
+        temp_dir,
+        logger=logger,
+    )
+    if pdf_path:
+        logger.info("DOCX conversion succeeded via LibreOffice: output=%s", pdf_path)
+        return pdf_path, None
+    logger.error("DOCX conversion failed: %s", error)
+    return None, error or "LibreOffice conversion failed"
 
 def _resolve_preview_ext(file_name: Optional[str], file_type: Optional[str]):
     ext = os.path.splitext(file_name or "")[1].lower()
@@ -873,20 +898,22 @@ def _remove_managed_printer(printer_id: str, allow_missing: bool = False):
         if printer.get("id") == printer_id:
             removed_index = idx
             break
+    removed_printer = next((dict(item) for item in managed if item.get("id") == printer_id), None)
     printer_manager.config.remove_printer(printer_id)
     managed_after = _get_managed_printers()
     new_default_id = None
     if default_id == printer_id:
-        if managed_after:
-            target_index = min(removed_index or 0, len(managed_after) - 1)
-            new_default_id = managed_after[target_index].get("id")
+        eligible = [item for item in managed_after if item.get("enabled", True)]
+        if eligible:
+            target_index = min(removed_index or 0, len(eligible) - 1)
+            new_default_id = eligible[target_index].get("id")
             if new_default_id:
                 printer_manager.config.set_default_printer_id(new_default_id)
         else:
             printer_manager.config.clear_default_printer_id()
     else:
         new_default_id = printer_manager.config.get_default_printer_id()
-    return {"success": True, "default_printer_id": new_default_id}
+    return {"success": True, "default_printer_id": new_default_id, "removed_printer": removed_printer}
 
 @app.get("/api/qr_code")
 async def get_qr_code():
@@ -898,23 +925,33 @@ async def get_qr_code():
 
     async with qr_code_request_lock:
         if not node_id:
-            return JSONResponse(status_code=503, content={"success": False, "message": "设备未注册或离线"})
+            return JSONResponse(status_code=503, content={"success": False, "error_code": "service_not_ready", "message": "打印服务暂不可用，请联系工作人员。"})
         if not printer_manager:
-            return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
+            return JSONResponse(status_code=503, content={"success": False, "error_code": "service_not_ready", "message": "打印服务暂不可用，请联系工作人员。"})
         if len(_get_managed_printers()) == 0:
-            return {"success": False, "standby": True, "message": "暂无可用打印机"}
+            return {"success": False, "standby": True, "error_code": "service_not_ready", "message": "打印服务暂不可用，请联系工作人员。"}
         default_printer_id = _ensure_default_printer()
         if not default_printer_id:
-            return {"success": False, "standby": True, "message": "暂无可用打印机"}
+            return {"success": False, "standby": True, "error_code": "service_not_ready", "message": "打印服务暂不可用，请联系工作人员。"}
 
         # 通过 WebSocket 请求上传凭证
-        availability = _get_default_printer_availability_state()
+        default_printer = _get_printer_by_id(default_printer_id)
+        cloud_printer_id = _get_cloud_printer_id(default_printer)
+        if not cloud_printer_id:
+            return {
+                "success": False,
+                "standby": True,
+                "error_code": "printer_cloud_registration_incomplete",
+                "message": "打印机尚未注册到云端，请联系管理员。",
+            }
+
+        availability = await asyncio.to_thread(_get_default_printer_availability_state)
         if availability.get("faulted"):
             return {
                 "success": False,
                 "standby": True,
                 "error_code": "printer_fault",
-                "message": availability.get("message") or "打印机故障，请联系管理员处理",
+                "message": availability.get("message") or "打印机暂不可用，请联系工作人员处理。",
                 "printer_fault": availability,
             }
 
@@ -949,7 +986,7 @@ async def get_qr_code():
             cloud_service.print_job_handler.upload_token_error_callback = upload_token_error_callback
 
         # 请求上传凭证
-        success = cloud_service.websocket_client.request_upload_token(node_id, default_printer_id)
+        success = cloud_service.websocket_client.request_upload_token(node_id, cloud_printer_id)
         if not success:
             return JSONResponse(status_code=500, content={"success": False, "message": "请求上传凭证失败"})
 
@@ -1040,7 +1077,6 @@ async def get_qr_code():
     session = interactive_session_manager.start_session(upload_token=token_data["token"])
     qr_img_url = build_qr_data_url(upload_url)
 
-    default_printer = _get_printer_by_id(default_printer_id)
     default_printer_capabilities = None
     if default_printer and default_printer.get("name"):
         default_printer_capabilities = printer_manager.get_printer_capabilities(default_printer.get("name"))
@@ -1226,13 +1262,13 @@ async def submit_print(request: Request):
         session_id = body.get("session_id")
         task_token = body.get("task_token")
         raw_options = body.get("options")
-        options = _normalize_request_options(raw_options)
         file_id = body.get("file_id")
         
         if not raw_options or not file_id:
             return JSONResponse(status_code=400, content={"success": False, "message": "参数不完整: options, file_id 均必需"})
         if not isinstance(raw_options, dict):
             return JSONResponse(status_code=400, content={"success": False, "message": "参数错误: options 必须为对象"})
+        options = normalize_print_options(_normalize_request_options(raw_options))
         if not printer_manager:
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
         if not session_id or not interactive_session_manager.matches(session_id, file_id):
@@ -1244,18 +1280,28 @@ async def submit_print(request: Request):
             
             if not printer_id:
                  return JSONResponse(status_code=500, content={"success": False, "message": "未找到可用打印机"})
-            if not interactive_session_manager.mark_print_submitted(session_id, file_id):
+            printer = _get_printer_by_id(printer_id)
+            cloud_printer_id = _get_cloud_printer_id(printer)
+            if not cloud_printer_id:
+                return JSONResponse(status_code=503, content={
+                    "success": False,
+                    "error_code": "printer_cloud_registration_incomplete",
+                    "message": "打印机尚未注册到云端，请联系管理员。",
+                })
+            if not interactive_session_manager.mark_print_submitted(session_id, file_id, options):
                 return JSONResponse(status_code=409, content={"success": False, "message": "打印请求已提交，请勿重复点击"})
 
             # 发送参数到云端
             # 构造消息
-            duplex_value = options.get("duplex")
-            if duplex_value:
-                duplex_value_str = str(duplex_value).lower()
-                if duplex_value_str in ["none", "simplex", "单面"]:
-                    options["duplex_mode"] = "single"
-                elif duplex_value_str in ["longedge", "shortedge", "duplexnotumble", "duplextumble", "双面"]:
-                    options["duplex_mode"] = "duplex"
+            cloud_duplex = to_cloud_duplex(options.get("duplex"))
+            if cloud_duplex:
+                options["duplex_mode"] = cloud_duplex
+            logger.info(
+                "Interactive print options normalized: file_id=%s printer_id=%s options=%r",
+                file_id,
+                cloud_printer_id,
+                options,
+            )
             
             from datetime import datetime, timezone
             msg = {
@@ -1264,7 +1310,7 @@ async def submit_print(request: Request):
                 "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                 "data": {
                     "file_id": file_id,
-                    "printer_id": printer_id,
+                    "printer_id": cloud_printer_id,
                     "options": options
                 }
             }
@@ -1528,6 +1574,9 @@ async def get_managed_printers():
         item = dict(printer)
         item["is_default"] = item.get("id") == default_id
         item.update(printer_manager.get_admin_printer_summary(item.get("name")))
+        status_detail = await asyncio.to_thread(printer_manager.get_printer_status_detail, item.get("name"))
+        item["status"] = status_detail.get("status_text", "unknown")
+        item["uncertain"] = bool(status_detail.get("uncertain"))
         printers.append(item)
     return {
         "success": True,
@@ -1539,32 +1588,43 @@ async def get_managed_printers():
 async def get_discovered_printers():
     if not printer_manager:
         return {"success": False, "message": "设备未就绪"}
-    managed = _get_managed_printers()
-    managed_names = {p.get("name") for p in managed}
-    local_printers = printer_manager.discovery.discover_local_printers()
-    network_printers = printer_manager.discovery.discover_network_printers()
-    all_printers = local_printers + network_printers
+    managed_uuids = {str(p.get("printer_uuid") or "").casefold() for p in _get_managed_printers()}
+    all_printers = await asyncio.to_thread(printer_manager.discovery.discover_network_printers)
     available = []
     for printer in all_printers:
-        if printer.get("name") in managed_names:
+        if str(printer.get("printer_uuid") or "").casefold() in managed_uuids:
             continue
-        item = dict(printer)
-        item.update(printer_manager.get_admin_printer_summary(item.get("name")))
-        available.append(item)
+        available.append(dict(printer))
     return {"success": True, "items": available}
+
+
+@admin_router.post("/printers/probe")
+async def probe_ipp_printer(request: Request):
+    if not printer_manager:
+        return {"success": False, "message": "设备未就绪"}
+    body = await request.json()
+    ipp_uri = str(body.get("ipp_uri") or "").strip()
+    if not ipp_uri:
+        return {"success": False, "message": "请输入完整的 IPP URI"}
+    try:
+        item = await asyncio.to_thread(printer_manager.probe_printer, ipp_uri)
+    except Exception as exc:
+        return {"success": False, "message": f"IPP 检测失败: {exc}"}
+    return {"success": True, "item": item}
 
 @admin_router.post("/printers/add")
 async def add_managed_printer(request: Request):
     if not printer_manager:
         return {"success": False, "message": "设备未就绪"}
     body = await request.json()
-    success, message = printer_manager.add_printer_intelligently(body)
+    body = {"ipp_uri": str(body.get("ipp_uri") or "").strip()}
+    success, message = await asyncio.to_thread(printer_manager.add_printer_intelligently, body)
     if not success:
         return {"success": False, "message": message}
     default_id = _ensure_default_printer()
     added_printer = None
     for printer in _get_managed_printers():
-        if printer.get("name") == body.get("name"):
+        if printer.get("ipp_uri") == body.get("ipp_uri"):
             added_printer = printer
             break
     if not default_id and added_printer:
@@ -1597,6 +1657,14 @@ async def add_managed_printer(request: Request):
         "cloud_error": cloud_error
     }
 
+
+@admin_router.post("/printers/{printer_id}/clear-unconfirmed")
+async def clear_unconfirmed_printer(printer_id: str):
+    if not printer_manager or not _get_printer_by_id(printer_id):
+        return {"success": False, "message": "未找到该打印机"}
+    printer_manager.clear_uncertain(printer_id)
+    return {"success": True, "message": "已解除结果未知锁定，请确认打印机中没有遗留任务后再继续。"}
+
 @admin_router.post("/printers/default")
 async def set_default_printer(request: Request):
     if not printer_manager:
@@ -1608,6 +1676,9 @@ async def set_default_printer(request: Request):
     managed = _get_managed_printers()
     if not any(p.get("id") == printer_id for p in managed):
         return {"success": False, "message": "打印机不存在"}
+    target = next(p for p in managed if p.get("id") == printer_id)
+    if not target.get("enabled", True):
+        return {"success": False, "message": "已禁用的打印机不能设为默认打印机。"}
     printer_manager.config.set_default_printer_id(printer_id)
     
     # 广播默认打印机变更事件
@@ -1625,8 +1696,10 @@ async def delete_managed_printer(printer_id: str):
     
     # 尝试从云端删除，但不影响本地删除结果
     cloud_delete_warning = None
-    if cloud_service:
-        cloud_result = cloud_service.delete_printer_from_cloud(printer_id)
+    removed_printer = result.get("removed_printer") or {}
+    cloud_printer_id = removed_printer.get("cloud_id")
+    if cloud_service and cloud_printer_id:
+        cloud_result = cloud_service.delete_printer_from_cloud(cloud_printer_id)
         if not cloud_result.get("success"):
             cloud_delete_warning = cloud_result.get("message") or cloud_result.get("error") or "云端删除失败"
             logger.warning(f"打印机 {printer_id} 云端删除失败: {cloud_delete_warning}")
@@ -1682,6 +1755,105 @@ async def reregister_printer(printer_id: str):
         return {"success": False, "message": str(e)}
 
 # 注册 Admin Router
+@admin_router.post("/printers/{printer_id}/test")
+async def start_printer_test(printer_id: str):
+    printer = _get_printer_by_id(printer_id)
+    if not printer:
+        return {"success": False, "message": "未找到该打印机。"}
+    active_task_id = active_printer_tests.get(printer_id)
+    if active_task_id and printer_test_tasks.get(active_task_id, {}).get("status") == "running":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": "该打印机正在执行测试，请勿重复提交。",
+                "task_id": active_task_id,
+            },
+        )
+    task_id = f"printer-test-{printer_id}-{time.time_ns()}"
+    while len(printer_test_tasks) >= 50:
+        oldest = next(iter(printer_test_tasks))
+        if printer_test_tasks[oldest].get("status") == "running":
+            break
+        printer_test_tasks.pop(oldest)
+    printer_test_tasks[task_id] = {
+        "task_id": task_id,
+        "printer_id": printer_id,
+        "status": "running",
+        "events": [],
+    }
+    active_printer_tests[printer_id] = task_id
+
+    def record(event):
+        public = event.public_dict()
+        printer_test_tasks[task_id]["events"].append(public)
+        printer_test_tasks[task_id]["current"] = public
+
+    def run():
+        test_source = None
+        try:
+            from pathlib import Path
+            from print_runtime import build_print_request, build_print_service
+            from printing.domain import PrintOptions, PrintState
+
+            test_source = Path(get_portable_temp_dir()) / f"{task_id}.pdf"
+            document = fitz.open()
+            try:
+                page = document.new_page(width=595.276, height=841.89)
+                page.insert_text((72, 90), "FlyPrint Direct IPP Test", fontsize=18)
+                page.insert_text((72, 125), f"Printer: {printer.get('name')}", fontsize=11)
+                document.save(test_source)
+            finally:
+                document.close()
+            service = build_print_service(printer_manager.config, logger)
+            request = build_print_request(
+                printer_manager.config,
+                job_id=task_id,
+                printer_id=printer_id,
+                printer_name=printer.get("name"),
+                file_path=str(test_source),
+                source_name=test_source.name,
+                print_options=PrintOptions(
+                    copies=1,
+                    duplex="simplex",
+                    color_mode="mono",
+                    paper_size="A4",
+                ).__dict__,
+            )
+            event = service.execute(request, record)
+            success = event.state == PrintState.COMPLETED
+            printer_test_tasks[task_id].update({
+                "status": "completed" if success else "failed",
+                "result": {
+                    "success": success,
+                    "message": "设备已确认打印完成。" if success else event.message,
+                    "error_code": event.error_code.value if event.error_code else None,
+                },
+            })
+        except Exception as exc:
+            logger.exception("printer test failed: task_id=%s", task_id)
+            printer_test_tasks[task_id].update({
+                "status": "failed",
+                "result": {"success": False, "message": str(exc)},
+            })
+        finally:
+            if test_source:
+                test_source.unlink(missing_ok=True)
+            active_printer_tests.pop(printer_id, None)
+
+    import threading
+    threading.Thread(target=run, name=task_id, daemon=True).start()
+    return {"success": True, "task_id": task_id}
+
+
+@admin_router.get("/printer-tests/{task_id}")
+async def get_printer_test(task_id: str):
+    task = printer_test_tasks.get(task_id)
+    if not task:
+        return {"success": False, "message": "未找到测试任务。"}
+    return {"success": True, **task}
+
+
 app.include_router(admin_router)
 
 def run_server():

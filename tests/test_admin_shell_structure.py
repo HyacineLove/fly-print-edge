@@ -17,6 +17,7 @@ class AdminShellStructureTests(unittest.TestCase):
         self.assertIn('id="adminLoadingOverlay"', html)
         self.assertNotIn('data-section="overview"', html)
         self.assertNotIn('data-section="discovery"', html)
+        self.assertNotIn('data-section="readiness"', html)
         self.assertNotIn("configTestCloudBtn", html)
         self.assertNotIn("nodeReregisterBtn", html)
 
@@ -50,12 +51,24 @@ class AdminShellStructureTests(unittest.TestCase):
         self.assertNotIn("刷新已管理", script)
         self.assertNotIn("刷新可添加", script)
 
+    def test_admin_printer_section_has_direct_ipp_management(self):
+        render_script = pathlib.Path("static/admin/modules/render-sections.js").read_text(encoding="utf-8")
+        printer_script = pathlib.Path("static/admin/modules/printer-actions.js").read_text(encoding="utf-8")
+        self.assertIn("测试打印", render_script)
+        self.assertIn("test-printer", render_script)
+        self.assertIn("/printer-tests/", printer_script)
+        self.assertNotIn("打印就绪", render_script)
+        self.assertIn("IPP", render_script)
+        self.assertIn("probe-ipp", render_script)
+        self.assertNotIn("WSD", render_script)
+        self.assertNotIn("Windows 队列", render_script)
+
     def test_admin_input_updates_only_refresh_toolbar_state(self):
         config_script = pathlib.Path("static/admin/modules/config-actions.js").read_text(encoding="utf-8")
         render_script = pathlib.Path("static/admin/modules/render-sections.js").read_text(encoding="utf-8")
         normalized = config_script.replace("\r\n", "\n")
         input_block_start = normalized.index('panel?.addEventListener("input", (event) => {')
-        input_block_end = normalized.index('  panel?.addEventListener("click", (event) => {')
+        input_block_end = normalized.index("\n  });\n}", input_block_start)
         input_block = normalized[input_block_start:input_block_end]
 
         self.assertIn("export function renderAdminToolbar(state)", render_script)

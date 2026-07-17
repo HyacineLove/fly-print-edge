@@ -44,7 +44,6 @@ class LoggingConfigTests(unittest.TestCase):
         self.assertEqual(logging.INFO, logging.getLogger("urllib3").level)
         self.assertEqual(logging.INFO, logging.getLogger("websockets").level)
         self.assertEqual(logging.INFO, logging.getLogger("asyncio").level)
-        self.assertEqual(logging.ERROR, logging.getLogger("zeroconf").level)
 
 
 class ConfigServiceLoggingValidationTests(unittest.TestCase):
@@ -55,7 +54,6 @@ class ConfigServiceLoggingValidationTests(unittest.TestCase):
                 "cloud": {"client_id": "edge"},
                 "settings": {"log_level": "TRACE"},
                 "network": {"bind_address": "127.0.0.1", "port": 7860},
-                "printers": {"discovery_mode": "auto", "static_list": []},
             }
         )
         self.assertIn("settings.log_level must be DEBUG, INFO, WARNING, or ERROR", errors)

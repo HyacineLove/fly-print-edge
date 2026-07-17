@@ -26,12 +26,19 @@ class DummyConfig:
 
 class DummyDiscovery:
     def discover_local_printers(self):
-        return [
-            {"name": "Office Printer", "id": "printer-2", "type": "local", "ip": "-", "port": "-"}
-        ]
+        return []
 
     def discover_network_printers(self):
-        return []
+        return [{
+            "name": "Office Printer",
+            "type": "ipp",
+            "printer_uuid": "urn:uuid:printer-2",
+            "ipp_uri": "ipp://192.168.50.2:631/ipp/print",
+            "compatible": True,
+            "duplex_supported": None,
+            "color_supported": None,
+            "capability_summary": "unknown",
+        }]
 
 
 class DummyPrinterManager:
@@ -39,9 +46,14 @@ class DummyPrinterManager:
         self.config = DummyConfig()
         self.discovery = DummyDiscovery()
         self._printers = [
-            {"name": "Main Printer", "id": "printer-1", "ip": "127.0.0.1", "port": 631, "enabled": True}
+            {
+                "name": "Main Printer", "id": "printer-1", "type": "ipp",
+                "printer_uuid": "urn:uuid:printer-1",
+                "ipp_uri": "ipp://127.0.0.1:631/ipp/print", "enabled": True,
+            }
         ]
         self.get_admin_printer_summary = MagicMock()
+        self.get_printer_status_detail = MagicMock(return_value={"status_text": "idle", "uncertain": False})
 
     def get_printers(self):
         return [dict(item) for item in self._printers]
@@ -70,6 +82,15 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.printer_manager.get_admin_printer_summary.assert_called_once_with("Main Printer")
 
     def test_discovered_printers_report_unknown_capabilities(self):
+        with patch.object(main, "printer_manager", self.printer_manager):
+            result = asyncio.run(main.get_discovered_printers())
+        self.assertTrue(result["success"])
+        item = result["items"][0]
+        self.assertEqual("ipp", item["type"])
+        self.assertEqual("urn:uuid:printer-2", item["printer_uuid"])
+        self.assertEqual("unknown", item["capability_summary"])
+        self.printer_manager.get_admin_printer_summary.assert_not_called()
+        return
         self.printer_manager.get_admin_printer_summary.return_value = {
             "duplex_supported": None,
             "color_supported": None,
@@ -86,6 +107,18 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.assertIn("单双面: 未知", item["capability_summary"])
         self.assertIn("彩色: 未知", item["capability_summary"])
         self.printer_manager.get_admin_printer_summary.assert_called_once_with("Office Printer")
+
+    def test_duplicate_test_print_is_rejected_for_same_printer(self):
+        main.active_printer_tests["printer-1"] = "task-1"
+        main.printer_test_tasks["task-1"] = {"status": "running"}
+        try:
+            with patch.object(main, "printer_manager", self.printer_manager):
+                response = asyncio.run(main.start_printer_test("printer-1"))
+            self.assertEqual(409, response.status_code)
+            self.assertIn("请勿重复提交", response.body.decode("utf-8"))
+        finally:
+            main.active_printer_tests.clear()
+            main.printer_test_tasks.clear()
 
 
 if __name__ == "__main__":

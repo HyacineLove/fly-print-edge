@@ -94,10 +94,11 @@ class CloudAPIClient:
                         "error": response.text
                     })
                     logger.warning(
-                        "Printer registration failed: name=%s status=%s body=%s",
+                        "Printer registration failed: name=%s status=%s body=%s payload_types=%s",
                         printer["name"],
                         response.status_code,
                         response.text,
+                        {key: type(value).__name__ for key, value in printer.items()},
                     )
             
             return {

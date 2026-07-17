@@ -22,6 +22,10 @@ export function createAdminState() {
     cloudStatus: null,
     lastApplyResult: null,
     pendingActions: new Set(),
+    printerTests: {},
+    ippProbeUri: "",
+    ippProbeResult: null,
+    ippProbing: false,
   };
 }
 
@@ -31,7 +35,6 @@ export function configModel(state) {
       cloud: {},
       settings: {},
       network: {},
-      printers: { static_list: [] },
       meta: { restart_required_fields: [], masked_fields: [] },
     };
   }
@@ -63,22 +66,10 @@ export function buildConfigPayloadFromConfig(cfg) {
       copies_min: normalizedCopiesMin,
       copies_max: normalizedCopiesMax,
       libreoffice_path: cfg.settings.libreoffice_path || "",
-      pdf_printer_path: cfg.settings.pdf_printer_path || "",
     },
     network: {
       bind_address: cfg.network.bind_address || "",
       port: Number(cfg.network.port || 0),
-    },
-    printers: {
-      discovery_mode: cfg.printers.discovery_mode || "auto",
-      static_list: Array.isArray(cfg.printers.static_list)
-        ? cfg.printers.static_list.map((item) => ({
-            name: item.name || "",
-            ip: item.ip || "",
-            protocol: item.protocol || "ipp",
-            port: item.port === "" || item.port == null ? "" : Number(item.port),
-          }))
-        : [],
     },
   };
 }
@@ -114,6 +105,7 @@ export function printerName(item) {
 }
 
 export function printerAddr(item) {
+  if (item?.ipp_uri) return item.ipp_uri;
   const ip = item?.ip || item?.host || item?.address || "-";
   const port = item?.port || item?.tcp_port || "-";
   return `${ip}:${port}`;
@@ -134,31 +126,5 @@ export function updateField(state, section, key, rawValue, type) {
     value = rawValue === "" ? "" : Number(rawValue);
   }
   next[section][key] = value;
-  state.config = next;
-}
-
-export function addStaticPrinter(state) {
-  const next = deepClone(configModel(state));
-  next.printers.static_list = Array.isArray(next.printers.static_list) ? next.printers.static_list : [];
-  next.printers.static_list.push({
-    name: "",
-    ip: "",
-    protocol: "ipp",
-    port: 631,
-  });
-  state.config = next;
-}
-
-export function removeStaticPrinter(state, index) {
-  const next = deepClone(configModel(state));
-  next.printers.static_list.splice(index, 1);
-  state.config = next;
-}
-
-export function updateStaticPrinter(state, index, key, rawValue) {
-  const next = deepClone(configModel(state));
-  const item = next.printers.static_list[index];
-  if (!item) return;
-  item[key] = key === "port" ? (rawValue === "" ? "" : Number(rawValue)) : rawValue;
   state.config = next;
 }

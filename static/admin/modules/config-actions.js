@@ -1,14 +1,6 @@
 import { requestAdmin } from "./api.js";
 import { hideAdminLoading, showAdminLoading } from "./loading-overlay.js";
-import {
-  addStaticPrinter,
-  buildConfigPayload,
-  buildConfigPayloadFromConfig,
-  deepClone,
-  removeStaticPrinter,
-  updateField,
-  updateStaticPrinter,
-} from "./state.js";
+import { buildConfigPayload, deepClone, updateField } from "./state.js";
 import { renderAdminToolbar } from "./render-sections.js";
 import { showAdminToast } from "./toast.js";
 
@@ -18,7 +10,6 @@ export async function loadConfig(state, render) {
     cloud: data.cloud,
     settings: data.settings,
     network: data.network,
-    printers: data.printers,
     meta: data.meta,
   };
   state.initialConfig = deepClone(state.config);
@@ -54,17 +45,6 @@ function saveSuccessMessage(result) {
   return "保存完成";
 }
 
-function printerSettingsSignature(config) {
-  return JSON.stringify(buildConfigPayloadFromConfig(config).printers);
-}
-
-function printerSettingsChanged(state) {
-  if (!state.config || !state.initialConfig) {
-    return false;
-  }
-  return printerSettingsSignature(state.config) !== printerSettingsSignature(state.initialConfig);
-}
-
 async function updateStartupState(state, render, enabled) {
   if (state.startupSaving) {
     return;
@@ -95,7 +75,6 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
   saveBtn?.addEventListener("click", async () => {
     if (!state.config || state.saving) return;
 
-    const shouldRefreshPrinters = printerSettingsChanged(state);
     state.saving = true;
     render();
     showAdminLoading("保存中...");
@@ -106,12 +85,7 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
       });
       state.lastApplyResult = result;
       await Promise.all([loadConfig(state, render), loadCloudStatus(state, render)]);
-      state.printersInvalidated = shouldRefreshPrinters;
-      if (shouldRefreshPrinters && state.activeSection === "printers") {
-        await ensurePrintersLoaded({ force: true, showToast: false, showOverlay: false });
-      } else {
-        render();
-      }
+      render();
       showAdminToast(saveSuccessMessage(result), "success");
     } catch (error) {
       showAdminToast(error.message || "保存失败", "error", 3600);
@@ -184,29 +158,6 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
       return;
     }
 
-    const staticContainer = target.closest("[data-static-index]");
-    if (!(staticContainer instanceof HTMLElement)) return;
-    const index = Number(staticContainer.dataset.staticIndex);
-    const key = target.dataset.staticKey;
-    if (!Number.isInteger(index) || !key) return;
-    updateStaticPrinter(state, index, key, target.value);
-    renderAdminToolbar(state);
-  });
-
-  panel?.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    const action = target.dataset.action;
-    if (!action) return;
-    if (action === "add-static") {
-      addStaticPrinter(state);
-      render();
-      return;
-    }
-    if (action === "remove-static") {
-      removeStaticPrinter(state, Number(target.dataset.index));
-      render();
-    }
   });
 }
 

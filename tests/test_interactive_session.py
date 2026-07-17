@@ -40,6 +40,8 @@ class InteractiveSessionManagerTests(unittest.TestCase):
         })
 
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
+        self.assertTrue(self.manager.revert_print_submission(session["session_id"], "file-1"))
+        self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
         self.assertFalse(self.manager.mark_print_submitted(session["session_id"], "file-1"))
 
     def test_job_status_only_passes_for_bound_cloud_job(self):
@@ -77,8 +79,17 @@ class InteractiveSessionManagerTests(unittest.TestCase):
         })
 
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
-        self.assertTrue(self.manager.revert_print_submission(session["session_id"], "file-1"))
-        self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
+
+    def test_bound_cloud_job_keeps_authoritative_interactive_print_options(self):
+        session = self.manager.start_session(upload_token="token-1")
+        file_url = "https://example.com/file-1.png"
+        self.manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+        options = {"paper_size": "A4", "scale_mode": "actual", "color_mode": "mono"}
+        self.manager.mark_print_submitted(session["session_id"], "file-1", options)
+
+        bound = self.manager.attach_cloud_job(file_url, "job-1")
+
+        self.assertEqual(options, bound["print_options"])
 
     def test_build_snapshot_returns_idle_payload_without_active_session(self):
         self.assertEqual(

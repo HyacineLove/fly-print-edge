@@ -11,8 +11,6 @@ NOISY_DEPENDENCY_LOGGERS = {
     "urllib3.connectionpool": logging.INFO,
     "websockets": logging.INFO,
     "websockets.client": logging.INFO,
-    # This warning is a known benign side effect of sync zeroconf cleanup.
-    "zeroconf": logging.ERROR,
 }
 
 

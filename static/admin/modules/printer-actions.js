@@ -108,7 +108,7 @@ export function bindPrinterActions(state, render) {
       const result = await withPrinterOverlay("添加中...", async () => {
         const response = await requestAdmin("/printers/add", {
           method: "POST",
-          body: JSON.stringify(item),
+          body: JSON.stringify({ ipp_uri: item.ipp_uri }),
         });
         await refreshPrinters({ showToast: false, showOverlay: false });
         return response;
@@ -122,6 +122,66 @@ export function bindPrinterActions(state, render) {
       showAdminToast(error.message || "添加打印机失败", "error", 3600);
     } finally {
       setActionPending(state, "add", index, false);
+      render();
+    }
+  }
+
+  async function probeIppPrinter() {
+    if (state.ippProbing || state.printersRefreshing) return;
+    const input = document.getElementById("manualIppUri");
+    const ippUri = input instanceof HTMLInputElement ? input.value.trim() : "";
+    state.ippProbeUri = ippUri;
+    if (!ippUri) {
+      showAdminToast("请输入完整的 IPP URI", "error", 3200);
+      return;
+    }
+    state.ippProbing = true;
+    state.ippProbeResult = { message: "正在连接并检测打印能力…" };
+    render();
+    try {
+      const result = await requestAdmin("/printers/probe", {
+        method: "POST",
+        body: JSON.stringify({ ipp_uri: ippUri }),
+      });
+      const item = result.item;
+      if (!item?.compatible) {
+        state.ippProbeResult = { message: (item?.issues || []).join("；") || "该设备不兼容" };
+        showAdminToast(state.ippProbeResult.message, "error", 4200);
+        return;
+      }
+      state.ippProbeResult = { message: `检测通过：${item.name}` };
+      const added = await requestAdmin("/printers/add", {
+        method: "POST",
+        body: JSON.stringify({ ipp_uri: ippUri }),
+      });
+      await refreshPrinters({ showToast: false, showOverlay: false });
+      showAdminToast(
+        added.cloud_error ? `打印机已添加，但云端注册失败: ${added.cloud_error}` : "IPP 打印机已添加",
+        added.cloud_error ? "error" : "success",
+        4200,
+      );
+    } catch (error) {
+      state.ippProbeResult = { message: error.message || "IPP 检测失败" };
+      showAdminToast(state.ippProbeResult.message, "error", 4200);
+    } finally {
+      state.ippProbing = false;
+      render();
+    }
+  }
+
+  async function clearUnconfirmed(printerId) {
+    if (!printerId || isActionPending(state, "clear-unconfirmed", printerId)) return;
+    if (!window.confirm("请先确认打印机中没有遗留任务。确定解除结果未知锁定吗？")) return;
+    setActionPending(state, "clear-unconfirmed", printerId, true);
+    render();
+    try {
+      const result = await requestAdmin(`/printers/${encodeURIComponent(printerId)}/clear-unconfirmed`, { method: "POST" });
+      await loadManaged();
+      showAdminToast(result.message || "锁定已解除", "success", 3600);
+    } catch (error) {
+      showAdminToast(error.message || "解除锁定失败", "error", 3600);
+    } finally {
+      setActionPending(state, "clear-unconfirmed", printerId, false);
       render();
     }
   }
@@ -142,6 +202,42 @@ export function bindPrinterActions(state, render) {
       showAdminToast(error.message || "重新注册打印机失败", "error", 3600);
     } finally {
       setActionPending(state, "reregister", printerId, false);
+      render();
+    }
+  }
+
+  async function testPrinter(printerId) {
+    if (!printerId || isActionPending(state, "test", printerId)) return;
+    setActionPending(state, "test", printerId, true);
+    state.printerTests[printerId] = {
+      status: "running",
+      current: { message: "正在准备测试打印……" },
+    };
+    render();
+    try {
+      const started = await requestAdmin(`/printers/${encodeURIComponent(printerId)}/test`, {
+        method: "POST",
+      });
+      let task;
+      do {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        task = await requestAdmin(`/printer-tests/${encodeURIComponent(started.task_id)}`);
+        state.printerTests[printerId] = task;
+        render();
+      } while (task.status === "running");
+      showAdminToast(
+        task.result?.message || "测试结束",
+        task.result?.success ? "success" : "error",
+        4200,
+      );
+    } catch (error) {
+      state.printerTests[printerId] = {
+        status: "failed",
+        result: { success: false, message: error.message || "测试打印失败" },
+      };
+      showAdminToast(error.message || "测试打印失败", "error", 4200);
+    } finally {
+      setActionPending(state, "test", printerId, false);
       render();
     }
   }
@@ -170,6 +266,18 @@ export function bindPrinterActions(state, render) {
     }
     if (action === "reregister-printer") {
       reregisterPrinter(target.dataset.id || "");
+      return;
+    }
+    if (action === "probe-ipp") {
+      probeIppPrinter();
+      return;
+    }
+    if (action === "test-printer") {
+      testPrinter(target.dataset.id || "");
+      return;
+    }
+    if (action === "clear-unconfirmed") {
+      clearUnconfirmed(target.dataset.id || "");
     }
   });
 

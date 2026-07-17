@@ -1,19 +1,15 @@
 {
+    "printer_schema_version": 2,
     "managed_printers": [],
     "settings": {
         "default_paper_size": "A4",
         "default_scale_mode": "actual",
         "default_max_upscale": 3.0,
-        "libreoffice_path": "",
-        "pdf_printer_path": ""
+        "libreoffice_path": ""
     },
     "network": {
         "bind_address": "127.0.0.1",
         "port": 7860
-    },
-    "printers": {
-        "discovery_mode": "auto",
-        "static_list": []
     },
     "cloud": {
         "base_url": "http://localhost:8012",

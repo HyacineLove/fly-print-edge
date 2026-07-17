@@ -29,9 +29,18 @@ export function renderDoneView() {
 export function bindDoneViewEvents({ appState, restartCycle }) {
   const result = appState.session.doneResult || { type: "success", message: "" };
   let availabilityPollTimer = null;
+  const printerFaultCodes = new Set([
+    "printer_fault",
+    "printer_out_of_paper",
+    "printer_out_of_toner",
+    "printer_jammed",
+    "printer_cover_open",
+    "printer_offline",
+    "printer_user_intervention",
+  ]);
 
   function isPrinterFaultResult() {
-    return result.type === "error" && result.error_code === "printer_fault";
+    return result.type === "error" && printerFaultCodes.has(result.error_code);
   }
 
   function setReturnEnabled(enabled) {

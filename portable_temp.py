@@ -5,14 +5,22 @@ Portable 临时目录管理
 
 import os
 import stat
+import sys
 import tempfile
 
 
 # 项目根目录（main.py 所在目录）
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Portable 临时目录（项目内）
-_PORTABLE_TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
+# 源码模式使用项目目录；PyInstaller 模式使用用户可写的 AppData，避免把
+# 运行时文件写入 _internal（该目录主要用于打包 DLL 和只读资源）。
+if getattr(sys, "frozen", False):
+    _LOCAL_APP_DATA = os.environ.get("LOCALAPPDATA")
+    if not _LOCAL_APP_DATA:
+        raise RuntimeError("LOCALAPPDATA is required for packaged Edge runtime files")
+    _PORTABLE_TEMP_DIR = os.path.join(_LOCAL_APP_DATA, "FlyPrint Edge", "temp")
+else:
+    _PORTABLE_TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 
 
 def get_portable_temp_dir():

@@ -29,10 +29,15 @@ class PyInstallerSpecTests(unittest.TestCase):
         self.assertIn("launcher.py", spec_text)
         self.assertIn('name="flyprint-edge"', spec_text)
         self.assertIn('name="flyprint-launcher"', spec_text)
-        self.assertIn("win32com", spec_text)
-        self.assertIn("win32timezone", spec_text)
+        self.assertIn("zeroconf", spec_text)
+        self.assertNotIn("win32com.client", spec_text)
+        self.assertNotIn("win32print", spec_text)
+        self.assertNotIn("win32ui", spec_text)
+        self.assertNotIn("mfc140u", spec_text)
         self.assertIn("fitz", spec_text)
         self.assertIn("static", spec_text)
+        self.assertIn("ipp-printing-architecture.md", spec_text)
+        self.assertIn("ipp-printing-operations.md", spec_text)
         self.assertIn("COLLECT(", spec_text)
         self.assertIn('"tests"', spec_text)
         self.assertNotIn("launch.vbs", spec_text)
@@ -96,6 +101,14 @@ class InnoSetupScriptTests(unittest.TestCase):
         text = ISS_FILE.read_text(encoding="utf-8")
         self.assertIn("autostart", text)
         self.assertIn("flyprint-launcher.exe", text)
+
+    def test_uninstaller_stops_runtime_before_deleting_files(self):
+        text = ISS_FILE.read_text(encoding="utf-8")
+        self.assertIn("[UninstallRun]", text)
+        self.assertIn('Parameters: "--exit"', text)
+        self.assertIn('RunOnceId: "StopFlyPrintEdge"', text)
+        self.assertIn("CloseApplications=yes", text)
+        self.assertIn("RestartApplications=no", text)
 
 
 if __name__ == "__main__":

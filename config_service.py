@@ -14,8 +14,6 @@ class ConfigService:
     RESTART_REQUIRED_FIELDS = {
         "network.bind_address",
         "network.port",
-        "printers.discovery_mode",
-        "printers.static_list",
     }
 
     MASKED_FIELDS = {"cloud.client_secret"}
@@ -49,7 +47,7 @@ class ConfigService:
             settings["log_level"] = "INFO"
         settings["debug_logging"] = self._normalize_bool(settings.get("debug_logging"))
         data.setdefault("network", {"bind_address": "127.0.0.1", "port": 7860})
-        data.setdefault("printers", {"discovery_mode": "auto", "static_list": []})
+        data.pop("printers", None)
         data["meta"] = {
             "restart_required_fields": sorted(self.RESTART_REQUIRED_FIELDS),
             "masked_fields": sorted(self.MASKED_FIELDS),
@@ -58,7 +56,7 @@ class ConfigService:
 
     def merge_update(self, raw: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
         merged = deepcopy(raw)
-        for section in ("cloud", "settings", "network", "printers"):
+        for section in ("cloud", "settings", "network"):
             if section not in update:
                 continue
             merged.setdefault(section, {})
@@ -101,7 +99,6 @@ class ConfigService:
         cloud = raw.get("cloud", {})
         settings = raw.get("settings", {})
         network = raw.get("network", {})
-        printers = raw.get("printers", {})
 
         for field in ("base_url", "auth_url"):
             value = str(cloud.get(field) or "").strip()
@@ -162,13 +159,6 @@ class ConfigService:
         except (TypeError, ValueError):
             errors.append("network.port must be a valid port")
 
-        if printers.get("discovery_mode") not in (None, "", "auto", "static"):
-            errors.append("printers.discovery_mode must be auto or static")
-
-        static_list = printers.get("static_list", [])
-        if not isinstance(static_list, list):
-            errors.append("printers.static_list must be a list")
-
         return errors
 
     def save_and_apply(self, update: Dict[str, Any], cloud_service=None) -> Dict[str, Any]:
@@ -217,7 +207,7 @@ class ConfigService:
             cloud = merged.get("cloud", {})
         else:
             cloud = payload.get("cloud", {})
-        errors = self.validate({"cloud": cloud, "settings": {}, "network": {"bind_address": "127.0.0.1", "port": 7860}, "printers": {"discovery_mode": "auto", "static_list": []}})
+        errors = self.validate({"cloud": cloud, "settings": {}, "network": {"bind_address": "127.0.0.1", "port": 7860}})
         if errors:
             return {"success": False, "message": "; ".join(errors)}
 

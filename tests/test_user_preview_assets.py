@@ -82,6 +82,8 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("printer_fault", runtime)
         self.assertNotIn("media-needed-error", runtime)
         self.assertIn("isPrinterFaultResult", done_view)
+        self.assertIn("printer_out_of_paper", done_view)
+        self.assertIn("printer_out_of_toner", done_view)
         self.assertIn("availabilityPollTimer", done_view)
         self.assertIn("printerAvailability", login_view)
         self.assertIn("setPrinterFaultLocked", login_view)
@@ -124,12 +126,12 @@ class UserPreviewAssetTests(unittest.TestCase):
     def test_print_error_mapping_sanitizes_driver_and_job_tracking_errors(self):
         runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
 
-        self.assertIn("PCL XL", runtime)
-        self.assertIn("MemAllocError", runtime)
-        self.assertIn("ReadImage", runtime)
-        self.assertIn("无法获取本地打印任务ID", runtime)
-        self.assertIn("print_spooler_error", runtime)
-        self.assertIn("spooler job entered terminal error status", runtime)
+        self.assertNotIn("PCL XL", runtime)
+        self.assertNotIn("MemAllocError", runtime)
+        self.assertNotIn("ReadImage", runtime)
+        self.assertNotIn("无法获取本地打印任务ID", runtime)
+        self.assertNotIn("print_spooler_error", runtime)
+        self.assertIn("无法确认本次打印结果，请勿重复提交", runtime)
 
     def test_default_scale_mode_is_actual_size_shrink_only_in_frontend(self):
         session_state = (BASE_DIR / "modules/shared/session-state.js").read_text(encoding="utf-8")
@@ -138,6 +140,21 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn('defaultScaleMode = "actual"', session_state)
         self.assertIn("原始尺寸/过大缩小", admin_settings)
         self.assertIn('cfg.default_scale_mode || "actual"', admin_settings)
+
+    def test_printing_indicator_is_full_width_and_not_page_progress(self):
+        view = (BASE_DIR / "modules/views/printing-view.js").read_text(encoding="utf-8")
+        legacy = (BASE_DIR / "modules/pages/printing.js").read_text(encoding="utf-8")
+        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
+        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
+        css = (BASE_DIR / "css/printing.css").read_text(encoding="utf-8")
+
+        self.assertIn("renderPrintingIndicator", view)
+        self.assertIn("renderPrintingIndicator", legacy)
+        self.assertNotIn("cur / all", view)
+        self.assertNotIn("cur / all", legacy)
+        self.assertNotIn("renderPrintingProgress", runtime)
+        self.assertNotIn("progress >= 100", controller)
+        self.assertRegex(css, r"\.Pixso-rectangle-77_20\s*\{[^}]*width:\s*556px")
 
 
     def test_preview_flow_preserves_content_hash_from_cloud_to_preview_api(self):

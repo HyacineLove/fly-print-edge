@@ -57,6 +57,23 @@ def build_edge_command(edge_exe: str, url: str, mode: str, profile_dir: Path) ->
     return command
 
 
+def command_uses_runtime_profile(cmdline: list[str], runtime_dir: Path) -> bool:
+    """Return whether an Edge command belongs to FlyPrint's browser profile."""
+    runtime_root = runtime_dir.resolve()
+    prefix = "--user-data-dir="
+    for argument in cmdline:
+        text = str(argument)
+        if not text.casefold().startswith(prefix):
+            continue
+        profile_text = text[len(prefix):].strip().strip('"')
+        try:
+            profile_path = Path(profile_text).resolve()
+            return profile_path == runtime_root or runtime_root in profile_path.parents
+        except (OSError, ValueError):
+            return False
+    return False
+
+
 def resolve_install_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -130,7 +147,7 @@ def open_url_in_edge(mode: str, base_url: str, install_dir: Path) -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
     url = f"{base_url}/admin" if mode == "admin" else base_url
     command = build_edge_command(edge_exe=edge_exe, url=url, mode=mode, profile_dir=profile_dir)
-    subprocess.Popen(command, cwd=str(install_dir))
+    subprocess.Popen(command, cwd=str(Path(edge_exe).resolve().parent))
 
 
 def open_logs_dir(install_dir: Path) -> None:
@@ -247,6 +264,37 @@ class LauncherApp:
                 process.kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
+        if alive:
+            psutil.wait_procs(alive, timeout=3)
+
+    def _terminate_browser_processes(self) -> None:
+        runtime_dir = self.install_dir / "runtime"
+        matched_processes: list[psutil.Process] = []
+        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = [str(item) for item in (process.info.get("cmdline") or [])]
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if command_uses_runtime_profile(cmdline, runtime_dir):
+                matched_processes.append(process)
+
+        for process in matched_processes:
+            try:
+                process.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        if not matched_processes:
+            return
+
+        _, alive = psutil.wait_procs(matched_processes, timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if alive:
+            psutil.wait_procs(alive, timeout=3)
 
     def ensure_service_ready(self, restart: bool = False) -> None:
         if restart:
@@ -296,6 +344,8 @@ class LauncherApp:
             self.command_server.shutdown()
             self.command_server.server_close()
             self.command_server = None
+        self._terminate_browser_processes()
+        self._terminate_service_processes()
         if self.tray_icon is not None:
             self.tray_icon.stop()
 
@@ -332,9 +382,11 @@ def main(argv: list[str] | None = None) -> int:
     action = normalize_launcher_action(argv[0] if argv else None)
     instance = SingleInstance(SINGLE_INSTANCE_MUTEX)
     if not instance.acquire():
-        send_control_command(action)
-        return 0
+        return 0 if send_control_command(action) else 1
     try:
+        if action == ACTION_EXIT:
+            LauncherApp().shutdown()
+            return 0
         return LauncherApp().run(action)
     finally:
         instance.release()
