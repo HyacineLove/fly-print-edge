@@ -153,11 +153,14 @@ class PrintRequest:
     printer_name: str
     printer_uuid: str
     ipp_uri: str
-    source_path: Path
+    source_path: Optional[Path]
     source_name: str
     options: PrintOptions = field(default_factory=PrintOptions)
     printer_id: Optional[str] = None
     content_hash: Optional[str] = None
+    source_kind: str = ""
+    source_supplier: Optional[Callable[[], Path]] = field(default=None, compare=False, repr=False)
+    delete_source_after_standardize: bool = False
 
     @property
     def unique_document_name(self) -> str:

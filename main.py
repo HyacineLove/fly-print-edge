@@ -13,13 +13,14 @@ import os
 import socket
 import logging
 import base64
+import hashlib
 import io
 import tempfile
 import shutil
 import requests
 import qrcode
 import time
-from PIL import Image
+from pathlib import Path
 import fitz
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends, status, APIRouter
@@ -35,19 +36,11 @@ from interactive_session import InteractiveSessionManager
 from logging_utils import configure_logging
 from portable_temp import get_portable_temp_dir, get_temp_file_path, cleanup_temp_dir
 from windows_startup import get_windows_startup_enabled, set_windows_startup_enabled
-from print_layout import (
-    compute_physical_fit_rect,
-    compute_scaled_size,
-    image_size_inches,
-    normalize_paper_size,
-    normalize_scale_mode,
-    paper_size_px,
-    paper_size_inches,
-    resolve_layout_options,
-    safe_float,
-)
+from print_layout import resolve_layout_options
 from print_options import normalize_print_options, to_cloud_duplex
-from libreoffice_converter import convert_document_to_pdf
+from print_runtime import build_document_pipeline, stop_document_pipelines
+from printing.documents import DocumentIdentity
+from printing.domain import ErrorCode, PrintError, PrintOptions
 
 logger = logging.getLogger("EdgeServer")
 
@@ -76,8 +69,6 @@ sse_clients: list[asyncio.Queue] = []
 node_id: Optional[str] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 preview_cache: Dict[str, Dict[str, Any]] = {}
-preview_page_cache: Dict[str, Dict[int, Image.Image]] = {}
-preview_page_meta: Dict[str, Dict[str, int]] = {}
 interactive_session_manager = InteractiveSessionManager()
 qr_code_request_lock: Optional[asyncio.Lock] = None
 config_service: Optional[ConfigService] = None
@@ -133,12 +124,12 @@ async def startup_event():
         cleanup_interval=300,
         file_ttl=1800,
         preview_cache=preview_cache,
-        preview_page_cache=preview_page_cache,
-        preview_page_meta=preview_page_meta,
     )
     # 清理 portable temp 目录中的遗留文件
     cleanup_temp_dir(max_age_hours=24)
     file_mgr.start()
+    document_pipeline = build_document_pipeline(printer_manager.config, logger)
+    document_pipeline.start()
     logger.info(" 文件管理器已启动（包含预览图缓存清理）")
     
     # 初始化云端服务
@@ -271,6 +262,7 @@ async def shutdown_event():
     if file_mgr:
         file_mgr.cleanup_all_preview_files()
         file_mgr.stop()
+    stop_document_pipelines()
     
     if cloud_service:
         cloud_service.stop()
@@ -585,14 +577,6 @@ def _download_preview_file(file_url: str, file_name: Optional[str], file_id: Opt
         return None, str(e)
 
 
-def _normalize_paper_size(paper_size: Optional[str]) -> str:
-    """规范化纸张名称，支持 'Letter (横向)' 等"""
-    return normalize_paper_size(paper_size)
-
-
-def _get_paper_size_px(paper_size: Optional[str], dpi: int = 120):
-    return paper_size_px(paper_size, dpi=dpi)
-
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -609,18 +593,8 @@ def _clamp_copy_count(copies: Any, settings: Optional[Dict[str, Any]] = None) ->
     copies_min, copies_max = _normalize_copy_limits(settings)
     return min(copies_max, max(copies_min, _safe_int(copies, copies_min)))
 
-def _safe_float(value: Any, default: float) -> float:
-    return safe_float(value, default)
-
-def _normalize_scale_mode(value: Any, default: str = "fit") -> str:
-    return normalize_scale_mode(value, default)
-
 def _resolve_layout_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return resolve_layout_options(options, _get_settings())
-
-def _compute_scaled_size(src_w: int, src_h: int, dst_w: int, dst_h: int, scale_mode: str, max_upscale: float):
-    target_w, target_h, _ = compute_scaled_size(src_w, src_h, dst_w, dst_h, scale_mode, max_upscale)
-    return target_w, target_h
 
 def _normalize_request_options(options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized = dict(options or {})
@@ -628,261 +602,16 @@ def _normalize_request_options(options: Optional[Dict[str, Any]] = None) -> Dict
     normalized.update(layout)
     return normalized
 
-def _apply_paper_size(image: Image.Image, paper_size: Optional[str], options: Optional[Dict[str, Any]] = None):
-    opts = options or {}
-    preview_w = _safe_int(opts.get("preview_width_px"), 0)
-    preview_h = _safe_int(opts.get("preview_height_px"), 0)
-    layout = _resolve_layout_options(opts)
-    paper_target = _get_paper_size_px(paper_size or layout.get("paper_size"))
-    if preview_w > 0 and preview_h > 0:
-        # 预览始终以页面容器为边界，但按真实纸张比例缩放，避免预览与实打方向/比例偏移
-        if paper_target:
-            pw, ph = paper_target
-            scale = min(preview_w / max(1, pw), preview_h / max(1, ph))
-            target = (max(1, int(round(pw * scale))), max(1, int(round(ph * scale))))
-        else:
-            target = (preview_w, preview_h)
-    else:
-        target = paper_target
-        if not target:
-            return image
-
-    w, h = target
-    canvas = Image.new("RGB", (w, h), "white")
-    img = image.convert("RGB")
-    source_inches = opts.get("source_inches")
-    if source_inches and layout.get("scale_mode") == "actual":
-        target_inches = paper_size_inches(paper_size or layout.get("paper_size"))
-        if target_inches:
-            target_dpi = (w / target_inches[0], h / target_inches[1])
-            x, y, new_w, new_h, _ = compute_physical_fit_rect(
-                source_inches,
-                (w, h),
-                target_dpi,
-            )
-        else:
-            x = y = 0
-            new_w, new_h = _compute_scaled_size(
-                img.width,
-                img.height,
-                w,
-                h,
-                layout.get("scale_mode", "actual"),
-                _safe_float(layout.get("max_upscale"), 3.0)
-            )
-    else:
-        new_w, new_h = _compute_scaled_size(
-            img.width,
-            img.height,
-            w,
-            h,
-            layout.get("scale_mode", "actual"),
-            _safe_float(layout.get("max_upscale"), 3.0)
-        )
-        x = (w - new_w) // 2
-        y = (h - new_h) // 2
-    resample_lanczos = getattr(Image, "Resampling", Image).LANCZOS
-    resized = img.resize((new_w, new_h), resample=resample_lanczos)
-    canvas.paste(resized, (x, y))
-    return canvas
-
-def _detect_pdf_paper_size_from_file(file_path: str) -> Optional[str]:
-    """从 PDF 第一页检测纸张尺寸，用于预览与打印一致"""
-    try:
-        doc = fitz.open(file_path)
-        if doc.page_count == 0:
-            doc.close()
-            return None
-        page = doc.load_page(0)
-        media_box = page.mediabox
-        width_pt = media_box.width
-        height_pt = media_box.height
-        doc.close()
-        width_inch = width_pt / 72.0
-        height_inch = height_pt / 72.0
-        paper_sizes = {
-            "A4": (8.27, 11.69),
-            "Letter": (8.5, 11.0),
-            "Legal": (8.5, 14.0),
-            "A3": (11.69, 16.54),
-            "A5": (5.83, 8.27),
-            "Tabloid": (11.0, 17.0),
-        }
-        tolerance = 0.2
-        for size_name, (std_w, std_h) in paper_sizes.items():
-            if abs(width_inch - std_w) <= tolerance and abs(height_inch - std_h) <= tolerance:
-                return size_name
-            if abs(width_inch - std_h) <= tolerance and abs(height_inch - std_w) <= tolerance:
-                return f"{size_name} (横向)"
-        return None
-    except Exception:
-        return None
 
 
-def _get_pdf_page_size_inches(file_path: str, page_index: int = 0) -> Optional[tuple[float, float]]:
-    try:
-        doc = fitz.open(file_path)
-        if doc.page_count == 0:
-            doc.close()
-            return None
-        page_index = max(0, min(page_index, doc.page_count - 1))
-        page = doc.load_page(page_index)
-        media_box = page.mediabox
-        size = (media_box.width / 72.0, media_box.height / 72.0)
-        doc.close()
-        return size
-    except Exception:
-        return None
 
 
-def _detect_paper_size_from_file(file_path: str, file_name: Optional[str], file_type: Optional[str], pdf_path: Optional[str] = None) -> Optional[str]:
-    """根据文件类型检测纸张尺寸"""
-    ext = os.path.splitext(file_name or "")[1].lower()
-    if not ext and file_type:
-        ext = ".pdf" if "pdf" in (file_type or "").lower() else ".docx" if "word" in (file_type or "").lower() else ""
-    path_to_check = pdf_path if pdf_path and os.path.exists(pdf_path) else file_path
-    if ext == ".pdf" and path_to_check:
-        return _detect_pdf_paper_size_from_file(path_to_check)
-    return None
 
 
-def _render_pdf_to_image(file_path: str, page_index: int):
-    try:
-        doc = fitz.open(file_path)
-        page_count = doc.page_count
-        if page_count == 0:
-            doc.close()
-            return None, 0, 0, "PDF 无可预览页面"
-        if page_index < 0:
-            page_index = 0
-        if page_index >= page_count:
-            page_index = page_count - 1
-        page = doc.load_page(page_index)
-        pix = page.get_pixmap(dpi=120, alpha=False)
-        doc.close()
-        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        return image, page_count, page_index, None
-    except Exception as e:
-        return None, 0, 0, str(e)
-
-def _find_libreoffice_path():
-    settings = _get_settings()
-    configured = _resolve_path(settings.get("libreoffice_path"))
-    return configured
 
 
-def _convert_word_to_pdf(file_path: str):
-    # 使用固定的 portable temp 目录
-    temp_dir = get_portable_temp_dir()
-    abs_file_path = os.path.abspath(file_path)
-    logger.info(
-        "DOCX conversion started: source=%s exists=%s temp_dir=%s",
-        abs_file_path,
-        os.path.exists(abs_file_path),
-        temp_dir,
-    )
 
-    soffice = _find_libreoffice_path()
-    logger.info("LibreOffice configured path resolved: %r", soffice)
-    if not soffice:
-        error = "LibreOffice path is not configured or does not exist"
-        logger.error("DOCX conversion failed: %s", error)
-        return None, error
 
-    pdf_path, error = convert_document_to_pdf(
-        soffice,
-        abs_file_path,
-        temp_dir,
-        logger=logger,
-    )
-    if pdf_path:
-        logger.info("DOCX conversion succeeded via LibreOffice: output=%s", pdf_path)
-        return pdf_path, None
-    logger.error("DOCX conversion failed: %s", error)
-    return None, error or "LibreOffice conversion failed"
-
-def _resolve_preview_ext(file_name: Optional[str], file_type: Optional[str]):
-    ext = os.path.splitext(file_name or "")[1].lower()
-    if not ext and file_type:
-        lowered = file_type.lower()
-        if "pdf" in lowered:
-            ext = ".pdf"
-        elif "image" in lowered:
-            ext = ".png"
-        elif "word" in lowered:
-            ext = ".docx"
-    return ext
-
-def _get_cached_pdf_page(file_id: str, pdf_path: str, page_index: int):
-    if file_id:
-        file_cache = preview_page_cache.get(file_id)
-        if file_cache and page_index in file_cache:
-            meta = preview_page_meta.get(file_id, {})
-            page_count = meta.get("page_count", 1)
-            return file_cache[page_index], page_count, page_index, None
-    image, page_count, resolved_page_index, error = _render_pdf_to_image(pdf_path, page_index)
-    if image is None:
-        return None, page_count, resolved_page_index, error
-    if file_id:
-        preview_page_cache.setdefault(file_id, {})[resolved_page_index] = image
-        preview_page_meta[file_id] = {"page_count": page_count}
-    return image, page_count, resolved_page_index, None
-
-def _generate_preview_image(file_id: str, file_path: str, file_name: Optional[str], file_type: Optional[str], options: Dict[str, Any], page_index: int):
-    ext = _resolve_preview_ext(file_name, file_type)
-    image = None
-    page_count = 1
-    resolved_page_index = page_index
-    error = None
-    source_inches = None
-    if ext in [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".webp"]:
-        try:
-            img = Image.open(file_path)
-            source_inches = image_size_inches(img)
-            image = img.convert("RGB")
-            img.close()
-            resolved_page_index = 0
-            page_count = 1
-            if file_id:
-                preview_page_cache.setdefault(file_id, {})[resolved_page_index] = image
-                preview_page_meta[file_id] = {"page_count": page_count}
-        except Exception as e:
-            error = str(e)
-    elif ext == ".pdf":
-        image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, file_path, page_index)
-        if image is not None:
-            source_inches = _get_pdf_page_size_inches(file_path, resolved_page_index)
-    elif ext in [".doc", ".docx"]:
-        pdf_path = None
-        file_mgr = get_file_manager()
-        file_info = file_mgr.get_preview_resource(file_id) if file_mgr and file_id else None
-        if file_info:
-            pdf_path = file_info.get("pdf_path")
-        if not pdf_path or not os.path.exists(pdf_path):
-            pdf_path, error = _convert_word_to_pdf(file_path)
-            if pdf_path and file_id:
-                if file_mgr and file_info and file_info.get("source_path"):
-                    file_mgr.register_preview_resource(file_id, file_info.get("file_url") or "", file_info["source_path"], pdf_path)
-        if pdf_path:
-            image, page_count, resolved_page_index, error = _get_cached_pdf_page(file_id, pdf_path, page_index)
-            if image is not None:
-                source_inches = _get_pdf_page_size_inches(pdf_path, resolved_page_index)
-    else:
-        error = "暂不支持该文件类型预览"
-    if image is None:
-        return None, 0, 0, error or "预览生成失败"
-    color_mode = (options.get("color_mode") or options.get("color") or "").lower()
-    if "gray" in color_mode or "mono" in color_mode or "黑白" in color_mode:
-        image = image.convert("L").convert("RGB")
-    resolved_options = _normalize_request_options(options)
-    if source_inches:
-        resolved_options["source_inches"] = source_inches
-    # 预览固定落在目标纸张画布上；源文件尺寸只参与内容绘制比例，不改变目标纸张。
-    explicit_paper = options.get("paper_size") or options.get("page_size") or options.get("size")
-    if explicit_paper:
-        resolved_options["paper_size"] = str(explicit_paper).strip()
-    image = _apply_paper_size(image, resolved_options.get("paper_size"), resolved_options)
-    return image, page_count, resolved_page_index, None
 
 def _remove_managed_printer(printer_id: str, allow_missing: bool = False):
     if not printer_manager:
@@ -1145,6 +874,7 @@ async def get_current_interactive_session():
 
 @app.post("/api/preview")
 async def preview(request: Request):
+    request_started_at = time.perf_counter()
     try:
         body_bytes = await request.body()
         body = json.loads(body_bytes)
@@ -1169,24 +899,14 @@ async def preview(request: Request):
             logger.warning("Preview request rejected: printer manager not ready")
             return JSONResponse(status_code=503, content={"success": False, "message": "设备未就绪"})
 
-        file_mgr = get_file_manager()
-        cached = file_mgr.get_preview_resource(file_id) if file_mgr else None
-        if not cached and file_mgr:
-            cached = file_mgr.reuse_cached_resource(file_id, file_url, content_hash)
         logger.debug(
-            "Preview request started: file_id=%s file_type=%s file_name=%s option_keys=%s cached=%s body_bytes=%s",
+            "Preview request started: file_id=%s file_type=%s file_name=%s option_keys=%s body_bytes=%s",
             file_id,
             file_type,
             file_name,
             sorted(options.keys()),
-            bool(cached),
             len(body_bytes),
         )
-
-        if cached and cached.get("file_url") != file_url:
-            logger.debug("Preview source URL changed: file_id=%s", file_id)
-            file_mgr.release_preview_resource(file_id, reason="url_changed")
-            cached = None
 
         try:
             page_index = int(options.get("page_index") or 0)
@@ -1209,27 +929,26 @@ async def preview(request: Request):
                 "page_index": cached_payload["page_index"],
             }
 
-        file_path = cached.get("source_path") if cached else None
-        if not file_path or not os.path.exists(file_path):
-            logger.debug("Preview source missing locally, downloading: file_id=%s", file_id)
-            file_path, err = _download_preview_file(file_url, file_name, file_id)
-            if not file_path:
-                logger.warning("Preview source download failed: file_id=%s error=%s", file_id, err)
-                return JSONResponse(status_code=500, content={"success": False, "message": err or "下载文件失败"})
-            if file_mgr:
-                cached_pdf = cached.get("pdf_path") if cached else None
-                if cached_pdf and not os.path.exists(cached_pdf):
-                    cached_pdf = None
-                file_mgr.register_preview_resource(file_id, file_url, file_path, cached_pdf, content_hash=content_hash)
-        else:
-            if file_mgr:
-                file_mgr.touch_preview_resource(file_id)
+        download_ms = 0.0
+        pipeline = build_document_pipeline(printer_manager.config, logger)
+        identity = DocumentIdentity(content_hash, file_name or "", file_type or "")
 
-        image, page_count, resolved_page_index, err = _generate_preview_image(
-            file_id, file_path, file_name, file_type, options, page_index
-        )
-        if not image:
-            return JSONResponse(status_code=500, content={"success": False, "message": err or "预览生成失败"})
+        def source_supplier():
+            nonlocal download_ms
+            download_started_at = time.perf_counter()
+            downloaded_path, download_error = _download_preview_file(file_url, file_name, file_id)
+            download_ms = (time.perf_counter() - download_started_at) * 1000
+            if not downloaded_path:
+                raise PrintError(ErrorCode.SOURCE_NOT_FOUND, download_error or "preview download failed")
+            return Path(downloaded_path)
+
+        canonical = pipeline.resolve_canonical(identity, source_supplier, delete_source=True)
+        render_started_at = time.perf_counter()
+        preview_page = pipeline.render_preview(canonical, PrintOptions.from_mapping(options), page_index)
+        image = preview_page.image
+        page_count = preview_page.page_count
+        resolved_page_index = preview_page.page_index
+        render_ms = (time.perf_counter() - render_started_at) * 1000
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
@@ -1243,12 +962,25 @@ async def preview(request: Request):
             "timestamp": time.time(),
         }
         logger.info(
-            "Preview generated: file_id=%s page_index=%s page_count=%s",
+            "Preview generated: file_id=%s page_index=%s page_count=%s download_ms=%.1f prepare_render_ms=%.1f total_ms=%.1f",
             file_id,
             resolved_page_index,
             page_count,
+            download_ms,
+            render_ms,
+            (time.perf_counter() - request_started_at) * 1000,
         )
         return {"success": True, "preview_url": data_url, "page_count": page_count, "page_index": resolved_page_index}
+    except PrintError as e:
+        logger.warning(
+            "Preview document processing failed: code=%s detail=%s",
+            e.code.value,
+            e.technical_message,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error_code": e.code.value, "message": e.user_message},
+        )
     except Exception as e:
         logger.exception("Preview request failed")
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
@@ -1813,6 +1545,8 @@ async def start_printer_test(printer_id: str):
                 printer_name=printer.get("name"),
                 file_path=str(test_source),
                 source_name=test_source.name,
+                content_hash=hashlib.sha256(test_source.read_bytes()).hexdigest(),
+                source_kind="application/pdf",
                 print_options=PrintOptions(
                     copies=1,
                     duplex="simplex",

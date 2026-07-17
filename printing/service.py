@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Optional
 
-from .documents import DocumentPreparer
+from .documents import DocumentPipeline
 from .domain import ErrorCode, EventCallback, IppJobRef, PrintError, PrintEvent, PrintRequest, PrintState, USER_MESSAGES
 from .ipp_device import active_job_fault, job_snapshot, printer_fault, printer_snapshot, probe_printer, validate_options
 from .ipp_protocol import IppClient, IppResponseError, IppTransportError
@@ -68,7 +68,7 @@ DEVICE_JOBS = DeviceJobRegistry()
 
 
 class IppPrintService:
-    def __init__(self, documents: DocumentPreparer, logger=None, *, poll_seconds: float = 1.0, timeout_seconds: float = 900.0):
+    def __init__(self, documents: DocumentPipeline, logger=None, *, poll_seconds: float = 1.0, timeout_seconds: float = 900.0):
         self.documents = documents
         self.logger = logger or logging.getLogger(__name__)
         self.poll_seconds = poll_seconds
@@ -77,6 +77,7 @@ class IppPrintService:
         self._cancel_lock = threading.Lock()
 
     def execute(self, request: PrintRequest, callback: Optional[EventCallback] = None) -> PrintEvent:
+        execute_started_at = time.perf_counter()
         device_lock = DEVICE_JOBS.acquire(request.printer_uuid, request.job_id)
         if device_lock is None:
             return self._error_event(request, callback, PrintError(ErrorCode.PRINTER_BUSY, "device is active or locked after an unconfirmed job"))
@@ -86,6 +87,7 @@ class IppPrintService:
         prepared = None
         try:
             self._emit(request, callback, PrintState.PREPARING)
+            probe_started_at = time.perf_counter()
             try:
                 probe = probe_printer(request.ipp_uri, timeout=5.0)
             except IppTransportError as exc:
@@ -100,10 +102,14 @@ class IppPrintService:
             if not bool((probe.snapshot.get("printer-is-accepting-jobs") or [False])[0]):
                 raise PrintError(ErrorCode.PRINTER_USER_INTERVENTION, "printer is not accepting jobs")
 
+            probe_ms = (time.perf_counter() - probe_started_at) * 1000
+            prepare_started_at = time.perf_counter()
             prepared = self.documents.prepare(request)
+            prepare_ms = (time.perf_counter() - prepare_started_at) * 1000
             job_attributes = validate_options(probe.capabilities, request.options)
             client = IppClient(request.ipp_uri, timeout=30.0)
             self._emit(request, callback, PrintState.SUBMITTING)
+            submit_started_at = time.perf_counter()
             try:
                 response = client.print_pdf(prepared.print_pdf, request.unique_document_name, request.source_name, job_attributes)
             except IppTransportError as exc:
@@ -114,7 +120,17 @@ class IppPrintService:
             if device_job_id <= 0:
                 raise PrintError(ErrorCode.IPP_SUBMISSION_UNCONFIRMED, "Print-Job response had no device job-id", state=PrintState.UNCONFIRMED)
             ref = IppJobRef(request.ipp_uri, request.printer_uuid, device_job_id, str(response.first("job-uri", "") or ""), request.unique_document_name)
-            self.logger.info("ipp_job_bound job_id=%s printer_uuid=%r device_job_id=%s job_uri=%r", request.job_id, request.printer_uuid, ref.job_id, ref.job_uri)
+            self.logger.info(
+                "ipp_job_bound job_id=%s printer_uuid=%r device_job_id=%s job_uri=%r probe_ms=%.1f prepare_ms=%.1f submit_ms=%.1f pre_monitor_total_ms=%.1f",
+                request.job_id,
+                request.printer_uuid,
+                ref.job_id,
+                ref.job_uri,
+                probe_ms,
+                prepare_ms,
+                (time.perf_counter() - submit_started_at) * 1000,
+                (time.perf_counter() - execute_started_at) * 1000,
+            )
             self._emit(request, callback, PrintState.QUEUED, total_pages=prepared.page_count * request.options.copies, details={"ipp_job_id": ref.job_id})
             return self._monitor(request, prepared.page_count, ref, client, cancel_event, callback)
         except PrintError as exc:

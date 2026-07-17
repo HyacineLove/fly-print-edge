@@ -1,4 +1,5 @@
 import http.server
+import hashlib
 import struct
 import tempfile
 import threading
@@ -6,7 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import fitz
+
 from printing.discovery import _decode_txt, _host_for_uri
+from printing.documents import DOCUMENT_CONVERSION_VERSION, DocumentIdentity, DocumentPipeline
 from printing.domain import ErrorCode, IppJobRef, PrintError, PrintOptions, PrintRequest, PrintState
 from printing.ipp_device import IppPrinterProbe, active_job_fault, normalize_capabilities, printer_fault, validate_options
 from printing.ipp_protocol import (
@@ -88,6 +92,41 @@ class IppProtocolTests(unittest.TestCase):
         self.assertEqual(17, response.first("job-id"))
         self.assertEqual(_IppHandler.content_length, len(_IppHandler.body))
         self.assertTrue(_IppHandler.body.endswith(b"%PDF-1.7\nstreamed-document"))
+
+
+class DocumentPipelineCacheTests(unittest.TestCase):
+    def test_docx_preview_pdf_is_converted_once_and_reused_by_content_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sample.docx"
+            soffice = root / "soffice.exe"
+            source.write_bytes(b"docx-content")
+            soffice.write_bytes(b"exe")
+            pipeline = DocumentPipeline(str(soffice), root / "cache", root / "jobs", root / "profile")
+            calls = []
+            content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            def convert(_soffice, source_path, output_dir, profile_dir, logger=None):
+                calls.append(source_path)
+                self.assertEqual(str(root / "profile"), profile_dir)
+                output = Path(output_dir) / "sample.pdf"
+                document = fitz.open()
+                document.new_page()
+                document.save(output)
+                document.close()
+                return str(output), None
+
+            with patch("printing.documents.convert_document_to_pdf", side_effect=convert):
+                first = pipeline.resolve_canonical(
+                    DocumentIdentity(content_hash, source.name), lambda: source, delete_source=False,
+                )
+                second = pipeline.resolve_canonical(
+                    DocumentIdentity(content_hash, source.name), lambda: source, delete_source=False,
+                )
+
+            self.assertEqual(first.pdf_path, second.pdf_path)
+            self.assertEqual([str(source)], calls)
+            self.assertEqual(f"{content_hash}-{DOCUMENT_CONVERSION_VERSION}.pdf", first.pdf_path.name)
 
 
 class IppDevicePolicyTests(unittest.TestCase):

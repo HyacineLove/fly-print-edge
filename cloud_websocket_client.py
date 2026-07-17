@@ -12,6 +12,7 @@ import logging
 import requests
 import os
 import base64
+from pathlib import Path
 from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
 from file_manager import get_file_manager, is_valid_content_hash
@@ -679,31 +680,32 @@ class PrintJobHandler:
                 print_options,
             )
 
-            # 处理旧有的 duplex_mode 逻辑 (保留兼容性，但已被上面的映射覆盖了一部分)
-            # 如果映射后的 print_options['duplex'] 还是原始值（如 "duplex"），需要转换为 CUPS 标准值
             file_mgr = get_file_manager()
-            file_path = file_mgr.get_cached_path(content_hash) if file_mgr else None
-            if file_path and file_mgr:
-                file_mgr.register_print_artifact(job_id, file_path, owns_source=False)
-                logger.info("复用本地缓存打印文件: job_id=%s content_hash=%s path=%s", job_id, content_hash, file_path)
 
-            # 下载文件（优先使用file_access_token）
-            if not file_path:
-                file_path = self._download_print_file(file_url, job_id, job_name, file_access_token, content_hash)
-            if not file_path:
-                self._report_job_failure(job_id, "文件下载失败")
-                return
+            def source_supplier():
+                downloaded = self._download_print_file(
+                    file_url,
+                    job_id,
+                    job_name,
+                    file_access_token,
+                    content_hash,
+                )
+                if not downloaded:
+                    raise FileNotFoundError("cloud print source download failed")
+                return Path(downloaded)
             
             # 使用统一的打印任务提交方法（自动处理清理）
             self._start_ipp_print_service(
                 job_id=job_id,
                 printer_id=printer_id,
                 printer_name=printer_name,
-                file_path=file_path,
+                file_path=None,
                 job_name=job_name,
                 print_options=print_options,
                 content_hash=content_hash,
                 file_mgr=file_mgr,
+                source_kind=str(data.get("file_type") or data.get("content_type") or ""),
+                source_supplier=source_supplier,
             )
             return
                 
@@ -723,6 +725,8 @@ class PrintJobHandler:
         print_options,
         content_hash,
         file_mgr,
+        source_kind="",
+        source_supplier=None,
     ):
         from print_runtime import build_print_request, build_print_service
         from printing.domain import PrintState
@@ -743,6 +747,9 @@ class PrintJobHandler:
             source_name=job_name,
             print_options=print_options,
             content_hash=content_hash,
+            source_kind=source_kind,
+            source_supplier=source_supplier,
+            delete_source_after_standardize=True,
         )
 
         def report(event):
@@ -867,10 +874,6 @@ class PrintJobHandler:
                 
                 logger.info(f"文件下载成功: {temp_file_path}")
                 file_mgr = get_file_manager()
-                if file_mgr and is_valid_content_hash(content_hash):
-                    cached_path = file_mgr.register_cached_source(content_hash, temp_file_path)
-                    file_mgr.register_print_artifact(job_id, cached_path or temp_file_path, owns_source=False)
-                    return cached_path or temp_file_path
                 if file_mgr:
                     file_mgr.register_print_artifact(job_id, temp_file_path)
                 return temp_file_path

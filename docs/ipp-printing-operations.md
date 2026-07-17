@@ -7,6 +7,10 @@
 - DOCX 打印需要 LibreOffice；PDF 和图片不依赖 LibreOffice。
 - Windows 不需要添加打印机、安装打印驱动或安装 SumatraPDF。
 
+Edge 会保留自己的 LibreOffice Profile。全新 Profile 会在 Edge 启动后异步预热，不阻塞二维码、PDF或图片功能；后续 DOCX 转换复用该 Profile。该 Profile 不会修改用户日常使用的 LibreOffice 配置。
+
+PDF、Office 和图片都会生成标准 PDF。标准 PDF按最后访问时间保留30分钟，同一内容再次预览或打印时不重新下载和转换；上传的原始临时文件在标准 PDF验证成功后删除。
+
 ## 首次配置
 
 1. 用网线连接主机和打印机，并确认两端 IP 在同一网段。

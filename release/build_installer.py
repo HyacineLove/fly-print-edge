@@ -40,7 +40,7 @@ INNO_SETUP_DIRS = [
     Path(r"D:\Inno Setup 6"),
 ]
 
-DEFAULT_VERSION = "1.0.14"
+DEFAULT_VERSION = "1.0.17"
 
 # Venv Python detection — PyInstaller must run with the project's venv
 # Python so it can discover all dependencies (fitz, zeroconf, etc.).

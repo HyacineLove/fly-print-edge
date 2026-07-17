@@ -3,10 +3,14 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from PIL import Image
 
 import main
 from file_manager import FileManager
+from printing.documents import CanonicalDocument, PreviewPage
 from printing.domain import ErrorCode, USER_MESSAGES
 
 
@@ -114,8 +118,6 @@ class UserPreviewPrintApiTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
         main.preview_cache = {}
-        main.preview_page_cache = {}
-        main.preview_page_meta = {}
 
     def _print_request(self, copies):
         return DummyRequest({
@@ -150,28 +152,16 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         self.assertEqual(503, response.status_code)
         self.assertEqual([], self.cloud_service.websocket_client.sent_messages)
 
-    def test_submit_print_clears_preview_cache_but_preserves_hash_source(self):
+    def test_submit_print_clears_session_preview_cache(self):
         main.preview_cache = {'file-1:{"page_index": 0}': {"preview_url": "data", "timestamp": 1.0}}
-        main.preview_page_cache = {"file-1": {0: object()}}
-        main.preview_page_meta = {"file-1": {"page_count": 1}}
         self.file_manager = FileManager(
             cleanup_interval=300,
             file_ttl=1800,
             preview_cache=main.preview_cache,
-            preview_page_cache=main.preview_page_cache,
-            preview_page_meta=main.preview_page_meta,
-        )
-        source_path = os.path.join(self.temp_dir.name, "preview.bin")
-        with open(source_path, "wb") as stream:
-            stream.write(b"preview")
-        self.file_manager.register_preview_resource(
-            "file-1", "/api/v1/files/file-1", source_path, content_hash=self.CONTENT_HASH,
         )
         response = self._submit(self._print_request(1), self.file_manager)
         self.assertTrue(response["success"])
-        self.assertTrue(os.path.exists(source_path))
         self.assertEqual({}, main.preview_cache)
-        self.assertEqual(source_path, self.file_manager.get_cached_path(self.CONTENT_HASH))
 
     def test_preview_rejects_missing_content_hash(self):
         request = DummyBodyRequest({
@@ -191,11 +181,9 @@ class UserPreviewPrintApiTests(unittest.TestCase):
 
     def test_preview_reuses_cached_hash_without_download(self):
         source_path = os.path.join(self.temp_dir.name, "preview.pdf")
-        with open(source_path, "wb") as stream:
-            stream.write(b"%PDF-1.4\n")
-        self.file_manager.register_preview_resource(
-            "file-existing", "/api/v1/files/file-existing", source_path, content_hash=self.CONTENT_HASH,
-        )
+        pipeline = Mock()
+        pipeline.resolve_canonical.return_value = CanonicalDocument(self.CONTENT_HASH + "-pdf-v1", Path(source_path), 1)
+        pipeline.render_preview.return_value = PreviewPage(Image.new("RGB", (10, 10)), 1, 0)
         request = DummyBodyRequest({
             "session_id": self.session_id,
             "file_id": "file-1",
@@ -207,11 +195,11 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         })
         with patch.object(main, "printer_manager", self.printer_manager), \
              patch.object(main, "interactive_session_manager", self.session_manager), \
-             patch.object(main, "get_file_manager", return_value=self.file_manager), \
+             patch.object(main, "build_document_pipeline", return_value=pipeline), \
              patch.object(main, "_download_preview_file") as download_mock, \
-             patch.object(main, "_generate_preview_image", return_value=(None, 0, 0, "render skipped")):
+             patch.object(main, "get_file_manager", return_value=self.file_manager):
             response = asyncio.run(main.preview(request))
-        self.assertEqual(500, response.status_code)
+        self.assertTrue(response["success"])
         download_mock.assert_not_called()
 
     def _availability(self, reason):
