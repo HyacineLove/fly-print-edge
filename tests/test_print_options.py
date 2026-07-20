@@ -3,14 +3,18 @@ import unittest
 from print_options import normalize_print_options, to_cloud_duplex
 
 
-class PrintOptionsContractTests(unittest.TestCase):
-    def test_cloud_single_is_applied_as_windows_simplex(self):
-        options = normalize_print_options({"duplex_mode": "single", "color_mode": "mono"})
+class PrintOptionsTests(unittest.TestCase):
+    def test_cloud_single_maps_to_simplex(self):
+        options = normalize_print_options(
+            {"duplex_mode": "single", "color_mode": "mono"}
+        )
         self.assertEqual(options["duplex"], "simplex")
         self.assertEqual(options["color_mode"], "mono")
 
-    def test_cloud_duplex_is_applied_as_windows_long_edge(self):
-        options = normalize_print_options({"duplex_mode": "duplex", "color_mode": "color"})
+    def test_cloud_duplex_maps_to_long_edge(self):
+        options = normalize_print_options(
+            {"duplex_mode": "duplex", "color_mode": "color"}
+        )
         self.assertEqual(options["duplex"], "longedge")
         self.assertEqual(options["color_mode"], "color")
 

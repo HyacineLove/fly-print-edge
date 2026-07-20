@@ -22,6 +22,14 @@ from print_options import normalize_print_options
 
 logger = logging.getLogger(__name__)
 
+_CLOUD_OPERATIONAL_ERROR_CODES = {
+    "ipp_submission_unconfirmed": "submission_unconfirmed",
+    "ipp_job_query_failed": "job_query_failed",
+    "ipp_cancel_failed": "job_cancel_unconfirmed",
+    "print_timeout": "print_timeout_unconfirmed",
+    "result_unconfirmed": "result_unconfirmed",
+}
+
 
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
@@ -420,7 +428,7 @@ class CloudWebSocketClient:
         }
         self.send_message_sync(message)
 
-    def send_heartbeat(self, node_id: str, system_info: Dict[str, Any]) -> bool:
+    def send_heartbeat(self, node_id: str, system_info: Dict[str, Any], components: Dict[str, Any] = None) -> bool:
         """发送心跳消息到云端
         
         Args:
@@ -436,12 +444,13 @@ class CloudWebSocketClient:
             "node_id": node_id,
             "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "data": {
-                "system_info": system_info
+                "system_info": system_info,
+                "components": components or {},
             }
         }
         return self.send_message_sync(message)
 
-    def request_upload_token(self, node_id: str, printer_id: str) -> bool:
+    def request_upload_token(self, node_id: str, printer_id: str, request_id: str = "") -> bool:
         """请求上传凭证
         
         Args:
@@ -457,7 +466,8 @@ class CloudWebSocketClient:
             "node_id": node_id,
             "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "data": {
-                "printer_id": printer_id
+                "printer_id": printer_id,
+                "request_id": request_id,
             }
         }
         return self.send_message_sync(message)
@@ -485,6 +495,7 @@ class PrintJobHandler:
         self.interactive_job_binder = interactive_job_binder
         self.upload_token_callback = None  # 上传凭证成功回调
         self.upload_token_error_callback = None  # 上传凭证错误回调
+        self.upload_token_request_id = None
         self.last_upload_token = None  # 缓存最近的上传凭证
     
     def handle_error_message(self, message: Dict[str, Any]):
@@ -505,6 +516,7 @@ class PrintJobHandler:
             error_code = data.get("code", "unknown_error")
             error_message = data.get("message", "未知错误")
             printer_id = data.get("printer_id")
+            request_id = data.get("request_id")
             
             logger.error(f"收到云端错误: [{error_code}] {error_message}")
             if printer_id:
@@ -512,13 +524,7 @@ class PrintJobHandler:
             
             # 检查是否是上传凭证请求的错误响应
             # 上传凭证相关的错误码：node_disabled, node_not_found, printer_disabled, printer_not_found, printer_not_belong_to_node
-            upload_token_error_codes = [
-                "node_disabled", "node_not_found", 
-                "printer_disabled", "printer_not_found", "printer_not_belong_to_node",
-                "token_generation_failed"
-            ]
-            
-            if error_code in upload_token_error_codes:
+            if request_id and request_id == self.upload_token_request_id:
                 # 调用上传凭证错误回调
                 if self.upload_token_error_callback and callable(self.upload_token_error_callback):
                     self.upload_token_error_callback(error_code, error_message)
@@ -563,6 +569,7 @@ class PrintJobHandler:
             expires_at = data.get("expires_at")
             upload_url = data.get("upload_url")  # API端点
             web_url = data.get("web_url")  # Web页面（优先使用）
+            request_id = data.get("request_id")
             
             logger.info(f"收到上传凭证，过期时间: {expires_at}")
             
@@ -574,7 +581,7 @@ class PrintJobHandler:
             }
             
             # 如果有回调，执行回调
-            if self.upload_token_callback and callable(self.upload_token_callback):
+            if request_id == self.upload_token_request_id and self.upload_token_callback and callable(self.upload_token_callback):
                 self.upload_token_callback(token, expires_at, web_url if web_url else upload_url)
                 
         except Exception as e:
@@ -782,6 +789,7 @@ class PrintJobHandler:
         )
 
         def report(event):
+            nonlocal last_status_refresh_state
             if event.state == PrintState.COMPLETED:
                 self._report_job_success(job_id, printer_id)
             elif event.state in {PrintState.FAILED, PrintState.CANCELED, PrintState.UNCONFIRMED}:
@@ -789,6 +797,7 @@ class PrintJobHandler:
                     job_id,
                     event.message,
                     event.error_code.value if event.error_code else event.state.value,
+                    status=event.state.value,
                 )
             else:
                 self._report_job_status(
@@ -799,6 +808,18 @@ class PrintJobHandler:
                     current_page=event.current_page,
                     total_pages=event.total_pages,
                 )
+            if (
+                self.status_reporter
+                and event.state in {PrintState.QUEUED, PrintState.COMPLETED, PrintState.FAILED, PrintState.CANCELED, PrintState.UNCONFIRMED}
+                and event.state != last_status_refresh_state
+            ):
+                last_status_refresh_state = event.state
+                self.status_reporter.force_report_printer(
+                    printer_id=printer_id,
+                    printer_name=printer_name,
+                )
+
+        last_status_refresh_state = None
 
         def run():
             try:
@@ -806,8 +827,6 @@ class PrintJobHandler:
             finally:
                 if file_mgr:
                     file_mgr.release_print_artifact(job_id, reason="ipp_print_service_terminal")
-                if self.status_reporter:
-                    self.status_reporter.force_report_printer(printer_id=printer_id, printer_name=printer_name)
 
         import threading
         threading.Thread(target=run, name=f"print-{job_id}", daemon=True).start()
@@ -989,14 +1008,18 @@ class PrintJobHandler:
             try:
                 from datetime import datetime, timezone
                 
+                cloud_status = "processing" if status in {"preparing", "submitting", "queued", "printing"} else status
                 cloud_job_data = {
                     "job_id": job_id,
-                    "status": status,
-                    "progress": progress,
+                    "status": cloud_status,
                     "error_message": None,
                     "message": message_text
                 }
-                local_job_data = dict(cloud_job_data)
+                local_job_data = {
+                    **cloud_job_data,
+                    "status": status,
+                    "progress": progress,
+                }
                 if current_page is not None:
                     local_job_data["current_page"] = current_page
                 if total_pages is not None:
@@ -1010,12 +1033,15 @@ class PrintJobHandler:
                 }
                 
                 if self.websocket_client:
-                    self.websocket_client.send_message_sync(message)
+                    sent = self.websocket_client.send_message_sync(message)
                     self.websocket_client.dispatch_local_message(
                         "job_status",
                         {"type": "job_status", "data": local_job_data},
                     )
-                    logger.debug(f"任务状态({status})已通过WebSocket上报: {job_id}")
+                    if sent:
+                        logger.debug(f"任务状态({status})已通过WebSocket上报: {job_id}")
+                    else:
+                        logger.error(f"任务状态({status})WebSocket上报失败: {job_id}")
                 
             except Exception as e:
                 logger.error(f"报告任务状态异常: {e}")
@@ -1035,7 +1061,6 @@ class PrintJobHandler:
                 job_data = {
                     "job_id": job_id,
                     "status": "completed",
-                    "progress": 100,
                     "error_message": None,
                     "message": "打印任务已完成" # 前端可能需要这个字段
                 }
@@ -1049,8 +1074,11 @@ class PrintJobHandler:
                 
                 # 1. 通过WebSocket发送给Cloud
                 if self.websocket_client:
-                    self.websocket_client.send_message_sync(message)
-                    logger.info(f"任务成功状态已通过WebSocket上报: {job_id}")
+                    sent = self.websocket_client.send_message_sync(message)
+                    if sent:
+                        logger.info(f"任务成功状态已通过WebSocket上报: {job_id}")
+                    else:
+                        logger.error(f"任务成功状态WebSocket上报失败: {job_id}")
                     
                     # 【关键】标记任务为已完成，防止重复执行
                     self.websocket_client._mark_job_completed(job_id)
@@ -1079,22 +1107,27 @@ class PrintJobHandler:
         error_message: str,
         error_code: str = None,
         local_extra: Optional[Dict[str, Any]] = None,
+        status: str = "failed",
     ):
         """通过WebSocket报告任务失败"""
         if job_id:
             try:
                 from datetime import datetime, timezone
-                
+                cloud_status = status if status in {"failed", "canceled", "unconfirmed"} else "failed"
+                cloud_error_code = (
+                    _CLOUD_OPERATIONAL_ERROR_CODES.get(error_code, error_code)
+                    if cloud_status == "unconfirmed"
+                    else error_code
+                )
                 job_data = {
                     "job_id": job_id,
-                    "status": "failed",
-                    "progress": 0,
+                    "status": cloud_status,
                     "error_message": error_message,
+                    "error_code": cloud_error_code,
                     "message": error_message
                 }
                 local_job_data = dict(job_data)
-                if error_code:
-                    local_job_data["error_code"] = error_code
+                local_job_data["progress"] = 0
                 if local_extra:
                     local_job_data.update(local_extra)
                 
@@ -1107,8 +1140,11 @@ class PrintJobHandler:
                 
                 # 1. 通过WebSocket发送给Cloud
                 if self.websocket_client:
-                    self.websocket_client.send_message_sync(message)
-                    logger.info(f"任务失败状态已通过WebSocket上报: {job_id}")
+                    sent = self.websocket_client.send_message_sync(message)
+                    if sent:
+                        logger.info(f"任务失败状态已通过WebSocket上报: {job_id}")
+                    else:
+                        logger.error(f"任务失败状态WebSocket上报失败: {job_id}")
                 else:
                     logger.warning(f"WebSocket连接不可用，无法上报任务状态: {job_id}")
                 

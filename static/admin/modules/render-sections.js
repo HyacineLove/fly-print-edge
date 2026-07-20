@@ -248,7 +248,7 @@ function printerStatusLabel(item) {
 
 function renderManagedTable(state) {
   if (!state.managed.length) {
-    return '<tr><td class="muted" colspan="6">暂无已管理打印机</td></tr>';
+    return '<tr><td class="muted" colspan="7">暂无已管理打印机</td></tr>';
   }
 
   return state.managed.map((item) => {
@@ -266,6 +266,7 @@ function renderManagedTable(state) {
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}${isDefaultPrinter ? '<span class="default-tag">默认</span>' : ""}</td>
+        <td>${escapeHtml(item.make_model || "-")}</td>
         <td class="muted">${escapeHtml(id || "-")}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
         <td>${escapeHtml(printerStatusLabel(item))}</td>
@@ -287,7 +288,7 @@ function renderManagedTable(state) {
 
 function renderDiscoveredTable(state) {
   if (!state.discovered.length) {
-    return '<tr><td class="muted" colspan="5">暂无可添加打印机</td></tr>';
+    return '<tr><td class="muted" colspan="6">暂无可添加打印机</td></tr>';
   }
 
   return state.discovered.map((item, index) => {
@@ -296,6 +297,7 @@ function renderDiscoveredTable(state) {
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}</td>
+        <td>${escapeHtml(item.make_model || "-")}</td>
         <td class="muted">${escapeHtml(type)}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
         <td class="capability-cell">${escapeHtml(item.compatible === false ? issues || "不兼容" : printerCapabilitySummary(item))}</td>
@@ -344,6 +346,7 @@ function renderPrintersSection(state) {
           <thead>
             <tr>
               <th>名称</th>
+              <th>型号</th>
               <th>ID</th>
               <th>地址/端口</th>
               <th>状态</th>
@@ -364,6 +367,7 @@ function renderPrintersSection(state) {
           <thead>
             <tr>
               <th>名称</th>
+              <th>型号</th>
               <th>类型</th>
               <th>地址/端口</th>
               <th>能力</th>

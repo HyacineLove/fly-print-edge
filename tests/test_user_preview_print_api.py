@@ -69,10 +69,15 @@ class DummyWebSocketClient:
         self.sent_messages.append(message)
         return True
 
-    def request_upload_token(self, node_id, printer_id):
+    def request_upload_token(self, node_id, printer_id, request_id=""):
         self.upload_token_requested = True
         self.requested_printer_id = printer_id
         return False
+
+
+class DummyStatusReporter:
+    def force_report_printer(self, printer_id=None, printer_name=None, **kwargs):
+        return True
 
 
 class DummyCloudService:
@@ -80,6 +85,7 @@ class DummyCloudService:
         self.node_id = "node-123"
         self.websocket_client = DummyWebSocketClient()
         self.print_job_handler = None
+        self.status_reporter = DummyStatusReporter()
 
 
 class DummyRequest:

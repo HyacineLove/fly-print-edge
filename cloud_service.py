@@ -6,6 +6,8 @@ fly-print-cloud 云端服务集成模块
 import logging
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from cloud_auth import CloudAuthClient
 from cloud_api_client import CloudAPIClient
@@ -14,57 +16,6 @@ from cloud_heartbeat_service import HeartbeatService
 from edge_node_info import EdgeNodeInfo
 
 logger = logging.getLogger(__name__)
-
-
-PRINTER_STATUS_TO_CLOUD = {
-    # English status values
-    "idle": "ready",
-    "processing": "printing",
-    "stopped": "error",
-    "paused": "error",
-    "error": "error",
-    "offline": "offline",
-    "unknown": "offline",
-    "printer_out_of_paper": "error",
-    "printer_out_of_toner": "error",
-    "printer_jammed": "error",
-    "printer_cover_open": "error",
-    "printer_user_intervention": "error",
-    # Chinese ready states
-    "在线": "ready",
-    "空闲": "ready",
-    "就绪": "ready",
-    "准备就绪": "ready",
-    "省电模式": "ready",
-    # Chinese printing states
-    "打印中": "printing",
-    "正在打印": "printing",
-    # Chinese offline states
-    "离线": "offline",
-    "服务器未知": "offline",
-    "未知": "offline",
-    "未知状态": "offline",
-    # Chinese error states
-    "停止": "error",
-    "暂停": "error",
-    "已禁用": "error",
-    "错误": "error",
-    "缺纸": "error",
-    "门开": "error",
-    "用户干预": "error",
-    "正在删除": "error",
-    "纸张问题": "error",
-    "手动送纸": "error",
-    "输出满": "error",
-    "页面错误": "error",
-    "内存不足": "error",
-    "被阻止": "error",
-}
-
-NORMALIZED_PRINTER_STATUS_TO_CLOUD = {
-    status.casefold(): cloud_status
-    for status, cloud_status in PRINTER_STATUS_TO_CLOUD.items()
-}
 
 
 class CloudService:
@@ -229,6 +180,7 @@ class CloudService:
                         node_id=self.node_id,
                         interval=self.heartbeat_interval,
                         base_url=self.config.get("base_url"),
+                        config_repo=self.printer_manager.config if self.printer_manager else None,
                     )
                     self.heartbeat_service.start()
                     logger.debug("Heartbeat service started in websocket mode")
@@ -718,10 +670,14 @@ class PrinterStatusReporter:
         self.node_id = node_id
         self.api_client = api_client  # 用于批量HTTP上报
         self.node_missing_handler = node_missing_handler
-        self.last_status = {}  # 缓存上次状态
         self.running = False
         self.thread = None
-        self.check_interval = 30  # 30秒检查一次
+        self.check_interval = 30
+        self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._refresh_lock = threading.Lock()
+        self._refresh_ids = set()
+        self._refresh_waiters = {}
 
     def _is_remote_node_missing_error(self, error_text: Any) -> bool:
         text = str(error_text or "")
@@ -738,145 +694,145 @@ class PrinterStatusReporter:
         """启动状态上报服务"""
         if self.running:
             return
-        
+        self._stop_event.clear()
+        self._wake_event.clear()
         self.running = True
-        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread = threading.Thread(target=self._monitor_loop, name="printer-status-reporter", daemon=True)
         self.thread.start()
         logger.debug("Printer status reporter loop started")
     
     def stop(self):
         """停止状态上报服务"""
         self.running = False
+        self._stop_event.set()
+        self._wake_event.set()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join()
+        self.thread = None
+        self._complete_refresh_waiters(None, False)
         logger.debug("Printer status reporter loop stopped")
     
-    def force_report_printer(self, printer_id: str = None, printer_name: str = None):
-        """立即上报指定打印机的状态（用于打印任务开始/结束时）
-        
-        Args:
-            printer_id: 打印机ID（优先使用）
-            printer_name: 打印机名称（作为备选）
-        """
-        if not self.printer_manager or not self.api_client:
-            return
-        
-        try:
-            managed_printers = self.printer_manager.config.get_managed_printers()
-            
-            # 查找目标打印机
-            target_printer = None
-            for printer in managed_printers:
-                if printer_id and printer_id in {printer.get("id"), printer.get("cloud_id")}:
-                    target_printer = printer
-                    break
-                elif printer_name and printer.get("name") == printer_name:
-                    target_printer = printer
-                    break
-            
-            if not target_printer:
-                logger.debug("Printer not found for forced status report: id=%s name=%s", printer_id, printer_name)
-                return
-            
-            p_id = target_printer.get("cloud_id") or target_printer.get("id")
-            p_name = target_printer.get("name")
-            
-            # 获取当前状态
-            current_status = self.printer_manager.get_printer_status(p_name)
-            queue_jobs = self.printer_manager.get_print_queue(p_name)
-            current_queue_length = len(queue_jobs) if queue_jobs else 0
-            cloud_status = self._convert_status_to_cloud_format(current_status)
-            
-            # 立即上报（不检查缓存）
-            printers_to_report = [{
-                "printer_id": p_id,
-                "status": cloud_status,
-                "queue_length": current_queue_length
-            }]
-            
-            result = self.api_client.batch_update_printer_status(printers_to_report)
-            
-            if result.get("success"):
-                # 更新缓存
-                self.last_status[p_id] = {
-                    "status": cloud_status,
-                    "queue_length": current_queue_length
-                }
-                logger.debug("Forced printer status reported: name=%s status=%s", p_name, cloud_status)
-            else:
-                if self._is_remote_node_missing_error(result.get("error")):
-                    self._notify_node_missing(result.get("error"))
-                logger.warning("Forced printer status report failed: %s", result.get("error"))
-                
-        except Exception as e:
-            logger.debug("Forced printer status report failed", exc_info=True)
+    def force_report_printer(
+        self,
+        printer_id: str = None,
+        printer_name: str = None,
+        *,
+        wait: bool = False,
+        timeout: float = 10.0,
+    ) -> bool:
+        """合并刷新请求，由唯一上报线程采样；关键节点可等待同步完成。"""
+        if not self.running or not self.printer_manager or not self.api_client or not (printer_id or printer_name):
+            return False
+        key = (str(printer_id or ""), str(printer_name or ""))
+        waiter = None
+        result = None
+        if wait:
+            waiter = threading.Event()
+            result = {"success": False}
+        with self._refresh_lock:
+            self._refresh_ids.add(key)
+            if waiter is not None:
+                self._refresh_waiters.setdefault(key, []).append((waiter, result))
+        self._wake_event.set()
+        if waiter is None:
+            return True
+        if not waiter.wait(max(0.0, float(timeout))):
+            with self._refresh_lock:
+                pending = self._refresh_waiters.get(key, [])
+                self._refresh_waiters[key] = [item for item in pending if item[0] is not waiter]
+                if not self._refresh_waiters[key]:
+                    self._refresh_waiters.pop(key, None)
+            return False
+        return bool(result["success"])
     
     def _monitor_loop(self):
-        """状态监控循环"""
-        while self.running:
+        """串行调度周期刷新和按需刷新，禁止重叠采样。"""
+        next_full_refresh = 0.0
+        while not self._stop_event.is_set():
             try:
-                self._check_and_report_status()
-                time.sleep(self.check_interval)
-            except Exception as e:
+                if time.monotonic() >= next_full_refresh:
+                    requested = self._drain_refresh_requests()
+                    success = self._check_and_report_status()
+                    if requested:
+                        self._complete_refresh_waiters(requested, success)
+                    next_full_refresh = time.monotonic() + self.check_interval
+                else:
+                    requested = self._drain_refresh_requests()
+                    if requested:
+                        printers = self._select_requested_printers(requested)
+                        success = bool(printers) and self._report_printers(printers)
+                        self._complete_refresh_waiters(requested, success)
+                self._wake_event.wait(max(0.0, next_full_refresh - time.monotonic()))
+                self._wake_event.clear()
+            except Exception:
                 logger.debug("Printer status monitor loop failed", exc_info=True)
-                time.sleep(5)  # 出错后短暂等待
+                self._stop_event.wait(5)
+        self.running = False
+
+    def _drain_refresh_requests(self):
+        with self._refresh_lock:
+            requests = set(self._refresh_ids)
+            self._refresh_ids.clear()
+        return requests
+
+    def _select_requested_printers(self, requests):
+        selected = {}
+        for printer in self.printer_manager.config.get_managed_printers():
+            local_id = str(printer.get("id") or "")
+            cloud_id = str(printer.get("cloud_id") or "")
+            name = str(printer.get("name") or "")
+            if any((pid and pid in {local_id, cloud_id}) or (pname and pname == name) for pid, pname in requests):
+                selected[local_id or cloud_id or name] = printer
+        return list(selected.values())
+
+    def _complete_refresh_waiters(self, requests, success):
+        with self._refresh_lock:
+            keys = list(self._refresh_waiters) if requests is None else list(requests)
+            waiters = []
+            for key in keys:
+                waiters.extend(self._refresh_waiters.pop(key, []))
+        for event, result in waiters:
+            result["success"] = bool(success)
+            event.set()
     
     def _check_and_report_status(self):
-        """检查并批量上报状态变化"""
+        """Report a fresh status lease for every managed printer."""
         if not self.printer_manager:
-            return
+            return False
         
         try:
-            managed_printers = self.printer_manager.config.get_managed_printers()
-            
-            # 收集需要上报的打印机状态
-            printers_to_report = []
-            
-            for printer in managed_printers:
-                printer_name = printer.get("name")
-                printer_id = printer.get("cloud_id") or printer.get("id")
-                if not printer_name or not printer_id:
-                    continue
-                
-                # 获取当前状态
-                current_status = self.printer_manager.get_printer_status(printer_name)
-                queue_jobs = self.printer_manager.get_print_queue(printer_name)
-                
-                current_queue_length = len(queue_jobs) if queue_jobs else 0
-                
-                # 转换状态为云端格式
-                cloud_status = self._convert_status_to_cloud_format(current_status)
-                
-                # 检查是否有变化
-                last_info = self.last_status.get(printer_id, {})
-                if (last_info.get("status") != cloud_status or 
-                    last_info.get("queue_length") != current_queue_length):
-                    
-                    printers_to_report.append({
-                        "printer_id": printer_id,
-                        "status": cloud_status,
-                        "queue_length": current_queue_length
-                    })
-            
-            # 批量上报（如果有变化）
-            if printers_to_report and self.api_client:
-                result = self.api_client.batch_update_printer_status(printers_to_report)
-                
-                if result.get("success"):
-                    # 更新缓存
-                    for printer_status in printers_to_report:
-                        self.last_status[printer_status["printer_id"]] = {
-                            "status": printer_status["status"],
-                            "queue_length": printer_status["queue_length"]
-                        }
-                    logger.debug("Printer status batch reported: count=%s", len(printers_to_report))
-                else:
-                    if self._is_remote_node_missing_error(result.get("error")):
-                        self._notify_node_missing(result.get("error"))
-                    logger.warning("Printer status batch report failed: %s", result.get("error"))
-                    
-        except Exception as e:
+            return self._report_printers(self.printer_manager.config.get_managed_printers())
+        except Exception:
             logger.debug("Checking printer status failed", exc_info=True)
-    
-    def _convert_status_to_cloud_format(self, cups_status: str) -> str:
-        """转换CUPS状态为云端标准格式: ready/printing/error/offline"""
-        normalized_status = str(cups_status or "").strip().casefold()
-        return NORMALIZED_PRINTER_STATUS_TO_CLOUD.get(normalized_status, "offline")
+            return False
+
+    def _report_printers(self, printers):
+        eligible = [p for p in printers if p.get("name") and (p.get("cloud_id") or p.get("id"))]
+        if not eligible or not self.api_client:
+            return False
+        payloads = []
+        with ThreadPoolExecutor(max_workers=min(4, len(eligible)), thread_name_prefix="printer-status") as pool:
+            futures = {pool.submit(self._build_status_payload, printer): printer for printer in eligible}
+            for future in as_completed(futures):
+                try:
+                    payloads.append(future.result())
+                except Exception:
+                    logger.warning("Printer status sampling failed: name=%s", futures[future].get("name"), exc_info=True)
+        if not payloads:
+            return False
+        result = self.api_client.batch_update_printer_status(payloads)
+        if result.get("success"):
+            logger.debug("Printer status batch reported: count=%s", len(payloads))
+            return True
+        if self._is_remote_node_missing_error(result.get("error")):
+            self._notify_node_missing(result.get("error"))
+        logger.warning("Printer status batch report failed: %s", result.get("error"))
+        return False
+
+    def _build_status_payload(self, printer: Dict[str, Any]) -> Dict[str, Any]:
+        detail = self.printer_manager.get_printer_status_detail(printer.get("name"))
+        return {
+            "printer_id": printer.get("cloud_id") or printer.get("id"),
+            "printer_status": detail.get("printer_status") or "printer_state_unknown",
+            "source_observed_at": detail.get("source_observed_at") or datetime.now(timezone.utc).isoformat(),
+        }

@@ -12,6 +12,7 @@ from PIL import Image
 
 from printing.documents import (
     CanonicalDocument,
+    DOCUMENT_CONVERSION_VERSION,
     DocumentIdentity,
     DocumentPipeline,
     PDF_CONVERSION_VERSION,
@@ -59,6 +60,40 @@ class DocumentPipelineTests(unittest.TestCase):
 
             second = pipeline.resolve_canonical(DocumentIdentity(digest, "source.pdf"), unexpected_supplier)
             self.assertEqual(first.pdf_path, second.pdf_path)
+
+    def test_docx_conversion_is_cached_by_content_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sample.docx"
+            source.write_bytes(b"docx-content")
+            pipeline = self.make_pipeline(root)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            def fake_convert(_soffice, _source, output_dir, _profile, **_kwargs):
+                converted = Path(output_dir) / "sample.pdf"
+                write_pdf(converted)
+                return str(converted), None
+
+            with patch(
+                "printing.documents.convert_document_to_pdf",
+                side_effect=fake_convert,
+            ) as convert:
+                first = pipeline.resolve_canonical(
+                    DocumentIdentity(digest, source.name), lambda: source
+                )
+                second = pipeline.resolve_canonical(
+                    DocumentIdentity(digest, source.name),
+                    lambda: (_ for _ in ()).throw(
+                        AssertionError("supplier must not run on cache hit")
+                    ),
+                )
+
+            self.assertEqual(first.pdf_path, second.pdf_path)
+            self.assertEqual(1, convert.call_count)
+            self.assertEqual(
+                f"{digest}-{DOCUMENT_CONVERSION_VERSION}.pdf",
+                first.pdf_path.name,
+            )
 
     def test_hash_mismatch_is_rejected_and_source_is_not_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:

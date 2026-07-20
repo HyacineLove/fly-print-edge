@@ -90,23 +90,6 @@ class AdminPrinterCapabilitiesApiTests(unittest.TestCase):
         self.assertEqual("urn:uuid:printer-2", item["printer_uuid"])
         self.assertEqual("unknown", item["capability_summary"])
         self.printer_manager.get_admin_printer_summary.assert_not_called()
-        return
-        self.printer_manager.get_admin_printer_summary.return_value = {
-            "duplex_supported": None,
-            "color_supported": None,
-            "capability_summary": "单双面: 未知, 彩色: 未知",
-        }
-
-        with patch.object(main, "printer_manager", self.printer_manager):
-            result = asyncio.run(main.get_discovered_printers())
-
-        self.assertTrue(result["success"])
-        item = result["items"][0]
-        self.assertIsNone(item["duplex_supported"])
-        self.assertIsNone(item["color_supported"])
-        self.assertIn("单双面: 未知", item["capability_summary"])
-        self.assertIn("彩色: 未知", item["capability_summary"])
-        self.printer_manager.get_admin_printer_summary.assert_called_once_with("Office Printer")
 
     def test_duplicate_test_print_is_rejected_for_same_printer(self):
         main.active_printer_tests["printer-1"] = "task-1"

@@ -10,8 +10,9 @@ export const api = {
 
 export async function getJson(url) {
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
+  return json;
 }
 
 export async function postJson(url, data) {

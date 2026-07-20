@@ -95,9 +95,12 @@ class IppPrintService:
                 raise PrintError(ErrorCode.IPP_CAPABILITY_MISSING, "; ".join(probe.issues))
             if probe.printer_uuid != request.printer_uuid:
                 raise PrintError(ErrorCode.IPP_URI_INVALID, "configured URI now resolves to a different printer UUID")
-            initial_fault = printer_fault(probe.snapshot, include_reports_and_alerts=True)
+            initial_fault = printer_fault(probe.snapshot)
             if initial_fault:
                 raise PrintError(initial_fault, "blocking printer fault detected before submission", details={"printer_reasons": probe.snapshot.get("printer-state-reasons", [])})
+            initial_state = int((probe.snapshot.get("printer-state") or [0])[0] or 0)
+            if initial_state not in {3, 4}:
+                raise PrintError(ErrorCode.PRINTER_USER_INTERVENTION, f"printer state {initial_state} cannot accept a new job")
             if not bool((probe.snapshot.get("printer-is-accepting-jobs") or [False])[0]):
                 raise PrintError(ErrorCode.PRINTER_USER_INTERVENTION, "printer is not accepting jobs")
 

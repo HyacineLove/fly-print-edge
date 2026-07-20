@@ -20,9 +20,6 @@ DIST_LAUNCHER_EXE = DIST_EXE_DIR / "flyprint-launcher.exe"
 
 
 class PyInstallerSpecTests(unittest.TestCase):
-    def test_spec_file_exists(self):
-        self.assertTrue(SPEC_FILE.is_file(), f"Missing spec file: {SPEC_FILE}")
-
     def test_spec_file_is_valid_python_and_has_required_fields(self):
         spec_text = SPEC_FILE.read_text(encoding="utf-8")
         self.assertIn("service_main.py", spec_text)
@@ -77,9 +74,6 @@ class PyInstallerBuildOutputTests(unittest.TestCase):
 
 
 class InnoSetupScriptTests(unittest.TestCase):
-    def test_iss_file_exists(self):
-        self.assertTrue(ISS_FILE.is_file(), f"Missing Inno Setup script: {ISS_FILE}")
-
     def test_iss_has_required_sections(self):
         text = ISS_FILE.read_text(encoding="utf-8")
         for section in ["[Setup]", "[Files]", "[Icons]", "[Tasks]", "[Registry]"]:

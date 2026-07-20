@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from printer_config import PrinterConfig
 from printing.discovery import IppDiscovery
-from printing.ipp_device import printer_snapshot, printer_status_text, probe_printer
+from printing.ipp_device import PrinterObservation, normalize_printer_runtime, printer_snapshot, printer_status_text, probe_printer
 from printing.ipp_protocol import IppClient
 from printing.service import DEVICE_JOBS
 
@@ -71,29 +71,34 @@ class PrinterManager:
             return {"status_text": "unknown", "error": "managed printer not found"}
         try:
             snapshot = printer_snapshot(IppClient(printer["ipp_uri"], timeout=5.0))
+            uncertain = DEVICE_JOBS.is_uncertain(printer["printer_uuid"])
+            observation = PrinterObservation(
+                snapshot=snapshot,
+                uncertain=uncertain,
+            )
+            normalized = normalize_printer_runtime(observation)
+            runtime = normalized.public_dict()
             return {
-                "status_text": printer_status_text(snapshot),
+                "status_text": printer_status_text(normalized),
+                **runtime,
                 "ipp": snapshot,
                 "ipp_uri": printer["ipp_uri"],
                 "printer_uuid": printer["printer_uuid"],
-                "uncertain": DEVICE_JOBS.is_uncertain(printer["printer_uuid"]),
+                "uncertain": uncertain,
             }
         except Exception as exc:
             logger.warning("IPP status query failed printer=%r error=%s", printer_name, exc)
-            return {"status_text": "offline", "error": str(exc), "ipp_uri": printer.get("ipp_uri")}
+            return {
+                "status_text": "ipp_unreachable",
+                "printer_status": "ipp_unreachable",
+                "source_observed_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(exc),
+                "ipp_uri": printer.get("ipp_uri"),
+                "printer_uuid": printer.get("printer_uuid"),
+            }
 
     def get_printer_status(self, printer_name: str) -> str:
         return self.get_printer_status_detail(printer_name)["status_text"]
-
-    def get_print_queue(self, printer_name: str) -> List[Dict[str, Any]]:
-        printer = self._resolve(printer_name=printer_name)
-        if not printer:
-            return []
-        detail = self.get_printer_status_detail(printer_name)
-        snapshot = detail.get("ipp") or {}
-        remote_count = int((snapshot.get("queued-job-count") or [0])[0] or 0)
-        count = max(remote_count, DEVICE_JOBS.active_count(printer["printer_uuid"]))
-        return [{"source": "ipp", "position": index + 1} for index in range(count)]
 
     def get_job_status(self, printer_name: str, job_id: int) -> Dict[str, Any]:
         printer = self._resolve(printer_name=printer_name)

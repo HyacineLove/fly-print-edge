@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cloud_service import CloudService, PrinterStatusReporter
+from cloud_service import CloudService
 
 
 class CloudServiceReconfigureTests(unittest.TestCase):
@@ -158,40 +158,6 @@ class CloudServiceReconfigureTests(unittest.TestCase):
         status_reporter.stop.assert_called_once()
         self.assertFalse(websocket_client.running)
         self.assertFalse(websocket_client.connected)
-
-
-class PrinterStatusReporterStatusMappingTests(unittest.TestCase):
-    def make_reporter(self):
-        return PrinterStatusReporter(
-            websocket_client=None,
-            printer_manager=None,
-            node_id="node-1",
-            api_client=None,
-        )
-
-    def test_convert_status_normalizes_english_case_and_whitespace(self):
-        reporter = self.make_reporter()
-
-        self.assertEqual("ready", reporter._convert_status_to_cloud_format(" idle "))
-        self.assertEqual("printing", reporter._convert_status_to_cloud_format("PROCESSING"))
-        self.assertEqual("error", reporter._convert_status_to_cloud_format("Paused"))
-        self.assertEqual("offline", reporter._convert_status_to_cloud_format("OFFLINE"))
-
-    def test_convert_status_maps_chinese_printer_states(self):
-        reporter = self.make_reporter()
-
-        self.assertEqual("ready", reporter._convert_status_to_cloud_format("准备就绪"))
-        self.assertEqual("printing", reporter._convert_status_to_cloud_format("正在打印"))
-        self.assertEqual("offline", reporter._convert_status_to_cloud_format("服务器未知"))
-        self.assertEqual("error", reporter._convert_status_to_cloud_format("缺纸"))
-        self.assertEqual("error", reporter._convert_status_to_cloud_format("被阻止"))
-
-    def test_convert_status_defaults_unknown_to_offline(self):
-        reporter = self.make_reporter()
-
-        self.assertEqual("offline", reporter._convert_status_to_cloud_format(None))
-        self.assertEqual("offline", reporter._convert_status_to_cloud_format(""))
-        self.assertEqual("offline", reporter._convert_status_to_cloud_format("unexpected"))
 
 
 if __name__ == "__main__":

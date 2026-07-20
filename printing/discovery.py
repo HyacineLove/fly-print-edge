@@ -104,7 +104,6 @@ class IppDiscovery:
                         "name": service.display_name,
                         "type": "ipp",
                         "ipp_uri": service.ipp_uri,
-                        "location": service.ipp_uri,
                         "printer_uuid": "",
                         "compatible": False,
                         "issues": [f"IPP 检测失败: {exc}"],

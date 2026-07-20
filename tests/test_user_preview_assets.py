@@ -1,6 +1,7 @@
 import pathlib
 import re
 import unittest
+from functools import lru_cache
 
 
 BASE_DIR = pathlib.Path("static/user")
@@ -22,6 +23,11 @@ FULL_PAGE_NAVIGATION_PATTERNS = [
 ]
 
 
+@lru_cache(maxsize=None)
+def read_source(path):
+    return pathlib.Path(path).read_text(encoding="utf-8")
+
+
 class UserPreviewAssetTests(unittest.TestCase):
     def _require_existing_files(self, relative_paths, message_prefix):
         missing = [str(BASE_DIR / relative_path) for relative_path in relative_paths if not (BASE_DIR / relative_path).exists()]
@@ -35,7 +41,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertTrue(path.exists(), f"missing SPA shell: {path}")
         self._require_existing_files(["app.js"], "missing SPA entry required by shell")
 
-        html = path.read_text(encoding="utf-8")
+        html = read_source(path)
         self.assertIn('id="app"', html, "SPA shell should expose a single #app mount node")
         self.assertIn('type="module"', html, "SPA shell should load the frontend through a module script")
         self.assertRegex(
@@ -51,7 +57,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         path = BASE_DIR / "app.js"
         self.assertTrue(path.exists(), f"missing SPA entry: {path}")
 
-        script = path.read_text(encoding="utf-8")
+        script = read_source(path)
         self.assertTrue(script.strip(), "SPA entry app.js should not be empty")
 
     def test_user_spa_entry_and_views_avoid_full_page_navigation(self):
@@ -60,7 +66,7 @@ class UserPreviewAssetTests(unittest.TestCase):
 
         for relative_path in navigation_files:
             path = BASE_DIR / relative_path
-            script = path.read_text(encoding="utf-8")
+            script = read_source(path)
             for pattern in FULL_PAGE_NAVIGATION_PATTERNS:
                 with self.subTest(path=str(path), pattern=pattern):
                     self.assertNotRegex(script, pattern, f"{path} should not trigger full-page navigation via pattern {pattern}")
@@ -69,14 +75,14 @@ class UserPreviewAssetTests(unittest.TestCase):
         path = BASE_DIR / "modules/app/sse-client.js"
         self.assertTrue(path.exists(), f"missing SSE client: {path}")
 
-        script = path.read_text(encoding="utf-8")
+        script = read_source(path)
         self.assertIn("EventSource", script, "sse-client.js should use the EventSource API")
 
     def test_printer_fault_locking_contract_is_present_in_user_views(self):
-        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
-        login_view = (BASE_DIR / "modules/views/login-view.js").read_text(encoding="utf-8")
-        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
-        api = (BASE_DIR / "modules/shared/api.js").read_text(encoding="utf-8")
+        done_view = read_source(BASE_DIR / "modules/views/done-view.js")
+        login_view = read_source(BASE_DIR / "modules/views/login-view.js")
+        runtime = read_source(BASE_DIR / "modules/shared/runtime.js")
+        api = read_source(BASE_DIR / "modules/shared/api.js")
 
         self.assertIn("printerAvailability", api)
         self.assertIn("printer_fault", runtime)
@@ -89,7 +95,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("setPrinterFaultLocked", login_view)
 
     def test_printer_fault_done_view_does_not_auto_restart_until_recovered(self):
-        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
+        done_view = read_source(BASE_DIR / "modules/views/done-view.js")
 
         self.assertRegex(
             done_view,
@@ -99,7 +105,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("打印机已恢复", done_view)
 
     def test_printer_fault_done_view_hides_countdown_accessory_before_and_after_recovery(self):
-        done_view = (BASE_DIR / "modules/views/done-view.js").read_text(encoding="utf-8")
+        done_view = read_source(BASE_DIR / "modules/views/done-view.js")
 
         self.assertIn("function setCountdownAccessoryVisible", done_view)
         self.assertRegex(
@@ -116,7 +122,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         )
 
     def test_app_controller_failed_snapshot_uses_snapshot_error_fields(self):
-        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
+        controller = read_source(BASE_DIR / "modules/app/app-controller.js")
 
         self.assertNotIn("normalized.error_code", controller)
         self.assertNotIn("normalized.error_message", controller)
@@ -124,7 +130,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("snapshot.error_message", controller)
 
     def test_print_error_mapping_sanitizes_driver_and_job_tracking_errors(self):
-        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
+        runtime = read_source(BASE_DIR / "modules/shared/runtime.js")
 
         self.assertNotIn("PCL XL", runtime)
         self.assertNotIn("MemAllocError", runtime)
@@ -134,18 +140,18 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("无法确认本次打印结果，请勿重复提交", runtime)
 
     def test_default_scale_mode_is_actual_size_shrink_only_in_frontend(self):
-        session_state = (BASE_DIR / "modules/shared/session-state.js").read_text(encoding="utf-8")
-        admin_settings = pathlib.Path("static/admin/modules/render-sections.js").read_text(encoding="utf-8")
+        session_state = read_source(BASE_DIR / "modules/shared/session-state.js")
+        admin_settings = read_source("static/admin/modules/render-sections.js")
 
         self.assertIn('defaultScaleMode = "actual"', session_state)
         self.assertIn("原始尺寸/过大缩小", admin_settings)
         self.assertIn('cfg.default_scale_mode || "actual"', admin_settings)
 
     def test_printing_indicator_is_full_width_and_uses_device_page_progress(self):
-        view = (BASE_DIR / "modules/views/printing-view.js").read_text(encoding="utf-8")
-        runtime = (BASE_DIR / "modules/shared/runtime.js").read_text(encoding="utf-8")
-        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
-        css = (BASE_DIR / "css/printing.css").read_text(encoding="utf-8")
+        view = read_source(BASE_DIR / "modules/views/printing-view.js")
+        runtime = read_source(BASE_DIR / "modules/shared/runtime.js")
+        controller = read_source(BASE_DIR / "modules/app/app-controller.js")
+        css = read_source(BASE_DIR / "css/printing.css")
 
         self.assertIn("renderPrintingIndicator", view)
         self.assertIn("current_page", view)
@@ -168,8 +174,8 @@ class UserPreviewAssetTests(unittest.TestCase):
 
 
     def test_preview_flow_preserves_content_hash_from_cloud_to_preview_api(self):
-        controller = (BASE_DIR / "modules/app/app-controller.js").read_text(encoding="utf-8")
-        preview_view = (BASE_DIR / "modules/views/preview-view.js").read_text(encoding="utf-8")
+        controller = read_source(BASE_DIR / "modules/app/app-controller.js")
+        preview_view = read_source(BASE_DIR / "modules/views/preview-view.js")
 
         self.assertIn("content_hash: data.content_hash", controller)
         self.assertIn("content_hash: normalized.content_hash", controller)

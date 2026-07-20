@@ -1,10 +1,17 @@
-import unittest
 import logging
-from logging.handlers import RotatingFileHandler
+import os
+import sys
 import tempfile
+import unittest
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from unittest.mock import patch
 
-from config_service import ConfigService
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import logging_utils
+import main
 from logging_utils import (
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
@@ -14,7 +21,7 @@ from logging_utils import (
 )
 
 
-class LoggingConfigTests(unittest.TestCase):
+class LoggingConfigurationTests(unittest.TestCase):
     def test_resolve_log_settings_defaults_to_info(self):
         resolved = resolve_log_settings({})
         self.assertEqual("INFO", resolved["level_name"])
@@ -23,12 +30,7 @@ class LoggingConfigTests(unittest.TestCase):
 
     def test_resolve_log_settings_uses_config_values(self):
         resolved = resolve_log_settings(
-            {
-                "settings": {
-                    "log_level": "debug",
-                    "debug_logging": True,
-                }
-            }
+            {"settings": {"log_level": "debug", "debug_logging": True}}
         )
         self.assertEqual("DEBUG", resolved["level_name"])
         self.assertEqual(True, resolved["debug_logging"])
@@ -36,7 +38,10 @@ class LoggingConfigTests(unittest.TestCase):
     def test_resolve_log_settings_env_overrides_config(self):
         resolved = resolve_log_settings(
             {"settings": {"log_level": "INFO", "debug_logging": False}},
-            env={"FLYPRINT_LOG_LEVEL": "WARNING", "FLYPRINT_DEBUG_LOGGING": "true"},
+            env={
+                "FLYPRINT_LOG_LEVEL": "WARNING",
+                "FLYPRINT_DEBUG_LOGGING": "true",
+            },
         )
         self.assertEqual("DEBUG", resolved["level_name"])
         self.assertEqual(True, resolved["debug_logging"])
@@ -72,17 +77,36 @@ class LoggingConfigTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
 
 
-class ConfigServiceLoggingValidationTests(unittest.TestCase):
-    def test_validate_rejects_invalid_log_level(self):
-        service = ConfigService(config_repo=None)
-        errors = service.validate(
-            {
-                "cloud": {"client_id": "edge"},
-                "settings": {"log_level": "TRACE"},
-                "network": {"bind_address": "127.0.0.1", "port": 7860},
-            }
-        )
-        self.assertIn("settings.log_level must be DEBUG, INFO, WARNING, or ERROR", errors)
+class ServiceLoggingTests(unittest.TestCase):
+    def test_configure_logging_skips_stream_handler_when_stderr_missing(self):
+        with patch.object(sys, "stderr", None):
+            resolved = logging_utils.configure_logging({"settings": {}})
+
+        self.assertEqual(resolved["level_name"], "INFO")
+
+    def test_run_server_disables_uvicorn_default_log_config(self):
+        class DummyPrinterConfig:
+            def __init__(self):
+                self.config = {
+                    "network": {"bind_address": "127.0.0.1", "port": 7860}
+                }
+
+            def get_full_config(self):
+                return self.config
+
+        with (
+            patch("main.configure_logging", return_value={"access_log": False}),
+            patch("main.uvicorn.run") as run_mock,
+            patch(
+                "printer_config.PrinterConfig", return_value=DummyPrinterConfig()
+            ),
+        ):
+            main.run_server()
+
+        self.assertTrue(run_mock.called)
+        _, kwargs = run_mock.call_args
+        self.assertEqual(kwargs["log_config"], None)
+        self.assertEqual(kwargs["use_colors"], False)
 
 
 if __name__ == "__main__":

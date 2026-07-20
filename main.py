@@ -20,6 +20,7 @@ import shutil
 import requests
 import qrcode
 import time
+import uuid
 from pathlib import Path
 import fitz
 from typing import Dict, Any, Optional
@@ -388,8 +389,7 @@ def _get_default_printer_availability_state():
     printer_uuid = str(default_printer.get("printer_uuid") or "")
     ipp_uri = str(default_printer.get("ipp_uri") or "")
     try:
-        from printing.domain import ErrorCode, USER_MESSAGES
-        from printing.ipp_device import printer_fault, printer_snapshot
+        from printing.ipp_device import PrinterObservation, normalize_printer_runtime, printer_snapshot, printer_status_message
         from printing.ipp_protocol import IppClient
         from printing.service import DEVICE_JOBS
 
@@ -405,41 +405,33 @@ def _get_default_printer_availability_state():
                 "printer_id": printer_id,
                 "printer_name": printer_name,
             }
-        if DEVICE_JOBS.is_uncertain(printer_uuid):
+        snapshot = printer_snapshot(IppClient(ipp_uri, timeout=5.0))
+        runtime = normalize_printer_runtime(PrinterObservation(
+            snapshot=snapshot,
+            uncertain=DEVICE_JOBS.is_uncertain(printer_uuid),
+        ))
+        if runtime.printer_status not in {"idle", "printing"}:
+            message = printer_status_message(runtime.printer_status)
             return {
                 "available": False,
                 "faulted": True,
-                "error_code": "printer_unconfirmed",
-                "reason_code": ErrorCode.RESULT_UNCONFIRMED.value,
-                "reason_label": USER_MESSAGES[ErrorCode.RESULT_UNCONFIRMED],
-                "message": USER_MESSAGES[ErrorCode.RESULT_UNCONFIRMED],
+                "error_code": "printer_unconfirmed" if runtime.printer_status == "printer_unconfirmed_lock" else "printer_fault",
+                "reason_code": runtime.printer_status,
+                "reason_label": message,
+                "message": message,
                 "raw_reasons": [],
                 "printer_id": printer_id,
                 "printer_name": printer_name,
             }
-        snapshot = printer_snapshot(IppClient(ipp_uri, timeout=5.0))
-        error_code = printer_fault(snapshot, include_reports_and_alerts=True)
-        if error_code:
+        if runtime.printer_status == "printing":
             return {
                 "available": False,
-                "faulted": True,
-                "error_code": "printer_fault",
-                "reason_code": error_code.value,
-                "reason_label": USER_MESSAGES[error_code],
-                "message": USER_MESSAGES[error_code],
-                "raw_reasons": list(snapshot.get("printer-state-reasons", [])),
-                "printer_id": printer_id,
-                "printer_name": printer_name,
-            }
-        if not bool((snapshot.get("printer-is-accepting-jobs") or [False])[0]):
-            return {
-                "available": False,
-                "faulted": True,
-                "error_code": "printer_fault",
-                "reason_code": ErrorCode.PRINTER_USER_INTERVENTION.value,
-                "reason_label": USER_MESSAGES[ErrorCode.PRINTER_USER_INTERVENTION],
-                "message": USER_MESSAGES[ErrorCode.PRINTER_USER_INTERVENTION],
-                "raw_reasons": list(snapshot.get("printer-state-reasons", [])),
+                "faulted": False,
+                "error_code": "printer_busy",
+                "reason_code": "printer_busy",
+                "reason_label": "打印机正在处理任务",
+                "message": "打印机正在处理其他任务，请稍候。",
+                "raw_reasons": [],
                 "printer_id": printer_id,
                 "printer_name": printer_name,
             }
@@ -704,16 +696,45 @@ async def get_qr_code():
                 "printer_fault": availability,
             }
 
+        status_reporter = getattr(cloud_service, "status_reporter", None) if cloud_service else None
+        if not status_reporter:
+            return {
+                "success": False,
+                "standby": True,
+                "error_code": "status_sync_pending",
+                "message": "打印服务正在恢复，请稍候。",
+            }
+        status_synced = await asyncio.to_thread(
+            status_reporter.force_report_printer,
+            printer_id=cloud_printer_id,
+            printer_name=default_printer.get("name"),
+            wait=True,
+            timeout=8.0,
+        )
+        if not status_synced:
+            logger.warning("QR status synchronization did not complete printer_id=%s", cloud_printer_id)
+            return {
+                "success": False,
+                "standby": True,
+                "error_code": "status_sync_pending",
+                "message": "打印服务正在恢复，请稍候。",
+            }
+
         if not cloud_service or not cloud_service.websocket_client:
             return JSONResponse(status_code=503, content={"success": False, "message": "云端服务未连接"})
 
         # 创建一个 Future 用于等待上传凭证响应
         upload_token_future = asyncio.Future()
+        upload_token_request_id = str(uuid.uuid4())
+        upload_token_loop = asyncio.get_running_loop()
+
+        def resolve_upload_token(value):
+            if not upload_token_future.done():
+                upload_token_future.set_result(value)
 
         def upload_token_callback(token, expires_at, upload_url):
             """上传凭证成功回调"""
-            if not upload_token_future.done():
-                upload_token_future.set_result({
+            upload_token_loop.call_soon_threadsafe(resolve_upload_token, {
                     "success": True,
                     "token": token,
                     "expires_at": expires_at,
@@ -722,8 +743,7 @@ async def get_qr_code():
 
         def upload_token_error_callback(error_code, error_message):
             """上传凭证错误回调"""
-            if not upload_token_future.done():
-                upload_token_future.set_result({
+            upload_token_loop.call_soon_threadsafe(resolve_upload_token, {
                     "success": False,
                     "error_code": error_code,
                     "error_message": error_message
@@ -733,10 +753,22 @@ async def get_qr_code():
         if cloud_service.print_job_handler:
             cloud_service.print_job_handler.upload_token_callback = upload_token_callback
             cloud_service.print_job_handler.upload_token_error_callback = upload_token_error_callback
+            cloud_service.print_job_handler.upload_token_request_id = upload_token_request_id
 
         # 请求上传凭证
-        success = cloud_service.websocket_client.request_upload_token(node_id, cloud_printer_id)
+        success = cloud_service.websocket_client.request_upload_token(
+            node_id,
+            cloud_printer_id,
+            upload_token_request_id,
+        )
         if not success:
+            if (
+                cloud_service.print_job_handler
+                and cloud_service.print_job_handler.upload_token_request_id == upload_token_request_id
+            ):
+                cloud_service.print_job_handler.upload_token_callback = None
+                cloud_service.print_job_handler.upload_token_error_callback = None
+                cloud_service.print_job_handler.upload_token_request_id = None
             return JSONResponse(status_code=500, content={"success": False, "message": "请求上传凭证失败"})
 
         # 等待上传凭证响应（最多等待 10 秒）
@@ -747,9 +779,13 @@ async def get_qr_code():
             return JSONResponse(status_code=504, content={"success": False, "message": "获取上传凭证超时"})
         finally:
             # 清除回调
-            if cloud_service.print_job_handler:
+            if (
+                cloud_service.print_job_handler
+                and cloud_service.print_job_handler.upload_token_request_id == upload_token_request_id
+            ):
                 cloud_service.print_job_handler.upload_token_callback = None
                 cloud_service.print_job_handler.upload_token_error_callback = None
+                cloud_service.print_job_handler.upload_token_request_id = None
     
     # 检查是否是错误响应
     if not token_data.get("success"):

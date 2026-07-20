@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from .domain import ErrorCode, PrintError, PrintOptions
@@ -20,7 +20,7 @@ REQUIRED_OPERATIONS = {OP_PRINT_JOB, OP_CANCEL_JOB, OP_GET_JOB_ATTRIBUTES}
 PRINTER_ATTRIBUTES = [
     "printer-uuid", "printer-name", "printer-info", "printer-make-and-model",
     "printer-uri-supported", "printer-state", "printer-state-reasons", "printer-state-message",
-    "printer-is-accepting-jobs", "queued-job-count", "operations-supported",
+    "printer-is-accepting-jobs", "operations-supported",
     "document-format-supported", "ipp-versions-supported", "job-creation-attributes-supported",
     "copies-supported", "sides-supported", "print-color-mode-supported", "media-supported",
     "printer-resolution-supported", "printer-alert", "printer-alert-description",
@@ -47,17 +47,21 @@ FAULT_TOKENS = {
     "shutdown": ErrorCode.PRINTER_OFFLINE,
     "service-requested": ErrorCode.PRINTER_USER_INTERVENTION,
 }
-ALERT_FAULTS = {
-    "alltraysempty": ErrorCode.PRINTER_OUT_OF_PAPER,
-    "outofmedia": ErrorCode.PRINTER_OUT_OF_PAPER,
-    "inputmediasupplyempty": ErrorCode.PRINTER_OUT_OF_PAPER,
-    "mediajam": ErrorCode.PRINTER_JAMMED,
-    "markertonempty": ErrorCode.PRINTER_OUT_OF_TONER,
-    "markerinkempty": ErrorCode.PRINTER_OUT_OF_TONER,
-    "markersupplyempty": ErrorCode.PRINTER_OUT_OF_TONER,
-    "dooropen": ErrorCode.PRINTER_COVER_OPEN,
-    "coveropen": ErrorCode.PRINTER_COVER_OPEN,
-    "offline": ErrorCode.PRINTER_OFFLINE,
+PRINTER_STATUS_MESSAGES = {
+    "idle": "打印机可用。",
+    "printing": "打印机正在处理其他任务，请稍候。",
+    "printer_out_of_paper": "打印机缺纸，请联系工作人员补纸。",
+    "printer_out_of_toner": "打印机碳粉已用尽，请联系工作人员处理。",
+    "printer_jammed": "打印机发生卡纸，请联系工作人员处理。",
+    "printer_cover_open": "打印机机盖未关闭，请联系工作人员处理。",
+    "printer_offline": "打印机连接已断开，请联系工作人员。",
+    "printer_user_intervention": "打印机需要处理，请联系工作人员。",
+    "printer_other_fault": "打印机报告了需要处理的设备故障。",
+    "printer_unconfirmed_lock": "无法确认上次打印结果，请联系工作人员核对。",
+    "printer_stopped": "打印机已停止，请检查设备面板。",
+    "printer_state_unknown": "暂时无法确认打印机状态。",
+    "printer_not_accepting_jobs": "打印机当前拒绝接收新任务。",
+    "ipp_unreachable": "无法连接打印机，请检查设备电源和网络。",
 }
 
 
@@ -85,49 +89,82 @@ def map_reason_fault(reasons: list[str]) -> ErrorCode | None:
     return None
 
 
-def _alert_codes(snapshot: dict[str, Any]) -> list[str]:
-    result: list[str] = []
-    for raw_alert in snapshot.get("printer-alert", []):
-        match = re.search(r"(?:^|;)code=([^;]+)", str(raw_alert), flags=re.IGNORECASE)
-        if match:
-            result.append(match.group(1).strip())
-    result.extend(str(value).strip() for value in snapshot.get("printer-alert-description", []))
-    return [value for value in result if value]
-
-
-def map_alert_fault(snapshot: dict[str, Any]) -> ErrorCode | None:
-    for value in _alert_codes(snapshot):
-        code = ALERT_FAULTS.get(re.sub(r"[^a-z0-9]", "", value.casefold()))
-        if code:
-            return code
-    return None
-
-
-def printer_fault(snapshot: dict[str, Any], *, include_reports_and_alerts: bool) -> ErrorCode | None:
+def printer_fault(snapshot: dict[str, Any]) -> ErrorCode | None:
+    """Return only a current, blocking printer fault."""
     reasons = _clean(snapshot.get("printer-state-reasons", []))
-    if include_reports_and_alerts:
-        return map_reason_fault(reasons) or map_alert_fault(snapshot)
     error_reasons = [reason for reason in reasons if reason.endswith("-error")]
     return map_reason_fault(error_reasons)
 
 
 def active_job_fault(job: dict[str, Any], printer: dict[str, Any]) -> ErrorCode | None:
-    job_fault = map_reason_fault(_clean(job.get("job-state-reasons", [])))
+    job_state = int((job.get("job-state") or [0])[0] or 0)
+    job_reasons = _clean(job.get("job-state-reasons", []))
+    job_fault = map_reason_fault(
+        job_reasons if job_state == 6 else [reason for reason in job_reasons if reason.endswith("-error")]
+    )
     if job_fault:
         return job_fault
-    printer_error = printer_fault(printer, include_reports_and_alerts=False)
+    printer_error = printer_fault(printer)
     if printer_error:
         return printer_error
-    state = int((job.get("job-state") or [0])[0] or 0)
-    return ErrorCode.PRINTER_USER_INTERVENTION if state == 6 else None
+    return ErrorCode.PRINTER_USER_INTERVENTION if job_state == 6 else None
 
 
-def printer_status_text(snapshot: dict[str, Any]) -> str:
-    fault = printer_fault(snapshot, include_reports_and_alerts=True)
-    if fault:
-        return fault.value
+@dataclass(frozen=True)
+class PrinterObservation:
+    snapshot: dict[str, Any]
+    uncertain: bool = False
+    observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class PrinterRuntimeState:
+    printer_status: str
+    observed_at: datetime
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "printer_status": self.printer_status,
+            "source_observed_at": self.observed_at.isoformat(),
+        }
+
+
+def normalize_printer_runtime(observation: PrinterObservation) -> PrinterRuntimeState:
+    """Translate one IPP sample into the only Cloud/UI-facing printer status."""
+    snapshot = observation.snapshot
     state = int((snapshot.get("printer-state") or [0])[0] or 0)
-    return {3: "idle", 4: "processing", 5: "stopped"}.get(state, "unknown")
+    accepting = bool((snapshot.get("printer-is-accepting-jobs") or [False])[0])
+    reasons = _clean(snapshot.get("printer-state-reasons", []))
+    fault = printer_fault(snapshot)
+    if fault:
+        return PrinterRuntimeState(fault.value, observation.observed_at)
+
+    unknown_errors = [reason for reason in reasons if reason.endswith("-error")]
+    if unknown_errors:
+        return PrinterRuntimeState("printer_other_fault", observation.observed_at)
+
+    if observation.uncertain:
+        return PrinterRuntimeState("printer_unconfirmed_lock", observation.observed_at)
+
+    if state == 5:
+        return PrinterRuntimeState("printer_stopped", observation.observed_at)
+    if state not in {3, 4}:
+        return PrinterRuntimeState("printer_state_unknown", observation.observed_at)
+
+    if state == 4:
+        return PrinterRuntimeState("printing", observation.observed_at)
+
+    if not accepting:
+        return PrinterRuntimeState("printer_not_accepting_jobs", observation.observed_at)
+    return PrinterRuntimeState("idle", observation.observed_at)
+
+
+def printer_status_text(runtime: PrinterRuntimeState) -> str:
+    return runtime.printer_status
+
+
+def printer_status_message(status: str) -> str:
+    return PRINTER_STATUS_MESSAGES.get(status, "当前打印机暂不可用，请联系工作人员。")
 
 
 @dataclass(frozen=True)
@@ -148,10 +185,9 @@ class IppPrinterProbe:
             "make_model": self.make_model,
             "printer_uuid": self.printer_uuid,
             "ipp_uri": self.ipp_uri,
-            "location": self.ipp_uri,
             "compatible": self.compatible,
             "issues": list(self.issues),
-            "status": printer_status_text(self.snapshot),
+            "status": printer_status_text(normalize_printer_runtime(PrinterObservation(self.snapshot))),
             "capabilities": self.capabilities,
             "duplex_supported": self.capabilities.get("duplex_supported"),
             "color_supported": self.capabilities.get("color_supported"),

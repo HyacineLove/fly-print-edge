@@ -135,8 +135,8 @@ class CloudAPIClient:
         Args:
             printers: 打印机状态列表，每个元素包含:
                 - printer_id: 打印机ID
-                - status: 状态 (ready/printing/error/offline)
-                - queue_length: 队列长度
+                - printer_status: Edge归一化后的当前状态
+                - source_observed_at: IPP采样时间
         
         Returns:
             包含 updated, failed, errors 的响应

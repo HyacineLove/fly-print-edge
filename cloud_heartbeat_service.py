@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 import psutil
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 class HeartbeatService:
     """心跳服务 - 通过WebSocket发送心跳"""
     
-    def __init__(self, websocket_client, node_id: str, interval: int = 30, base_url: str = None):
+    def __init__(self, websocket_client, node_id: str, interval: int = 30, base_url: str = None, config_repo=None):
         """初始化心跳服务
         
         Args:
@@ -29,6 +30,7 @@ class HeartbeatService:
         self.node_id = node_id
         self.interval = interval
         self.base_url = base_url
+        self.config_repo = config_repo
         self.running = False
         self.thread = None
         self.last_heartbeat_time = 0
@@ -94,9 +96,10 @@ class HeartbeatService:
             
             # 收集系统状态信息
             system_info = self._collect_system_info()
+            components = self._collect_component_status()
             
             # 通过WebSocket发送心跳
-            result = self.websocket_client.send_heartbeat(self.node_id, system_info)
+            result = self.websocket_client.send_heartbeat(self.node_id, system_info, components)
             
             if result:
                 logger.debug("Heartbeat sent over websocket")
@@ -106,6 +109,22 @@ class HeartbeatService:
         except Exception:
             logger.exception("Heartbeat send failed")
             return False
+
+    def _collect_component_status(self) -> Dict[str, Any]:
+        settings = {}
+        if self.config_repo is not None:
+            try:
+                settings = self.config_repo.get_full_config().get("settings", {})
+            except Exception:
+                logger.exception("Collecting component configuration failed")
+        executable = str(settings.get("libreoffice_path") or "").strip()
+        available = bool(executable and Path(executable).is_file())
+        return {
+            "document_conversion": {
+                "status": "healthy" if available else "degraded",
+                "reason_code": None if available else "libreoffice_unavailable",
+            }
+        }
     
     def _collect_system_info(self) -> Dict[str, Any]:
         """收集系统信息，符合API文档格式

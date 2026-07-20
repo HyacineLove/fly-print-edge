@@ -73,6 +73,16 @@ class ConfigServiceTests(unittest.TestCase):
         errors = self.service.validate(changed)
         self.assertNotIn("settings.default_max_upscale must be a positive number", errors)
 
+    def test_validate_rejects_invalid_log_level(self):
+        changed = {
+            **self.raw_config,
+            "settings": {"log_level": "TRACE"},
+        }
+        errors = self.service.validate(changed)
+        self.assertIn(
+            "settings.log_level must be DEBUG, INFO, WARNING, or ERROR", errors
+        )
+
     def test_validate_rejects_copy_limit_range_with_max_less_than_min(self):
         changed = {
             **self.raw_config,
