@@ -1,4 +1,4 @@
-import { bindConfigActions, loadInitialAdminData } from "./modules/config-actions.js";
+import { bindConfigActions, loadInitialAdminData, pollCloudStatus } from "./modules/config-actions.js";
 import { bindPrinterActions } from "./modules/printer-actions.js";
 import { renderAdminApp } from "./modules/render-sections.js";
 import { createAdminState } from "./modules/state.js";
@@ -11,3 +11,9 @@ bindConfigActions(state, render, ensurePrintersLoaded);
 render();
 
 void loadInitialAdminData(state, render);
+
+const cloudStatusTimer = window.setInterval(() => {
+  void pollCloudStatus(state, render).catch(() => undefined);
+}, 5000);
+
+window.addEventListener("beforeunload", () => window.clearInterval(cloudStatusTimer));

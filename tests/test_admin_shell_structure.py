@@ -34,10 +34,46 @@ class AdminShellStructureTests(unittest.TestCase):
         self.assertIn('from "./modules/config-actions.js"', script)
         self.assertIn('from "./modules/printer-actions.js"', script)
 
+    def test_cloud_status_poll_does_not_rebuild_the_configuration_panel(self):
+        main_script = read_source("static/admin/main.js")
+        config_script = read_source("static/admin/modules/config-actions.js")
+        self.assertIn("pollCloudStatus", main_script)
+        self.assertNotIn("loadCloudStatus(state, render).catch", main_script)
+        poll_start = config_script.index("export async function pollCloudStatus")
+        poll_end = config_script.index("export async function loadStartupState", poll_start)
+        poll_block = config_script[poll_start:poll_end]
+        self.assertIn("renderAdminToolbar(state);", poll_block)
+        self.assertIn("wasActivated !== !!state.cloudStatus?.activated", poll_block)
+
     def test_runtime_section_contains_startup_toggle(self):
         render_script = read_source("static/admin/modules/render-sections.js")
         self.assertIn("runtime_autostart_enabled", render_script)
         self.assertIn("开机自启并自动打开用户页", render_script)
+        self.assertNotIn("network_bind_address", render_script)
+        self.assertNotIn("network_port", render_script)
+
+    def test_admin_navigation_and_sections_use_compact_labels_without_duplicate_titles(self):
+        html = read_source("static/admin/html/index.html")
+        render_script = read_source("static/admin/modules/render-sections.js")
+        css = read_source("static/admin/css/admin.css")
+        self.assertIn("飞印终端应用管理中心", html)
+        self.assertIn(">云端连接<", html)
+        self.assertIn(">打印设置<", html)
+        self.assertIn(">应用设置<", html)
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr));", css)
+        self.assertIn("grid-template-columns: minmax(0, 480px);", css)
+        self.assertIn("max-width: 480px;", css)
+        self.assertNotIn("<h2>云端配置</h2>", render_script)
+        self.assertNotIn("<h2>打印默认设置</h2>", render_script)
+        self.assertNotIn("<h2>运行设置</h2>", render_script)
+        self.assertNotIn("<h2>打印机管理</h2>", render_script)
+
+    def test_admin_save_payload_does_not_expose_network_configuration(self):
+        state_script = read_source("static/admin/modules/state.js")
+        payload_start = state_script.index("export function buildConfigPayloadFromConfig")
+        payload_end = state_script.index("export function buildConfigPayload(state)", payload_start)
+        payload_block = state_script[payload_start:payload_end]
+        self.assertNotIn("network:", payload_block)
 
     def test_admin_overlay_flows_do_not_duplicate_progress_toasts(self):
         config_script = read_source("static/admin/modules/config-actions.js")

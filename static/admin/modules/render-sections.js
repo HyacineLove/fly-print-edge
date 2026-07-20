@@ -30,11 +30,13 @@ function escapeHtml(value) {
 function updateToolbar(state) {
   const saveBtn = elements.configSaveBtn();
   if (saveBtn) {
+    saveBtn.style.display = state.cloudStatus?.activated ? "" : "none";
     saveBtn.disabled = state.saving || !state.config || !isDirty(state);
   }
 
   const checkBtn = elements.cloudCheckRegisterBtn();
   if (checkBtn) {
+    checkBtn.style.display = state.cloudStatus?.activated ? "none" : "";
     checkBtn.disabled = state.testingCloud || !state.config;
   }
 
@@ -69,8 +71,8 @@ function updateToolbar(state) {
     return;
   }
 
-  if (!status.configured) {
-    cloudStatusText.textContent = "云端状态: 配置不完整";
+  if (!status.activated) {
+    cloudStatusText.textContent = "云端状态: 等待激活";
     cloudStatusText.classList.add("status-warn");
     return;
   }
@@ -98,38 +100,22 @@ export function renderAdminToolbar(state) {
 function renderCloudSection(state) {
   const cfg = configModel(state).cloud;
   const nodeId = state.cloudStatus?.node_id || cfg.node_id || "-";
+  const activated = !!state.cloudStatus?.activated;
+
+  if (!activated) {
+    return `
+      <div class="config-grid config-grid--compact">
+        <div class="field"><label for="cloud_base_url">Cloud 地址</label><input id="cloud_base_url" data-section="cloud" data-key="base_url" placeholder="http://localhost:8012" value="${escapeHtml(cfg.base_url || "")}"></div>
+        <div class="field"><label for="cloud_activation_code">一次性激活码</label><input id="cloud_activation_code" autocomplete="one-time-code" placeholder="例如 ABCDEF-ABCDEF-ABCDEF"></div>
+      </div>`;
+  }
 
   return `
-    <div class="section-header">
-      <div>
-        <h2>云端配置</h2>
-        <p>先保存配置，再执行连接检查与节点注册。</p>
-      </div>
+    <div class="panel-actions">
+      <button id="cloudUnbindBtn" type="button" class="btn btn-danger">解除本机绑定</button>
     </div>
-    <div class="config-grid">
-      <div class="field">
-        <label for="cloud_base_url">云端地址</label>
-        <input id="cloud_base_url" data-section="cloud" data-key="base_url" value="${escapeHtml(cfg.base_url || "")}">
-      </div>
-      <div class="field">
-        <label for="cloud_auth_url">认证地址</label>
-        <input id="cloud_auth_url" data-section="cloud" data-key="auth_url" value="${escapeHtml(cfg.auth_url || "")}">
-      </div>
-      <div class="field">
-        <label for="cloud_client_id">客户端 ID</label>
-        <input id="cloud_client_id" data-section="cloud" data-key="client_id" value="${escapeHtml(cfg.client_id || "")}">
-      </div>
-      <div class="field">
-        <label for="cloud_client_secret">客户端密钥</label>
-        <input
-          id="cloud_client_secret"
-          type="password"
-          data-section="cloud"
-          data-key="client_secret"
-          value=""
-          placeholder="${cfg.client_secret_configured ? "已设置" : "未设置"}"
-        >
-      </div>
+    <div class="config-grid config-grid--compact">
+      <div class="field"><label>Cloud 地址</label><input value="${escapeHtml(cfg.base_url || "")}" disabled></div>
       <div class="field">
         <label for="cloud_node_name">节点名称</label>
         <input id="cloud_node_name" data-section="cloud" data-key="node_name" value="${escapeHtml(cfg.node_name || "")}">
@@ -160,13 +146,7 @@ function renderCloudSection(state) {
 function renderSettingsSection(state) {
   const cfg = configModel(state).settings;
   return `
-    <div class="section-header">
-      <div>
-        <h2>打印默认设置</h2>
-        <p>配置默认纸张、缩放和用户侧可选份数范围。</p>
-      </div>
-    </div>
-    <div class="config-grid">
+    <div class="config-grid config-grid--compact">
       <div class="field">
         <label for="settings_default_paper_size">默认纸张</label>
         <input id="settings_default_paper_size" data-section="settings" data-key="default_paper_size" value="${escapeHtml(cfg.default_paper_size || "A4")}">
@@ -202,28 +182,13 @@ function renderSettingsSection(state) {
 }
 
 function renderRuntimeSection(state) {
-  const cfg = configModel(state).network;
   const startupChecked = state.startupEnabled ? "checked" : "";
   const startupDisabled = state.startupLoading || state.startupSaving ? "disabled" : "";
   return `
-    <div class="section-header">
-      <div>
-        <h2>运行设置</h2>
-        <p>这些设置保存后可能需要重启 Edge 才会生效。</p>
-      </div>
-    </div>
-    <div class="config-grid">
-      <div class="field">
-        <label for="network_bind_address">监听地址</label>
-        <input id="network_bind_address" data-section="network" data-key="bind_address" value="${escapeHtml(cfg.bind_address || "127.0.0.1")}">
-      </div>
-      <div class="field">
-        <label for="network_port">监听端口</label>
-        <input id="network_port" type="number" min="1" max="65535" data-section="network" data-key="port" value="${escapeHtml(cfg.port || 7860)}">
-      </div>
-      <div class="field field-checkbox">
-        <label for="runtime_autostart_enabled">开机自启并自动打开用户页</label>
+    <div class="runtime-options">
+      <div class="field-checkbox">
         <input id="runtime_autostart_enabled" type="checkbox" ${startupChecked} ${startupDisabled}>
+        <label for="runtime_autostart_enabled">开机自启并自动打开用户页</label>
       </div>
     </div>
   `;
@@ -311,26 +276,17 @@ function renderDiscoveredTable(state) {
 
 function renderPrintersSection(state) {
   return `
-    <div class="section-header">
-      <div>
-        <h2>打印机管理</h2>
-        <p>发现并管理支持直接 PDF 打印和设备作业状态的 IPP 打印机。</p>
-      </div>
-    </div>
     <div class="table-toolbar">
       <button type="button" class="btn btn-primary" data-action="refresh-printers" ${state.printersRefreshing || state.ippProbing ? "disabled" : ""}>${state.printersRefreshing ? "正在发现并检测…" : "刷新 IPP 打印机"}</button>
     </div>
     <section class="admin-card">
       <div class="card-header"><h3>手动添加 IPP 打印机</h3></div>
-      <div class="config-grid">
+      <div class="compact-form-row">
         <div class="field">
           <label for="manualIppUri">完整 IPP URI</label>
           <input id="manualIppUri" value="${escapeHtml(state.ippProbeUri || "")}" placeholder="ipp://192.168.50.2:631/ipp/print" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>
         </div>
-        <div class="field">
-          <label>&nbsp;</label>
-          <button type="button" class="btn btn-primary" data-action="probe-ipp" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>${state.ippProbing ? "正在检测…" : "检测 IPP 打印机"}</button>
-        </div>
+        <button type="button" class="btn btn-primary" data-action="probe-ipp" ${state.ippProbing || state.printersRefreshing ? "disabled" : ""}>${state.ippProbing ? "正在检测…" : "检测 IPP 打印机"}</button>
       </div>
       ${state.ippProbeResult ? `
         <p class="muted">${escapeHtml(state.ippProbeResult.message || "检测完成")}</p>
@@ -387,6 +343,10 @@ function renderPanel(state) {
     return;
   }
 
+  if (!state.cloudStatus?.activated) {
+    panel.innerHTML = renderCloudSection(state);
+    return;
+  }
   switch (state.activeSection) {
     case "settings":
       panel.innerHTML = renderSettingsSection(state);
@@ -404,7 +364,10 @@ function renderPanel(state) {
 }
 
 function renderNav(state) {
-  elements.nav()?.querySelectorAll(".nav-item").forEach((item) => {
+  const nav = elements.nav();
+  nav?.classList.toggle("is-hidden", !state.cloudStatus?.activated);
+  nav?.querySelectorAll(".nav-item").forEach((item) => {
+    item.style.display = state.cloudStatus?.activated ? "" : "none";
     item.classList.toggle("is-active", item.dataset.section === state.activeSection);
   });
 }

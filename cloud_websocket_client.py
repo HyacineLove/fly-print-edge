@@ -19,6 +19,7 @@ from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
 from file_manager import get_file_manager, is_valid_content_hash
 from print_options import normalize_print_options
+from job_inbox import JobInbox
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ _CLOUD_OPERATIONAL_ERROR_CODES = {
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
     
-    def __init__(self, websocket_url: str, auth_client: CloudAuthClient, node_missing_handler: Optional[Callable[[str], None]] = None):
+    def __init__(self, websocket_url: str, auth_client: CloudAuthClient, node_missing_handler: Optional[Callable[[str], None]] = None, inbox_path: Optional[str] = None):
         self.websocket_url = websocket_url
         self.auth_client = auth_client
         self.node_missing_handler = node_missing_handler
@@ -48,8 +49,9 @@ class CloudWebSocketClient:
         self.last_error_message = None
         self.node_missing = False
         self.reconnect_interval = 5  # 重连间隔秒数
+        self.job_inbox = JobInbox(inbox_path) if inbox_path else None
         
-        # 任务去重缓存：记录已完成的任务ID及完成时间戳
+        # 仅作运行期加速；跨重启去重以 SQLite 收件箱为准。
         self.completed_jobs = {}  # {job_id: completion_timestamp}
         self.processing_jobs = {}  # {job_id: start_timestamp}
         self.completed_jobs_ttl = 3600  # 缓存保留1小时
@@ -184,6 +186,8 @@ class CloudWebSocketClient:
         with self._job_tracking_lock:
             self.processing_jobs.pop(job_id, None)
             self.completed_jobs[job_id] = time.time()
+        if self.job_inbox:
+            self.job_inbox.mark_terminal(job_id, "completed")
         logger.debug(f"任务已标记为完成: {job_id} (缓存中共 {len(self.completed_jobs)} 个)")
     
     def _is_job_completed(self, job_id: str) -> bool:
@@ -209,6 +213,34 @@ class CloudWebSocketClient:
             return
         with self._job_tracking_lock:
             self.processing_jobs.pop(job_id, None)
+
+    def mark_job_terminal(self, job_id: str, status: str):
+        if self.job_inbox and job_id:
+            self.job_inbox.mark_terminal(job_id, status)
+
+    async def _ack(self, data: Dict[str, Any]) -> None:
+        if "msg_id" not in data:
+            return
+        from datetime import datetime, timezone
+        await self._send_message({
+            "type": "ack", "msg_id": data["msg_id"], "command_id": data.get("command_id"),
+            "timestamp": datetime.now(timezone.utc).isoformat(), "status": "accepted", "message": "Received",
+        })
+
+    async def _recover_inbox_jobs(self) -> None:
+        if not self.job_inbox:
+            return
+        received, interrupted = self.job_inbox.recovery()
+        for job_id in interrupted:
+            self.job_inbox.mark_terminal(job_id, "unconfirmed")
+            await self._send_message({"type": "job_update", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "data": {"job_id": job_id, "status": "unconfirmed", "error_code": "edge_restart_result_unknown", "error_message": "Edge 重启后无法确认 IPP 结果，任务不会自动重打"}})
+        loop = asyncio.get_running_loop()
+        for payload in received:
+            job_id = str((payload.get("data") or {}).get("job_id") or "")
+            if not job_id or not self.job_inbox.mark_processing(job_id):
+                continue
+            for handler in self.message_handlers.get("print_job", []):
+                await loop.run_in_executor(None, handler, payload)
 
     def _run_async_loop(self):
         """在单独线程中运行异步循环"""
@@ -255,6 +287,7 @@ class CloudWebSocketClient:
                     self.last_error_message = None
                     self.node_missing = False
                     logger.info("WebSocket连接成功")
+                    await self._recover_inbox_jobs()
                     
                     # 监听消息
                     async for message in websocket:
@@ -289,20 +322,20 @@ class CloudWebSocketClient:
             data = json.loads(message)
             message_type = data.get("type", "unknown")
             
-            # 自动回复 ACK (如果消息包含 msg_id)
-            if "msg_id" in data:
-                from datetime import datetime, timezone
-                ack_payload = {
-                    "type": "ack",
-                    "msg_id": data["msg_id"],
-                    "command_id": data.get("command_id"),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": "accepted",
-                    "message": "Received"
-                }
-                # 不阻塞后续处理，直接发送
-                await self._send_message(ack_payload)
-                # logger.debug(f"已自动回复 ACK: {data['msg_id']}")
+            if message_type == "print_job" and self.job_inbox:
+                job_id = str((data.get("data") or {}).get("job_id") or data.get("command_id") or "")
+                if not job_id:
+                    logger.warning("Rejecting print job without job_id")
+                    return
+                first_delivery, current_state = self.job_inbox.receive(job_id, str(data.get("msg_id") or ""), data)
+                await self._ack(data)
+                if not first_delivery:
+                    logger.info("Duplicate print delivery acknowledged without reprinting: job_id=%s state=%s", job_id, current_state)
+                    return
+                if not self.job_inbox.mark_processing(job_id):
+                    return
+            else:
+                await self._ack(data)
 
             if message_type == "preview_file":
                 logger.debug("收到预览文件消息")
@@ -472,6 +505,23 @@ class CloudWebSocketClient:
         }
         return self.send_message_sync(message)
 
+    def report_terminal_session_state(self, node_id: str, session: Optional[Dict[str, Any]]) -> bool:
+        """Report the current kiosk session; passing None explicitly clears it."""
+        from datetime import datetime, timezone
+        session = session or {}
+        message = {
+            "type": "terminal_session_state",
+            "node_id": node_id,
+            "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "data": {
+                "terminal_session_id": session.get("session_id") or "",
+                "terminal_ticket_hash": session.get("terminal_ticket_hash") or "",
+                "entry_type": session.get("entry_type") or "",
+                "integration_request_id": session.get("integration_request_id") or "",
+            },
+        }
+        return self.send_message_sync(message)
+
 
 class PrintJobHandler:
     """打印任务处理器"""
@@ -497,6 +547,7 @@ class PrintJobHandler:
         self.upload_token_error_callback = None  # 上传凭证错误回调
         self.upload_token_request_id = None
         self.last_upload_token = None  # 缓存最近的上传凭证
+        self.job_terminal_contexts: Dict[str, Dict[str, Any]] = {}
     
     def handle_error_message(self, message: Dict[str, Any]):
         """处理云端错误响应
@@ -653,6 +704,11 @@ class PrintJobHandler:
             if not all([job_id, printer_name, file_url]):
                 logger.warning("打印任务参数不完整")
                 return
+            terminal_context = {
+                key: data.get(key)
+                for key in ("terminal_session_id", "terminal_ticket_hash", "integration_request_id")
+                if data.get(key)
+            }
             if not is_valid_content_hash(content_hash):
                 logger.warning("打印任务缺少有效 content_hash: job_id=%s", job_id)
                 self._report_job_failure(job_id, "content_hash missing or invalid")
@@ -661,7 +717,7 @@ class PrintJobHandler:
             interactive_options = None
             try:
                 if callable(self.interactive_job_binder):
-                    bound_context = self.interactive_job_binder(file_url, job_id)
+                    bound_context = self.interactive_job_binder(file_url, job_id, data)
                     if isinstance(bound_context, dict):
                         bound_session_id = bound_context.get("session_id")
                         interactive_options = bound_context.get("print_options")
@@ -669,8 +725,13 @@ class PrintJobHandler:
                         bound_session_id = bound_context
                     if bound_session_id:
                         logger.debug(f"已将云端任务绑定到当前交互会话: {bound_session_id}")
+                    elif data.get("terminal_ticket_hash"):
+                        logger.warning("拒绝未绑定到当前终端会话的集成任务: %s", job_id)
+                        return
             except Exception as bind_error:
                 logger.warning(f"绑定交互会话失败: {bind_error}")
+            if terminal_context:
+                self.job_terminal_contexts[job_id] = terminal_context
             
             # 【去重检查】如果任务已经完成过，直接上报成功，不重复打印
             if self.websocket_client and hasattr(self.websocket_client, "_begin_job_processing"):
@@ -1015,6 +1076,7 @@ class PrintJobHandler:
                     "error_message": None,
                     "message": message_text
                 }
+                cloud_job_data.update(self.job_terminal_contexts.get(job_id, {}))
                 local_job_data = {
                     **cloud_job_data,
                     "status": status,
@@ -1064,6 +1126,7 @@ class PrintJobHandler:
                     "error_message": None,
                     "message": "打印任务已完成" # 前端可能需要这个字段
                 }
+                job_data.update(self.job_terminal_contexts.pop(job_id, {}))
                 
                 message = {
                     "type": "job_update",
@@ -1126,6 +1189,7 @@ class PrintJobHandler:
                     "error_code": cloud_error_code,
                     "message": error_message
                 }
+                job_data.update(self.job_terminal_contexts.pop(job_id, {}))
                 local_job_data = dict(job_data)
                 local_job_data["progress"] = 0
                 if local_extra:
@@ -1157,6 +1221,7 @@ class PrintJobHandler:
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
                     if hasattr(self.websocket_client, "_finish_job_processing"):
                         self.websocket_client._finish_job_processing(job_id)
+                    self.websocket_client.mark_job_terminal(job_id, cloud_status)
                     logger.debug(f"任务失败状态已分发到本地处理器 (SSE)")
 
             except Exception as e:

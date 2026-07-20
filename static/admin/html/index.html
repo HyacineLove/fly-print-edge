@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fly Print Edge 管理中心</title>
+  <title>飞印终端应用管理中心</title>
   <link rel="stylesheet" href="/static/admin/css/admin.css">
 </head>
 <body>
@@ -18,12 +18,11 @@
   <main class="admin-shell">
     <header class="admin-header">
       <div>
-        <h1>Fly Print Edge 管理中心</h1>
-        <p>统一管理云端配置、打印设置、运行参数与打印机。</p>
+        <h1>飞印终端应用管理中心</h1>
       </div>
       <div class="header-actions">
         <button id="configSaveBtn" type="button" class="btn btn-primary">保存配置</button>
-        <button id="cloudCheckRegisterBtn" type="button" class="btn">检测连接并注册节点</button>
+        <button id="cloudCheckRegisterBtn" type="button" class="btn">激活终端</button>
       </div>
     </header>
 
@@ -35,9 +34,9 @@
 
     <section class="admin-layout">
       <nav class="admin-nav">
-        <button type="button" class="nav-item is-active" data-section="cloud">云端配置</button>
-        <button type="button" class="nav-item" data-section="settings">打印默认设置</button>
-        <button type="button" class="nav-item" data-section="runtime">运行设置</button>
+        <button type="button" class="nav-item is-active" data-section="cloud">云端连接</button>
+        <button type="button" class="nav-item" data-section="settings">打印设置</button>
+        <button type="button" class="nav-item" data-section="runtime">应用设置</button>
         <button type="button" class="nav-item" data-section="printers">打印机管理</button>
       </nav>
 

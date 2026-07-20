@@ -114,6 +114,30 @@ class LauncherHelpersTests(unittest.TestCase):
             launcher.ACTION_OPEN_ADMIN,
         )
 
+    def test_unactivated_terminal_opens_admin_even_for_default_user_action(self):
+        self.assertEqual(
+            launcher.resolve_page_mode(launcher.ACTION_OPEN_USER, {"cloud": {}}),
+            "admin",
+        )
+
+    def test_activated_terminal_opens_user_page(self):
+        self.assertEqual(
+            launcher.resolve_page_mode(
+                launcher.ACTION_OPEN_USER,
+                {"cloud": {"node_id": "node-1", "credential_blob": "dpapi-protected"}},
+            ),
+            "user",
+        )
+
+    def test_explicit_admin_action_always_opens_admin(self):
+        self.assertEqual(
+            launcher.resolve_page_mode(
+                launcher.ACTION_OPEN_ADMIN,
+                {"cloud": {"node_id": "node-1", "credential_blob": "dpapi-protected"}},
+            ),
+            "admin",
+        )
+
     def test_runtime_profile_matches_only_flyprint_edge_processes(self):
         runtime_dir = Path(r"C:\FlyPrint Edge\runtime")
         self.assertTrue(

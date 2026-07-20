@@ -22,40 +22,6 @@ class CloudAPIClient:
         self.node_id = None  # 注册后获得
         self.edge_info = EdgeNodeInfo()
     
-    def register_edge_node(self, node_name: str = None, location: str = None) -> Dict[str, Any]:
-        """注册边缘节点"""
-        try:
-            if node_name:
-                self.edge_info.node_name = node_name
-            if location:
-                self.edge_info.location = location
-            
-            url = f"{self.base_url}/api/v1/edge/register"
-            headers = self.auth_client.get_auth_headers()
-            data = self.edge_info.get_edge_node_data()
-            
-            logger.debug("Registering edge node: url=%s payload_keys=%s", url, sorted(data.keys()))
-            
-            response = requests.post(url, json=data, headers=headers, timeout=10)
-            
-            if response.status_code == 200 or response.status_code == 201:
-                result = response.json()
-                # 按照后端接口定义，node_id在data.id字段中
-                self.node_id = result['data']['id']
-                logger.info("Edge node registered: node_id=%s", self.node_id)
-                return {"success": True, "node_id": self.node_id, "data": result}
-            else:
-                logger.warning(
-                    "Edge node registration failed: status=%s body=%s",
-                    response.status_code,
-                    response.text,
-                )
-                return {"success": False, "error": response.text}
-                
-        except Exception as e:
-            logger.exception("Edge node registration failed")
-            return {"success": False, "error": str(e)}
-    
     def register_printers(self, printers: List[Dict[str, Any]]) -> Dict[str, Any]:
         """注册打印机到云端（逐个注册）"""
         if not self.node_id:
@@ -182,13 +148,56 @@ class CloudAPIClient:
         except Exception as e:
             logger.exception("Batch printer status update failed")
             return {"success": False, "error": str(e)}
+
+    def update_self_profile(self, node_name: str = None, location: str = None) -> Dict[str, Any]:
+        """Report Edge-owned installation facts after Cloud activation."""
+        try:
+            if node_name:
+                self.edge_info.node_name = node_name
+            if location:
+                self.edge_info.location = location
+            payload = self.edge_info.get_edge_node_data()
+            payload.pop("node_id", None)
+            response = requests.put(
+                f"{self.base_url}/api/v1/edge/self/profile",
+                json=payload,
+                headers=self.auth_client.get_auth_headers(),
+                timeout=10,
+            )
+            if response.status_code == 200:
+                return {"success": True, "data": response.json().get("data", {})}
+            return {"success": False, "error": response.text}
+        except Exception as exc:
+            logger.exception("Edge profile report failed")
+            return {"success": False, "error": str(exc)}
+
+    def issue_terminal_ticket(self, printer_id: str, terminal_session_id: str) -> Dict[str, Any]:
+        """Ask Cloud to bind one short-lived entry ticket to this Edge node."""
+        if not printer_id or not terminal_session_id:
+            return {"success": False, "error": "printer_id and terminal_session_id are required"}
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/edge/self/terminal-tickets",
+                json={"printer_id": printer_id, "terminal_session_id": terminal_session_id},
+                headers=self.auth_client.get_auth_headers(),
+                timeout=10,
+            )
+            if response.status_code in (200, 201):
+                data = response.json()
+                # Never log the response: it contains the one-time opaque ticket.
+                return {"success": True, **data}
+            logger.warning("Terminal ticket request failed: status=%s", response.status_code)
+            return {"success": False, "error": "cloud rejected terminal ticket"}
+        except Exception as exc:
+            logger.exception("Terminal ticket request failed")
+            return {"success": False, "error": str(exc)}
     
     def get_websocket_url(self) -> str:
         """获取WebSocket连接URL"""
         if not self.node_id:
             return None
         
-        # 将HTTP(S)协议转换为WS(S)协议
-        ws_base = self.base_url.replace('http://', 'ws://').replace('https://', 'wss://')
+        # 本部署仅使用 HTTP，因此 WebSocket 固定使用 ws://。
+        ws_base = self.base_url.replace('http://', 'ws://', 1)
         return f"{ws_base}/api/v1/edge/ws?node_id={self.node_id}"
 

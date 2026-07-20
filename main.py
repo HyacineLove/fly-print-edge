@@ -72,6 +72,13 @@ node_id: Optional[str] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 preview_cache: Dict[str, Dict[str, Any]] = {}
 interactive_session_manager = InteractiveSessionManager()
+
+
+def _report_terminal_session_state(session: Optional[Dict[str, Any]] = None) -> None:
+    """Best-effort state synchronization; Cloud remains authoritative for dispatch."""
+    if not node_id or not cloud_service or not cloud_service.websocket_client:
+        return
+    cloud_service.websocket_client.report_terminal_session_state(node_id, session)
 qr_code_request_lock: Optional[asyncio.Lock] = None
 config_service: Optional[ConfigService] = None
 printer_test_tasks: Dict[str, Dict[str, Any]] = {}
@@ -169,6 +176,9 @@ async def startup_event():
     if start_result.get("success"):
         node_id = start_result.get("node_id")
         logger.info(f" Cloud service startup result: {start_result.get('message')}, node_id={node_id}")
+        # Sessions are intentionally memory-only on Edge. A restart must make
+        # Cloud hold any ticket-bound work instead of dispatching it blindly.
+        _report_terminal_session_state(None)
     else:
         logger.warning(f" Cloud service startup skipped: {start_result.get('message')}")
 
@@ -229,9 +239,14 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
 
     return message
 
-def bind_interactive_cloud_job(file_url: Optional[str], job_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def bind_interactive_cloud_job(file_url: Optional[str], job_id: Optional[str], context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     if not file_url or not job_id:
         return None
+    if context and context.get("terminal_ticket_hash"):
+        if not interactive_session_manager.bind_integration_request(context):
+            logger.warning("拒绝终端会话不匹配的集成打印任务: job_id=%s", job_id)
+            return None
+        _report_terminal_session_state(interactive_session_manager.get_active_session())
     bound = interactive_session_manager.attach_cloud_job(file_url, job_id)
     if not bound:
         return None
@@ -269,6 +284,7 @@ def handle_cloud_message(data: Dict[str, Any]):
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info(" Edge Server 正在停止...")
+    _report_terminal_session_state(None)
     
     # 停止文件管理器
     file_mgr = get_file_manager()
@@ -473,23 +489,6 @@ def _get_config_service() -> ConfigService:
         raise RuntimeError("设备未就绪")
     config_service = ConfigService(printer_manager.config)
     return config_service
-
-async def _wait_for_cloud_connected(timeout_seconds: float = 5.0, interval_seconds: float = 0.2) -> bool:
-    if not cloud_service:
-        return False
-
-    elapsed = 0.0
-    while elapsed < timeout_seconds:
-        status = cloud_service.get_status()
-        websocket = status.get("websocket") or {}
-        if status.get("registered") and websocket.get("connected"):
-            return True
-        await asyncio.sleep(interval_seconds)
-        elapsed += interval_seconds
-
-    status = cloud_service.get_status()
-    websocket = status.get("websocket") or {}
-    return bool(status.get("registered") and websocket.get("connected"))
 
 def _resolve_path(path_value: Optional[str]):
     if not path_value:
@@ -860,6 +859,7 @@ async def get_qr_code():
         upload_url = f"{upload_base}{path}"
 
     session = interactive_session_manager.start_session(upload_token=token_data["token"])
+    _report_terminal_session_state(session)
     qr_img_url = build_qr_data_url(upload_url)
 
     default_printer_capabilities = None
@@ -882,6 +882,46 @@ async def get_qr_code():
         },
         "session_id": session["session_id"],
     }
+
+@app.get("/api/integration/terminal-ticket")
+async def get_terminal_ticket_qr():
+    """Return the single Cloud entry QR for the kiosk's default printer."""
+    if not node_id or not printer_manager or not cloud_service or not cloud_service.api_client:
+        return JSONResponse(status_code=503, content={"success": False, "error_code": "service_not_ready"})
+    default_printer_id = _ensure_default_printer()
+    default_printer = _get_printer_by_id(default_printer_id) if default_printer_id else None
+    cloud_printer_id = _get_cloud_printer_id(default_printer)
+    if not cloud_printer_id:
+        return {"success": False, "standby": True, "error_code": "printer_cloud_registration_incomplete"}
+    availability = await asyncio.to_thread(_get_default_printer_availability_state)
+    if availability.get("faulted"):
+        return {"success": False, "standby": True, "error_code": "printer_fault", "printer_fault": availability}
+
+    session = interactive_session_manager.start_session(entry_type="entry")
+    _report_terminal_session_state(session)
+    result = await asyncio.to_thread(
+        cloud_service.api_client.issue_terminal_ticket,
+        cloud_printer_id,
+        session["session_id"],
+    )
+    entry_url = str(result.get("entry_url") or "")
+    raw_ticket = str(result.get("terminal_ticket") or "")
+    if not result.get("success") or not entry_url or not raw_ticket:
+        interactive_session_manager.clear_session(session["session_id"])
+        return JSONResponse(status_code=503, content={"success": False, "error_code": "terminal_ticket_unavailable"})
+    # Raw ticket is held only long enough to hash it; never expose it through
+    # local APIs, SSE, or logs.
+    if not interactive_session_manager.bind_terminal_ticket(session["session_id"], raw_ticket):
+        return JSONResponse(status_code=409, content={"success": False, "error_code": "terminal_session_replaced"})
+    _report_terminal_session_state(interactive_session_manager.get_active_session())
+    return {
+        "success": True,
+        "qr_url": build_qr_data_url(entry_url),
+        "text_url": entry_url,
+        "expires_at": result.get("expires_at"),
+        "session_id": session["session_id"],
+    }
+
 
 @app.get("/api/events")
 async def events(request: Request):
@@ -1137,6 +1177,8 @@ async def cleanup_preview_file(request: Request):
             return JSONResponse(status_code=400, content={"success": False, "message": "file_id 或 session_id 不能为空"})
         if session_id and not interactive_session_manager.clear_session(session_id):
             return JSONResponse(status_code=409, content={"success": False, "message": "当前会话已失效，请重新扫码"})
+        if session_id:
+            _report_terminal_session_state(None)
         
         # 通过文件管理器清理
         if file_id:
@@ -1149,35 +1191,6 @@ async def cleanup_preview_file(request: Request):
     except Exception as e:
         logger.error(f"清理文件失败: {e}")
         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
-
-@admin_router.post("/node/reregister")
-async def reregister_node():
-    global cloud_service, node_id
-    if not printer_manager:
-        return {"success": False, "message": "设备未就绪"}
-    if not cloud_service:
-        return {"success": False, "message": "云端服务不可用"}
-    try:
-        cloud_cfg = printer_manager.config.config.get("cloud", {})
-        cloud_cfg.pop("node_id", None)
-        printer_manager.config.save_config()
-
-        result = cloud_service.reconfigure(cloud_cfg, preserve_node_id=False)
-        if result.get("success"):
-            result = cloud_service.ensure_registered(force_reregister=True)
-        if not result.get("success"):
-            return {"success": False, "message": result.get("message") or "节点重新注册失败"}
-
-        node_id = result.get("node_id")
-        await broadcast_sse_event("node_status_changed", {
-            "status": "registered",
-            "node_id": node_id,
-        })
-        return {"success": True, "message": "节点已重新注册", "node_id": node_id}
-    except Exception as e:
-        logger.error(f"node reregister failed: {e}")
-        return {"success": False, "message": str(e)}
-
 
 @admin_router.get("/config")
 async def get_admin_config():
@@ -1215,104 +1228,37 @@ async def save_admin_config(request: Request):
         return JSONResponse(status_code=500, content={"success": False, "saved": False, "errors": [str(e)]})
 
 
-@admin_router.post("/cloud/check-register")
-@admin_router.post("/config/test-cloud")
-async def check_cloud_and_register_node(request: Request):
+@admin_router.post("/cloud/activate")
+async def activate_cloud_node(request: Request):
+    """The only initial Cloud onboarding endpoint for an unactivated Edge."""
     global node_id
+    if not cloud_service:
+        return JSONResponse(status_code=503, content={"success": False, "message": "云端服务不可用"})
     body = await request.json()
-    try:
-        service = _get_config_service()
-        if not printer_manager or not cloud_service:
-            return JSONResponse(status_code=503, content={"success": False, "message": "\u670d\u52a1\u4e0d\u53ef\u7528"})
+    result = await asyncio.to_thread(
+        cloud_service.activate,
+        str(body.get("base_url") or ""),
+        str(body.get("activation_code") or ""),
+    )
+    if not result.get("success"):
+        return JSONResponse(status_code=400, content=result)
+    node_id = result.get("node_id")
+    await broadcast_sse_event("node_status_changed", {"status": "registered", "node_id": node_id})
+    return {"success": True, "message": "终端已激活并连接 Cloud", "node_id": node_id}
 
-        current = printer_manager.config.get_full_config()
-        merged = service.merge_update(current, body)
-        errors = service.validate(merged)
-        if errors:
-            return JSONResponse(status_code=400, content={"success": False, "message": "; ".join(errors), "errors": errors})
 
-        preflight = service.test_cloud_connection({"cloud": merged.get("cloud", {})})
-        if not preflight.get("success"):
-            return JSONResponse(status_code=400, content=preflight)
-
-        had_local_node_id = bool((current.get("cloud") or {}).get("node_id") or cloud_service.node_id)
-        stale_node = bool(getattr(cloud_service, "has_stale_node_registration", lambda: False)())
-        should_register = not had_local_node_id or stale_node
-
-        if should_register:
-            merged.setdefault("cloud", {}).pop("node_id", None)
-
-        printer_manager.config.replace_full_config(merged)
-        reconfigure_result = cloud_service.reconfigure(
-            merged.get("cloud", {}),
-            preserve_node_id=not should_register,
-        )
-        if not reconfigure_result.get("success"):
-            return JSONResponse(status_code=400, content=reconfigure_result)
-
-        if should_register:
-            ensure_result = cloud_service.ensure_registered(force_reregister=False)
-            if not ensure_result.get("success"):
-                return JSONResponse(status_code=400, content=ensure_result)
-            result_payload = ensure_result
-        else:
-            result_payload = {
-                "success": True,
-                "node_id": cloud_service.node_id,
-                "registered": bool(cloud_service.node_id),
-                "connected": bool(reconfigure_result.get("connected")),
-            }
-
-        connected = await _wait_for_cloud_connected()
-        if not connected and getattr(cloud_service, "has_stale_node_registration", lambda: False)():
-            repaired = printer_manager.config.get_full_config()
-            repaired.setdefault("cloud", {}).pop("node_id", None)
-            printer_manager.config.replace_full_config(repaired)
-
-            reconfigure_result = cloud_service.reconfigure(repaired.get("cloud", {}), preserve_node_id=False)
-            if not reconfigure_result.get("success"):
-                return JSONResponse(status_code=400, content=reconfigure_result)
-
-            ensure_result = cloud_service.ensure_registered(force_reregister=False)
-            if not ensure_result.get("success"):
-                return JSONResponse(status_code=400, content=ensure_result)
-            result_payload = ensure_result
-            should_register = True
-            connected = await _wait_for_cloud_connected()
-
-        if not connected:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "message": "\u8282\u70b9\u5df2\u6ce8\u518c\uff0c\u4f46\u4e91\u7aef\u8fde\u63a5\u5c1a\u672a\u5efa\u7acb",
-                    "node_id": cloud_service.node_id,
-                    "registered": True,
-                    "connected": False,
-                },
-            )
-
-        node_id = cloud_service.node_id
-        if should_register and node_id:
-            await broadcast_sse_event("node_status_changed", {
-                "status": "registered",
-                "node_id": node_id,
-            })
-
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "message": "\u4e91\u7aef\u8fde\u63a5\u6b63\u5e38\uff0c\u8282\u70b9\u5df2\u8fde\u63a5",
-                "node_id": node_id,
-                "registered": result_payload.get("registered", False),
-                "connected": True,
-                "saved": True,
-            },
-        )
-    except Exception as e:
-        logger.error(f"check/register cloud failed: {e}")
-        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+@admin_router.post("/cloud/unbind")
+async def unbind_cloud_node():
+    """Make the local device return to the activation screen."""
+    global node_id
+    if not cloud_service:
+        return JSONResponse(status_code=503, content={"success": False, "message": "云端服务不可用"})
+    result = await asyncio.to_thread(cloud_service.unbind)
+    if not result.get("success"):
+        return JSONResponse(status_code=400, content=result)
+    node_id = None
+    await broadcast_sse_event("node_status_changed", {"status": "unbound", "node_id": None})
+    return result
 
 
 @admin_router.get("/cloud/status")
@@ -1325,7 +1271,8 @@ async def get_cloud_status():
             "connected": False,
             "node_id": None,
             "message": "\u4e91\u7aef\u670d\u52a1\u4e0d\u53ef\u7528",
-            "missing_fields": ["base_url", "auth_url", "client_id", "client_secret"],
+            "missing_fields": ["base_url", "credential_blob"],
+            "activated": False,
         }
     try:
         status = cloud_service.get_status()
@@ -1349,6 +1296,7 @@ async def get_cloud_status():
             "node_id": status.get("node_id"),
             "message": message,
             "missing_fields": status.get("missing_fields", []),
+            "activated": bool(status.get("node_id") and (printer_manager.config.config.get("cloud", {}).get("credential_blob") if printer_manager else "")),
         }
     except Exception as e:
         logger.error(f"get cloud status failed: {e}")

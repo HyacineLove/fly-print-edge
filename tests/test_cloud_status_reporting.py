@@ -13,9 +13,13 @@ class _FakeWebSocket:
 
     def send_message_sync(self, message):
         self.cloud_messages.append(message)
+        return True
 
     def dispatch_local_message(self, message_type, message):
         self.local_messages.append((message_type, message))
+
+    def mark_job_terminal(self, job_id, status):
+        return None
 
 
 class _FakeApiClient:
@@ -24,10 +28,7 @@ class _FakeApiClient:
 
 class PrintJobStatusReportingTests(unittest.TestCase):
     def make_handler(self):
-        handler = PrintJobHandler.__new__(PrintJobHandler)
-        handler.api_client = _FakeApiClient()
-        handler.websocket_client = _FakeWebSocket()
-        return handler
+        return PrintJobHandler(None, _FakeApiClient(), _FakeWebSocket())
 
     def test_page_counts_are_local_only_while_cloud_receives_status(self):
         handler = self.make_handler()

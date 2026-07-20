@@ -6,7 +6,7 @@
 #define MyLauncherExeName "flyprint-launcher.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.22"
+  #define MyAppVersion "1.0.31"
 #endif
 
 [Setup]
@@ -68,6 +68,9 @@ Filename: "{app}\{#MyLauncherExeName}"; Parameters: "--exit"; WorkingDir: "{app}
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyLauncherExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [UninstallDelete]
+Type: files; Name: "{app}\runtime\edge_job_inbox.sqlite3"
+Type: files; Name: "{app}\runtime\edge_job_inbox.sqlite3-wal"
+Type: files; Name: "{app}\runtime\edge_job_inbox.sqlite3-shm"
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\temp"

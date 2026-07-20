@@ -51,6 +51,15 @@ class PrinterConfig:
                 if "cloud" in config:
                     config["cloud"].pop("enabled", None)
                     config["cloud"].pop("auto_register", None)
+                    # Credentials are no longer accepted from or written to
+                    # config.json. Activation stores the device-only bundle in
+                    # a Windows DPAPI ciphertext instead.
+                    for key in ("auth_url", "client_id", "client_secret"):
+                        if key in config["cloud"]:
+                            config["cloud"].pop(key, None)
+                            config_updated = True
+                    config["cloud"].setdefault("credential_blob", "")
+                    config["cloud"].setdefault("profile_pending", False)
 
                 # (已移除环境变量读取逻辑，完全依赖 config.json)
                 
@@ -104,9 +113,8 @@ class PrinterConfig:
                 },
                 "cloud": {
                     "base_url": "",
-                    "auth_url": "",
-                    "client_id": "fly-print-edge",
-                    "client_secret": "",
+                    "credential_blob": "",
+                    "profile_pending": False,
                     "node_name": "",
                     "location": "",
                     "heartbeat_interval": 30
@@ -186,6 +194,13 @@ class PrinterConfig:
             self.save_config()
             return True
         return False
+
+    def clear_cloud_registration(self) -> None:
+        """Clear only the Cloud-side printer identity before node reactivation."""
+        for printer in self.config["managed_printers"]:
+            printer["cloud_id"] = None
+            printer["cloud_registered"] = False
+        self.save_config()
 
     def get_managed_printers(self) -> List[Dict]:
         """获取管理的打印机列表"""

@@ -52,9 +52,6 @@ export function buildConfigPayloadFromConfig(cfg) {
   return {
     cloud: {
       base_url: cfg.cloud.base_url || "",
-      auth_url: cfg.cloud.auth_url || "",
-      client_id: cfg.cloud.client_id || "",
-      client_secret: cfg.cloud.client_secret || "",
       node_name: cfg.cloud.node_name || "",
       location: cfg.cloud.location || "",
       heartbeat_interval: Number(cfg.cloud.heartbeat_interval || 30),
@@ -66,10 +63,6 @@ export function buildConfigPayloadFromConfig(cfg) {
       copies_min: normalizedCopiesMin,
       copies_max: normalizedCopiesMax,
       libreoffice_path: cfg.settings.libreoffice_path || "",
-    },
-    network: {
-      bind_address: cfg.network.bind_address || "",
-      port: Number(cfg.network.port || 0),
     },
   };
 }

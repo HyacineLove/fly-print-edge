@@ -10,6 +10,67 @@ from cloud_service import CloudService
 
 
 class CloudServiceReconfigureTests(unittest.TestCase):
+    def test_cloud_service_exposes_activation_method(self):
+        self.assertTrue(callable(getattr(CloudService, "activate", None)))
+
+    def test_activate_persists_cloud_credentials_and_starts_service(self):
+        service = CloudService({})
+        cloud_response = Mock(status_code=200)
+        cloud_response.json.return_value = {
+            "data": {"node_id": "node-1", "client_id": "client-1", "client_secret": "secret-1"},
+        }
+        with patch("cloud_service.requests.get", return_value=Mock(status_code=200)), \
+             patch("cloud_service.requests.post", return_value=cloud_response), \
+             patch("cloud_service.protect_credentials", return_value="protected"), \
+             patch.object(service, "stop"), \
+             patch.object(service, "start", return_value={"success": True, "node_id": "node-1"}) as start:
+            result = service.activate("http://cloud.example.com", "ACTIVATION-CODE")
+
+        self.assertTrue(result["success"])
+        self.assertEqual("node-1", service.node_id)
+        self.assertEqual("protected", service.config["credential_blob"])
+        start.assert_called_once()
+
+    def test_registered_node_automatically_starts_websocket_runtime(self):
+        manager = Mock()
+        service = CloudService(
+            {"base_url": "http://cloud.example.com", "credential_blob": "protected", "node_id": "node-1"},
+            printer_manager=manager,
+        )
+        with patch("cloud_service.unprotect_credentials", return_value={"client_id": "client-1", "client_secret": "secret-1"}), \
+             patch("cloud_service.CloudAuthClient"), \
+             patch("cloud_service.CloudAPIClient"), \
+             patch.object(service, "_start_websocket") as start_websocket:
+            result = service.start()
+
+        self.assertTrue(result["success"])
+        start_websocket.assert_called_once()
+
+    def test_job_inbox_is_stored_in_runtime_directory(self):
+        config = Mock()
+        config.config_file = r"C:\FlyPrint Edge\config.json"
+        manager = Mock(config=config)
+        service = CloudService({}, printer_manager=manager)
+
+        self.assertEqual(
+            service._job_inbox_path(),
+            r"C:\FlyPrint Edge\runtime\edge_job_inbox.sqlite3",
+        )
+
+    def test_unbind_clears_only_cloud_credentials_and_printer_mappings(self):
+        config = Mock()
+        config.config = {"cloud": {"node_id": "node-1", "credential_blob": "protected", "profile_pending": True}}
+        manager = Mock(config=config)
+        service = CloudService(dict(config.config["cloud"]), printer_manager=manager)
+
+        with patch.object(service, "stop"):
+            result = service.unbind()
+
+        self.assertTrue(result["success"])
+        self.assertIsNone(service.node_id)
+        self.assertNotIn("credential_blob", config.config["cloud"])
+        config.clear_cloud_registration.assert_called_once()
+
     def test_managed_printer_registration_sends_string_port_info(self):
         config = Mock()
         config.update_printer_id.return_value = True
@@ -95,23 +156,6 @@ class CloudServiceReconfigureTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         mocked_start.assert_called_once()
-
-    def test_ensure_registered_registers_when_node_id_missing(self):
-        service = CloudService(
-            {
-                "base_url": "http://old",
-                "auth_url": "http://old/auth",
-                "client_id": "edge",
-                "client_secret": "secret",
-            }
-        )
-        with patch.object(service, "_initialize_components", return_value={"success": True}), \
-             patch.object(service, "_register_node", return_value={"success": True, "node_id": "node-123"}) as mocked_register, \
-             patch.object(service, "start", return_value={"success": True, "registered": True, "connected": False}):
-            result = service.ensure_registered()
-
-        self.assertTrue(result["success"])
-        mocked_register.assert_called_once()
 
     def test_mark_remote_node_missing_clears_stale_registration(self):
         printer_config = Mock()

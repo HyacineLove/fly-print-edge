@@ -1,6 +1,7 @@
 import threading
 import time
 import uuid
+import hashlib
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -10,12 +11,21 @@ class InteractiveSessionManager:
         self._lock = threading.RLock()
         self._active_session: Optional[Dict[str, Any]] = None
 
-    def start_session(self, upload_token: Optional[str] = None) -> Dict[str, Any]:
+    def start_session(
+        self,
+        upload_token: Optional[str] = None,
+        terminal_ticket: Optional[str] = None,
+        entry_type: str = "official",
+        integration_request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             session_id = uuid.uuid4().hex
             self._active_session = {
                 "session_id": session_id,
                 "upload_token": upload_token,
+                "terminal_ticket_hash": hashlib.sha256(terminal_ticket.encode("utf-8")).hexdigest() if terminal_ticket else None,
+                "entry_type": entry_type,
+                "integration_request_id": integration_request_id,
                 "state": "awaiting_preview",
                 "file_id": None,
                 "file_url": None,
@@ -50,6 +60,47 @@ class InteractiveSessionManager:
             self._active_session["updated_at"] = time.time()
             return True
 
+    def bind_terminal_ticket(self, session_id: str, terminal_ticket: str, entry_type: str = "entry") -> bool:
+        """Persist only the ticket digest for a session created before Cloud responds."""
+        if not terminal_ticket:
+            return False
+        with self._lock:
+            if not self._active_session or self._active_session["session_id"] != session_id:
+                return False
+            self._active_session["terminal_ticket_hash"] = hashlib.sha256(terminal_ticket.encode("utf-8")).hexdigest()
+            self._active_session["entry_type"] = entry_type
+            self._active_session["updated_at"] = time.time()
+            return True
+
+    def _matches_terminal_context(self, data: Dict[str, Any]) -> bool:
+        """Integration events must prove they belong to the active kiosk session."""
+        ticket_hash = self._active_session.get("terminal_ticket_hash") if self._active_session else None
+        if not ticket_hash:
+            return True
+        return (
+            data.get("terminal_session_id") == self._active_session.get("session_id")
+            and data.get("terminal_ticket_hash") == ticket_hash
+            and (
+                not self._active_session.get("integration_request_id")
+                or data.get("integration_request_id") == self._active_session.get("integration_request_id")
+            )
+        )
+
+    def bind_integration_request(self, data: Dict[str, Any]) -> bool:
+        """Bind a Cloud request id only after its ticket/session proof matches."""
+        with self._lock:
+            if not self._active_session or not self._matches_terminal_context(data):
+                return False
+            request_id = data.get("integration_request_id")
+            if not request_id:
+                return False
+            current = self._active_session.get("integration_request_id")
+            if current and current != request_id:
+                return False
+            self._active_session["integration_request_id"] = request_id
+            self._active_session["updated_at"] = time.time()
+            return True
+
     def accept_preview_event(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         file_id = data.get("file_id")
         file_url = data.get("file_url")
@@ -58,6 +109,8 @@ class InteractiveSessionManager:
 
         with self._lock:
             if not self._active_session:
+                return None
+            if not self._matches_terminal_context(data):
                 return None
 
             current_file_id = self._active_session.get("file_id")
@@ -166,6 +219,8 @@ class InteractiveSessionManager:
 
         with self._lock:
             if not self._active_session:
+                return None
+            if not self._matches_terminal_context(data):
                 return None
             if self._active_session.get("job_id") != job_id:
                 return None

@@ -15,6 +15,14 @@
 
 生产代码禁止加入 Windows Spooler、WSD、RAW Socket、WMI、SumatraPDF、系统默认应用或其他打印回退路径。需要改变链路时，先在对话中明确方案并获得确认。
 
+## 已确认的部署与物理安全边界
+
+- 一套 Edge 设备即一体机：一台终端工控 PC 与一台打印机直连，二者共同代表一个现场终端；正常打印、会话和二维码流程仅服务该终端。
+- 正常运行时程序以 kiosk 形式锁定在用户页，终端仅提供触屏操作；本地管理页不对普通使用者开放。
+- 一体机后部有物理门锁，只有持钥匙的运维人员打开后才能向工控 PC 接入键鼠维护。因此，在当前确认的部署形态下，本地管理 API 未额外启用应用层鉴权不视为缺陷，它依赖受控物理访问边界。
+- Edge 默认应保持回环监听。若改为局域网/公网监听、经代理暴露、启用远程维护，或让普通人员能够进入本地管理页，则上述结论失效；必须先在对话中确认，并设计网络隔离及独立管理鉴权，不能静默扩大暴露面。
+- 物理边界不替代 Cloud 对终端身份的密码学验证：Cloud 仍必须做到独立终端凭据与 `node_id` 强绑定；二维码/第三方流程仍必须把 `terminal_ticket`、会话、文件和任务关联起来。
+
 ## 实施原则
 
 - 只接受完整 `ipp://` URI；不猜测资源路径，不绕过证书，不支持 IPPS。
@@ -31,3 +39,11 @@
 - 协议与状态机必须有离线单元测试。
 - 真实设备行为必须在网线直连 HP Color LaserJet Pro 3288dn 的目标机器验收。
 - 不得用当前开发机的发现结果替代目标机器验收。
+
+## Windows 安装包构建
+
+- PyInstaller 构建环境：`D:\HQIT-LAPTOP\FlyPrint\fly-print-edge\.venv-build-3.12.10\Scripts\pyinstaller.exe`。
+- Inno Setup 6.7.3（当前用户安装）的编译器：`C:\Users\HQIT-LAPTOP\AppData\Local\Programs\Inno Setup 6\ISCC.exe`。
+- 构建顺序：先在仓库根目录执行 `pyinstaller --noconfirm flyprint-edge.spec`，再执行 `ISCC.exe installer.iss`。
+- 安装包输出到 `dist\flyprint-edge-setup-<版本>.exe`；版本号由 `installer.iss` 的 `MyAppVersion` 定义。
+- 2026-07-21 已用上述 Inno Setup 6.7.3 路径成功编译 Edge 1.0.31 安装包；后续构建直接复用该路径。

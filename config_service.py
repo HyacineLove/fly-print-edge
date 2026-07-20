@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 
 import requests
 
-from cloud_auth import CloudAuthClient
 from logging_utils import VALID_LOG_LEVELS
 
 
@@ -16,7 +15,7 @@ class ConfigService:
         "network.port",
     }
 
-    MASKED_FIELDS = {"cloud.client_secret"}
+    MASKED_FIELDS = {"cloud.credential_blob"}
 
     def __init__(self, config_repo):
         self.config_repo = config_repo
@@ -31,9 +30,14 @@ class ConfigService:
         cloud = data.setdefault("cloud", {})
         cloud.pop("enabled", None)
         cloud.pop("auto_register", None)
-        secret = str(cloud.get("client_secret") or "")
-        cloud["client_secret"] = ""
-        cloud["client_secret_configured"] = bool(secret)
+        # Never expose legacy plaintext fields either; a stale file must not
+        # turn the local maintenance API into a credential disclosure path.
+        cloud.pop("auth_url", None)
+        cloud.pop("client_id", None)
+        cloud.pop("client_secret", None)
+        credential_blob = str(cloud.get("credential_blob") or "")
+        cloud.pop("credential_blob", None)
+        cloud["activated"] = bool(cloud.get("node_id") and credential_blob)
         settings = data.setdefault("settings", {})
         settings["default_max_upscale"] = self._normalize_optional_positive_number(
             settings.get("default_max_upscale")
@@ -61,12 +65,16 @@ class ConfigService:
                 continue
             merged.setdefault(section, {})
             for key, value in update[section].items():
-                if section == "cloud" and key == "client_secret" and value == "":
+                if section == "cloud" and key not in {"base_url", "node_name", "location", "heartbeat_interval"}:
                     continue
                 merged[section][key] = value
         merged.setdefault("cloud", {})
         merged["cloud"].pop("enabled", None)
         merged["cloud"].pop("auto_register", None)
+        # Remove any legacy plaintext values even if a stale configuration still
+        # contains them. They are never a supported input to the new workflow.
+        for key in ("auth_url", "client_id", "client_secret"):
+            merged["cloud"].pop(key, None)
         return merged
 
     def classify_changes(self, before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,13 +108,9 @@ class ConfigService:
         settings = raw.get("settings", {})
         network = raw.get("network", {})
 
-        for field in ("base_url", "auth_url"):
-            value = str(cloud.get(field) or "").strip()
-            if value and not self._is_valid_url(value):
-                errors.append(f"cloud.{field} must be a valid URL")
-
-        if not str(cloud.get("client_id") or "").strip():
-            errors.append("cloud.client_id must not be empty")
+        value = str(cloud.get("base_url") or "").strip()
+        if value and not self._is_valid_url(value):
+            errors.append("cloud.base_url must be a valid URL")
 
         try:
             heartbeat = int(cloud.get("heartbeat_interval", 30))
@@ -211,25 +215,12 @@ class ConfigService:
         if errors:
             return {"success": False, "message": "; ".join(errors)}
 
-        auth_url = str(cloud.get("auth_url") or "").strip()
         base_url = str(cloud.get("base_url") or "").strip().rstrip("/")
-        if not auth_url or not base_url:
+        if not base_url:
             return {"success": True, "message": "\u6821\u9a8c\u901a\u8fc7"}
 
-        auth_client = CloudAuthClient(
-            auth_url=auth_url,
-            client_id=str(cloud.get("client_id") or "").strip(),
-            client_secret=str(cloud.get("client_secret") or "").strip(),
-        )
-        token = auth_client.get_access_token()
-        if not token:
-            return {"success": False, "message": "\u65e0\u6cd5\u83b7\u53d6\u4e91\u7aef\u8bbf\u95ee\u4ee4\u724c"}
-
         try:
-            response = requests.get(
-                f"{base_url}/api/v1/health",
-                timeout=5,
-            )
+            response = requests.get(f"{base_url}/api/v1/health", timeout=5)
             if response.status_code >= 400:
                 return {"success": False, "message": f"\u4e91\u7aef\u5065\u5eb7\u68c0\u67e5\u5931\u8d25: {response.status_code}"}
         except Exception as exc:
@@ -241,9 +232,7 @@ class ConfigService:
         paths: List[str] = []
         for section in ("cloud", "settings", "network", "printers"):
             for key in config.get(section, {}):
-                if section == "cloud" and key == "node_id":
-                    continue
-                if section == "cloud" and key == "client_secret_configured":
+                if section == "cloud" and key in {"node_id", "credential_blob", "profile_pending", "activated"}:
                     continue
                 paths.append(f"{section}.{key}")
         return paths
@@ -258,7 +247,7 @@ class ConfigService:
 
     def _is_valid_url(self, value: str) -> bool:
         parsed = urlparse(value)
-        return bool(parsed.scheme and parsed.netloc)
+        return bool(parsed.scheme == "http" and parsed.netloc)
 
     def _normalize_bool(self, value: Any) -> bool:
         if isinstance(value, bool):

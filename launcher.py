@@ -99,6 +99,21 @@ def resolve_local_base_url(config: dict) -> str:
     return f"http://{host}:{port}"
 
 
+def is_cloud_activated(config: dict) -> bool:
+    """Return whether this terminal has its own persisted Cloud credentials."""
+    cloud = config.get("cloud", {}) if isinstance(config, dict) else {}
+    return bool(str(cloud.get("node_id") or "").strip() and str(cloud.get("credential_blob") or "").strip())
+
+
+def resolve_page_mode(action: str, config: dict) -> str:
+    """Select the only allowed first page for the current activation state."""
+    if action == ACTION_OPEN_ADMIN:
+        return "admin"
+    if action == ACTION_OPEN_USER:
+        return "user" if is_cloud_activated(config) else "admin"
+    raise ValueError(f"Unsupported page action: {action}")
+
+
 def resolve_edge_executable() -> str:
     if platform.system() != "Windows":
         raise RuntimeError("FlyPrint launcher currently supports Windows only")
@@ -221,6 +236,11 @@ class LauncherApp:
         self.command_thread: threading.Thread | None = None
         self.tray_icon = None
 
+    def refresh_runtime_config(self) -> None:
+        """Reload configuration before deciding which terminal page may open."""
+        self.config = resolve_runtime_config(self.install_dir)
+        self.base_url = resolve_local_base_url(self.config)
+
     def _service_creation_flags(self) -> int:
         flags = 0
         flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -312,21 +332,20 @@ class LauncherApp:
         raise RuntimeError("FlyPrint service did not become ready in time")
 
     def restart_service(self) -> None:
+        self.refresh_runtime_config()
         self.ensure_service_ready(restart=True)
 
     def _run_action(self, action: str) -> None:
-        if action == ACTION_OPEN_ADMIN:
-            self.ensure_service_ready()
-            open_url_in_edge("admin", self.base_url, self.install_dir)
-            return
         if action == ACTION_RESTART_SERVICE:
             self.restart_service()
             return
         if action == ACTION_EXIT:
             self.shutdown()
             return
+
+        self.refresh_runtime_config()
         self.ensure_service_ready()
-        open_url_in_edge("user", self.base_url, self.install_dir)
+        open_url_in_edge(resolve_page_mode(action, self.config), self.base_url, self.install_dir)
 
     def dispatch(self, action: str) -> None:
         try:

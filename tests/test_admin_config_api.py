@@ -1,210 +1,63 @@
+import asyncio
 import os
 import sys
-import asyncio
 import unittest
-from unittest.mock import patch
-
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import main
 
 
 class DummyConfig:
     def __init__(self):
-        self.config = {
-            "managed_printers": [],
-            "default_printer_id": None,
-            "cloud": {
-                "base_url": "http://localhost:8012",
-                "auth_url": "http://localhost:8012/auth/token",
-                "client_id": "edge-default",
-                "client_secret": "super-secret",
-                "node_name": "edge-a",
-                "location": "",
-                "heartbeat_interval": 30,
-                "node_id": "node-123",
-            },
-            "settings": {"copies_min": 1, "copies_max": 3, "log_level": "INFO", "debug_logging": False},
-            "network": {"bind_address": "127.0.0.1", "port": 7860},
-        }
-
-    def get_full_config(self):
-        return self.config
-
-    def replace_full_config(self, new_config):
-        self.config = new_config
+        self.config = {"managed_printers": [], "cloud": {"base_url": "", "credential_blob": "", "node_name": "", "location": "", "heartbeat_interval": 30}, "settings": {}, "network": {"bind_address": "127.0.0.1", "port": 7860}}
+    def get_full_config(self): return self.config
+    def replace_full_config(self, value): self.config = value
+    def save_config(self): pass
 
 
 class DummyPrinterManager:
-    def __init__(self):
-        self.config = DummyConfig()
+    def __init__(self): self.config = DummyConfig()
 
 
-class DummyCloudService:
-    def __init__(self, connected=True, stale=False):
-        self.node_id = "node-123"
-        self.calls = []
-        self.connected = connected
-        self.stale = stale
-
-    def reconfigure(self, new_config, preserve_node_id=True):
-        self.calls.append({"config": new_config, "preserve_node_id": preserve_node_id})
-        self.node_id = None if self.stale and not preserve_node_id else "node-123"
-        return {"success": True, "node_id": self.node_id, "registered": True, "connected": self.connected}
-
-    def ensure_registered(self, force_reregister=False):
-        self.calls.append({"ensure_registered": force_reregister})
-        self.node_id = "node-123"
-        self.stale = False
-        return {"success": True, "node_id": self.node_id, "registered": True, "connected": self.connected}
-
-    def get_status(self):
-        return {
-            "configured": True,
-            "registered": True,
-            "node_id": self.node_id,
-            "websocket": {"connected": self.connected},
-        }
-
-    def has_stale_node_registration(self):
-        return self.stale
+class DummyCloud:
+    def __init__(self): self.node_id = None; self.calls = []
+    def activate(self, base_url, activation_code):
+        self.calls.append((base_url, activation_code)); self.node_id = "node-1"; return {"success": True, "node_id": self.node_id}
+    def get_status(self): return {"configured": False, "registered": False, "node_id": None, "websocket": {"connected": False}}
+    def unbind(self):
+        self.calls.append(("unbind",)); self.node_id = None
+        return {"success": True, "message": "已解除本机绑定"}
 
 
-class DummyRequest:
-    def __init__(self, payload):
-        self.payload = payload
-
-    async def json(self):
-        return self.payload
+class Request:
+    def __init__(self, payload): self.payload = payload
+    async def json(self): return self.payload
 
 
 class AdminConfigApiTests(unittest.TestCase):
-    def setUp(self):
-        self.printer_manager = DummyPrinterManager()
-        main.config_service = None
+    def test_public_config_does_not_return_credentials(self):
+        manager = DummyPrinterManager()
+        manager.config.config["cloud"].update({"credential_blob": "opaque", "node_id": "node-1", "client_secret": "legacy"})
+        with patch.object(main, "printer_manager", manager):
+            payload = asyncio.run(main.get_admin_config())
+        self.assertTrue(payload["cloud"]["activated"])
+        self.assertNotIn("credential_blob", payload["cloud"])
+        self.assertNotIn("client_secret", payload["cloud"])
 
-    def test_get_config_masks_secret(self):
-        with patch.object(main, "printer_manager", self.printer_manager):
-            result = asyncio.run(main.get_admin_config())
+    def test_activation_delegates_to_cloud_service(self):
+        cloud = DummyCloud()
+        with patch.object(main, "cloud_service", cloud), patch.object(main, "broadcast_sse_event", new=AsyncMock()):
+            response = asyncio.run(main.activate_cloud_node(Request({"base_url": "http://cloud.example.com", "activation_code": "ABC"})))
+        self.assertTrue(response["success"])
+        self.assertEqual(cloud.calls, [("http://cloud.example.com", "ABC")])
 
-        self.assertTrue(result["success"])
-        self.assertEqual(result["cloud"]["client_secret"], "")
-        self.assertTrue(result["cloud"]["client_secret_configured"])
-        self.assertEqual(result["settings"]["copies_min"], 1)
-        self.assertEqual(result["settings"]["copies_max"], 3)
-        self.assertEqual(result["settings"]["log_level"], "INFO")
-        self.assertEqual(result["settings"]["debug_logging"], False)
-        self.assertNotIn("system", result)
-
-    def test_save_config_keeps_secret_when_blank(self):
-        request = DummyRequest({
-            "cloud": {
-                "client_secret": "",
-                "base_url": "http://example.com",
-            }
-        })
-        dummy_cloud = DummyCloudService()
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", dummy_cloud), \
-             patch("main.ConfigService.test_cloud_connection", return_value={"success": True, "message": "ok"}):
-            response = asyncio.run(main.save_admin_config(request))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.printer_manager.config.config["cloud"]["client_secret"], "super-secret")
-        self.assertEqual(self.printer_manager.config.config["cloud"]["base_url"], "http://example.com")
-        self.assertEqual(dummy_cloud.calls[0]["preserve_node_id"], True)
-
-    def test_save_config_marks_restart_required_fields(self):
-        request = DummyRequest({
-            "network": {"bind_address": "0.0.0.0", "port": 9000}
-        })
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", DummyCloudService()):
-            response = asyncio.run(main.save_admin_config(request))
-        payload = response.body.decode("utf-8")
-        self.assertIn("network.bind_address", payload)
-        self.assertIn("network.port", payload)
-
-    def test_save_config_persists_copy_limits(self):
-        request = DummyRequest({
-            "settings": {"copies_min": 2, "copies_max": 6}
-        })
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", DummyCloudService()):
-            response = asyncio.run(main.save_admin_config(request))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.printer_manager.config.config["settings"]["copies_min"], 2)
-        self.assertEqual(self.printer_manager.config.config["settings"]["copies_max"], 6)
-
-    def test_check_register_cloud_reuses_saved_secret_without_reregistering_existing_node(self):
-        request = DummyRequest({
-            "cloud": {
-                "client_secret": "",
-                "base_url": "http://example.com",
-            }
-        })
-        dummy_cloud = DummyCloudService(connected=True)
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", dummy_cloud), \
-             patch("main.ConfigService.test_cloud_connection", return_value={"success": True, "message": "ok"}), \
-             patch("main._wait_for_cloud_connected", return_value=True):
-            response = asyncio.run(main.check_cloud_and_register_node(request))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.printer_manager.config.config["cloud"]["client_secret"], "super-secret")
-        self.assertEqual(self.printer_manager.config.config["cloud"]["base_url"], "http://example.com")
-        self.assertEqual(dummy_cloud.calls[0]["preserve_node_id"], True)
-        self.assertFalse(any("ensure_registered" in call for call in dummy_cloud.calls))
-
-    def test_check_register_cloud_requires_connected_success(self):
-        request = DummyRequest({
-            "cloud": {
-                "client_secret": "",
-                "base_url": "http://example.com",
-            }
-        })
-        dummy_cloud = DummyCloudService(connected=False)
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", dummy_cloud), \
-             patch("main.ConfigService.test_cloud_connection", return_value={"success": True, "message": "ok"}), \
-             patch("main._wait_for_cloud_connected", return_value=False):
-            response = asyncio.run(main.check_cloud_and_register_node(request))
-
-        self.assertEqual(response.status_code, 409)
-
-    def test_check_register_cloud_reregisters_when_local_node_is_stale(self):
-        request = DummyRequest({
-            "cloud": {
-                "client_secret": "",
-                "base_url": "http://example.com",
-            }
-        })
-        dummy_cloud = DummyCloudService(connected=True, stale=True)
-        with patch.object(main, "printer_manager", self.printer_manager), \
-             patch.object(main, "cloud_service", dummy_cloud), \
-             patch("main.ConfigService.test_cloud_connection", return_value={"success": True, "message": "ok"}), \
-             patch("main._wait_for_cloud_connected", return_value=True):
-            response = asyncio.run(main.check_cloud_and_register_node(request))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(dummy_cloud.calls[0]["preserve_node_id"])
-        self.assertTrue(any("ensure_registered" in call for call in dummy_cloud.calls))
-
-    def test_get_cloud_status_prefers_connected_message(self):
-        with patch.object(main, "cloud_service", DummyCloudService(connected=True)):
-            result = asyncio.run(main.get_cloud_status())
-
-        self.assertTrue(result["success"])
-        self.assertEqual(result["message"], "已连接")
-
-    def test_get_cloud_status_uses_waiting_message_when_registered_only(self):
-        with patch.object(main, "cloud_service", DummyCloudService(connected=False)):
-            result = asyncio.run(main.get_cloud_status())
-
-        self.assertTrue(result["success"])
-        self.assertEqual(result["message"], "等待连接")
+    def test_unbind_delegates_to_cloud_service(self):
+        cloud = DummyCloud()
+        with patch.object(main, "cloud_service", cloud), patch.object(main, "broadcast_sse_event", new=AsyncMock()):
+            response = asyncio.run(main.unbind_cloud_node())
+        self.assertTrue(response["success"])
+        self.assertEqual(cloud.calls, [("unbind",)])
 
 
 if __name__ == "__main__":

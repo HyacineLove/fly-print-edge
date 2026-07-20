@@ -46,7 +46,7 @@ class CloudAuthClient:
                 'grant_type': 'client_credentials',
                 'client_id': self.client_id,
                 'client_secret': self.client_secret,
-                'scope': 'edge:register edge:heartbeat edge:printer edge:print edge:file'
+                'scope': 'edge:register edge:printer edge:heartbeat'
             }
             
             # verify=False 允许自签名证书

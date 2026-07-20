@@ -57,6 +57,7 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
     class NoopCloudService:
         def __init__(self, *args, **kwargs):
             self.listeners = []
+            self.websocket_client = None
 
         def add_message_listener(self, message_type, listener):
             self.listeners.append((message_type, listener))

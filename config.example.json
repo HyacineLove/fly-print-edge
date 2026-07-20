@@ -13,10 +13,9 @@
     },
     "cloud": {
         "base_url": "http://localhost:8012",
-        "auth_url": "http://localhost:8012/auth/token",
-        "client_id": "edge-default",
-        "client_secret": "YOUR_CLIENT_SECRET",
-        "node_name": "my-edge-node",
+        "credential_blob": "",
+        "profile_pending": false,
+        "node_name": "",
         "location": "",
         "heartbeat_interval": 30
     },

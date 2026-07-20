@@ -21,6 +21,17 @@ export async function loadCloudStatus(state, render) {
   render();
 }
 
+export async function pollCloudStatus(state, render) {
+  const wasActivated = !!state.cloudStatus?.activated;
+  state.cloudStatus = await requestAdmin("/cloud/status");
+
+  if (wasActivated !== !!state.cloudStatus?.activated) {
+    render();
+    return;
+  }
+  renderAdminToolbar(state);
+}
+
 export async function loadStartupState(state, render) {
   state.startupLoading = true;
   render();
@@ -98,13 +109,30 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
 
   checkBtn?.addEventListener("click", async () => {
     if (!state.config || state.testingCloud) return;
+    // render() rebuilds the activation form. Read its transient one-time code
+    // before changing state, otherwise the code disappears before validation.
+    const activationCode = document.getElementById("cloud_activation_code")?.value?.trim();
+    const baseUrl = document.getElementById("cloud_base_url")?.value?.trim() || state.config.cloud.base_url || "";
     state.testingCloud = true;
     render();
-    showAdminLoading("检查连接并注册节点中...");
+    const cloud = state.cloudStatus || {};
+    if (cloud.activated) {
+      showAdminToast("该终端已激活；名称或位置变更请点击“保存配置”。", "error", 3600);
+      state.testingCloud = false;
+      render();
+      return;
+    }
+    if (!activationCode) {
+      showAdminToast("请输入一次性激活码", "error", 3600);
+      state.testingCloud = false;
+      render();
+      return;
+    }
+    showAdminLoading("正在验证 Cloud 并激活终端...");
     try {
-      const result = await requestAdmin("/cloud/check-register", {
+      const result = await requestAdmin("/cloud/activate", {
         method: "POST",
-        body: JSON.stringify({ cloud: buildConfigPayload(state).cloud }),
+        body: JSON.stringify({ base_url: baseUrl, activation_code: activationCode }),
       });
       await Promise.all([loadConfig(state, render), loadCloudStatus(state, render)]);
       showAdminToast(result.message || "检查完成", "success");
@@ -138,6 +166,23 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
     updateStartupState(state, render, target.checked).catch(() => {});
   });
 
+  panel?.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.id !== "cloudUnbindBtn") return;
+    if (!window.confirm("请先在 Cloud 管理端删除该节点。解除本机绑定会清除本机凭据与打印机 Cloud 映射，是否继续？")) return;
+    showAdminLoading("正在解除本机绑定...");
+    try {
+      const result = await requestAdmin("/cloud/unbind", { method: "POST" });
+      await Promise.all([loadConfig(state, render), loadCloudStatus(state, render)]);
+      showAdminToast(result.message || "已解除本机绑定", "success");
+    } catch (error) {
+      showAdminToast(error.message || "解除绑定失败", "error", 3600);
+    } finally {
+      hideAdminLoading();
+      render();
+    }
+  });
+
   panel?.addEventListener("input", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -157,7 +202,6 @@ export function bindConfigActions(state, render, ensurePrintersLoaded) {
       renderAdminToolbar(state);
       return;
     }
-
   });
 }
 

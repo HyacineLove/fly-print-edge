@@ -4,16 +4,21 @@ fly-print-cloud 云端服务集成模块
 """
 
 import logging
+import os
 import time
 import threading
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from cloud_auth import CloudAuthClient
 from cloud_api_client import CloudAPIClient
 from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
 from cloud_heartbeat_service import HeartbeatService
 from edge_node_info import EdgeNodeInfo
+from secure_credentials import protect_credentials, unprotect_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,8 @@ class CloudService:
 
         self.node_id = self.config.get("node_id")
         self.registered = bool(self.node_id)
+        self.heartbeat_interval = self.config.get("heartbeat_interval", 30)
+        self.pending_listeners = []
 
     @staticmethod
     def _cloud_port_info(port_info: Any) -> str:
@@ -51,9 +58,24 @@ class CloudService:
         return str(port_info or "")
 
     def _cloud_config_ready(self) -> tuple[bool, list[str]]:
+        runtime = self._runtime_cloud_config()
         required_fields = ("base_url", "auth_url", "client_id", "client_secret")
-        missing = [field for field in required_fields if not str(self.config.get(field) or "").strip()]
+        missing = [field for field in required_fields if not str(runtime.get(field) or "").strip()]
         return not missing, missing
+
+    def _runtime_cloud_config(self) -> Dict[str, Any]:
+        """Resolve the DPAPI bundle only in process memory."""
+        runtime = dict(self.config)
+        blob = str(runtime.get("credential_blob") or "")
+        if not blob:
+            return runtime
+        try:
+            runtime.update(unprotect_credentials(blob))
+        except Exception as exc:
+            self.last_error = f"unable to read protected cloud credentials: {exc}"
+            return runtime
+        runtime["auth_url"] = f"{str(runtime.get('base_url') or '').rstrip('/')}/auth/token"
+        return runtime
 
     def has_stale_node_registration(self) -> bool:
         return self.node_missing_remote
@@ -114,14 +136,19 @@ class CloudService:
 
         try:
             logger.debug("Initializing cloud service components")
+            runtime = self._runtime_cloud_config()
             self.auth_client = CloudAuthClient(
-                auth_url=self.config["auth_url"],
-                client_id=self.config["client_id"],
-                client_secret=self.config["client_secret"],
+                auth_url=runtime["auth_url"],
+                client_id=runtime["client_id"],
+                client_secret=runtime["client_secret"],
             )
             self.api_client = CloudAPIClient(
-                base_url=self.config["base_url"],
+                base_url=runtime["base_url"],
                 auth_client=self.auth_client,
+            )
+            self.api_client.edge_info = EdgeNodeInfo(
+                self.config.get("node_name") or None,
+                self.config.get("location") or None,
             )
             if self.node_id:
                 self.api_client.node_id = self.node_id
@@ -164,6 +191,19 @@ class CloudService:
                     "registered": False,
                     "connected": False,
                 }
+
+            if self.config.get("profile_pending"):
+                profile = self.api_client.update_self_profile(
+                    self.config.get("node_name") or None,
+                    self.config.get("location") or None,
+                )
+                if not profile.get("success"):
+                    self.last_error = profile.get("error") or "edge profile report failed"
+                    return {"success": False, "message": self.last_error, "node_id": self.node_id}
+                self.config["profile_pending"] = False
+                if self.printer_manager and hasattr(self.printer_manager, "config"):
+                    self.printer_manager.config.config.setdefault("cloud", {})["profile_pending"] = False
+                    self.printer_manager.config.save_config()
 
             self._start_websocket()
 
@@ -253,6 +293,10 @@ class CloudService:
             if not self.node_id:
                 self.node_missing_remote = False
         self.registered = bool(self.node_id)
+        if self.registered:
+            # Local name/location are Edge-owned facts. Re-report them before
+            # reconnecting whenever an operator saves the management page.
+            self.config["profile_pending"] = True
 
         self.auth_client = None
         self.api_client = None
@@ -274,74 +318,6 @@ class CloudService:
             self.printer_manager.config.save_config()
         return result
 
-    def ensure_registered(self, force_reregister: bool = False) -> Dict[str, Any]:
-        init_result = self._initialize_components()
-        if not init_result.get("success"):
-            return init_result
-
-        if force_reregister:
-            self.node_id = None
-            self.registered = False
-            self.node_missing_remote = False
-            self.config.pop("node_id", None)
-
-        if not self.registered or not self.node_id:
-            register_result = self._register_node()
-            if not register_result.get("success"):
-                return register_result
-
-        start_result = self.start()
-        if not start_result.get("success"):
-            return start_result
-
-        return {
-            "success": True,
-            "message": "cloud checked and node ready",
-            "node_id": self.node_id,
-            "registered": True,
-            "connected": bool(self.websocket_client and self.websocket_client.connected),
-        }
-
-    def _register_node(self) -> Dict[str, Any]:
-        """注册边缘节点"""
-        try:
-            logger.debug("Registering edge node")
-            
-            node_name = self.config.get("node_name") or None
-            location = self.config.get("location") or None
-            
-            result = self.api_client.register_edge_node(node_name, location)
-            
-            if result["success"]:
-                self.registered = True
-                self.node_id = result["node_id"]
-                self.node_missing_remote = False
-                
-                # 将 node_id 缓存到配置，避免重复注册
-                try:
-                    self.config["node_id"] = self.node_id
-                    self._persist_node_id()
-                except Exception as e:
-                    logger.debug("Failed to persist node_id into config", exc_info=True)
-                
-                # 更新PrintJobHandler的node_id
-                if self.print_job_handler:
-                    self.print_job_handler.node_id = self.node_id
-                
-                # 同步到 API 客户端
-                if self.api_client:
-                    self.api_client.node_id = self.node_id
-                    
-                logger.info("Edge node registration completed: node_id=%s", self.node_id)
-                return {"success": True, "node_id": self.node_id}
-            else:
-                logger.warning("Edge node registration failed: %s", result.get("error"))
-                return {"success": False, "message": result.get("error")}
-                
-        except Exception as e:
-            logger.exception("Edge node registration failed")
-            return {"success": False, "message": str(e)}
-    
     def _register_current_printers(self):
         """注册当前管理的打印机"""
         try:
@@ -448,6 +424,7 @@ class CloudService:
                 ws_url,
                 self.auth_client,
                 node_missing_handler=self._mark_remote_node_missing,
+                inbox_path=self._job_inbox_path(),
             )
             
             # 注册核心业务处理器（由 PrintJobHandler 处理云端下行指令）
@@ -479,13 +456,15 @@ class CloudService:
             
         except Exception as e:
             logger.exception("WebSocket client start failed")
+
+    def _job_inbox_path(self) -> str:
+        """Keep durable task de-duplication data under the removable runtime directory."""
+        config_file = getattr(getattr(self.printer_manager, "config", None), "config_file", "config.json")
+        return str(Path(str(config_file)).parent / "runtime" / "edge_job_inbox.sqlite3")
     
     def add_message_listener(self, message_type: str, handler):
         """添加消息监听器"""
         logger.debug("Registering cloud message listener: %s", message_type)
-        if not hasattr(self, 'pending_listeners'):
-            self.pending_listeners = []
-
         listener = (message_type, handler)
         if listener not in self.pending_listeners:
             self.pending_listeners.append(listener)
@@ -659,6 +638,68 @@ class CloudService:
             return resolution_map.get(res.lower(), "600dpi")
         else:
             return "600dpi"
+
+    def activate(self, base_url: str, activation_code: str) -> Dict[str, Any]:
+        """Consume one Cloud-issued activation code and persist only DPAPI data."""
+        base_url = str(base_url or "").strip().rstrip("/")
+        activation_code = str(activation_code or "").strip()
+        parsed = urlparse(base_url)
+        if parsed.scheme != "http" or not parsed.netloc:
+            return {"success": False, "message": "Cloud 地址必须是有效的 HTTP 地址"}
+        if not activation_code:
+            return {"success": False, "message": "请输入激活码"}
+        try:
+            health = requests.get(f"{base_url}/api/v1/health", timeout=10)
+            if health.status_code >= 400:
+                return {"success": False, "message": f"Cloud 健康检查失败: {health.status_code}"}
+            response = requests.post(f"{base_url}/api/v1/edge/activate", json={"activation_code": activation_code}, timeout=10)
+            if response.status_code not in (200, 201):
+                return {"success": False, "message": "激活码无效、已过期或 Cloud 拒绝激活"}
+            data = response.json().get("data") or {}
+            node_id = str(data.get("node_id") or "")
+            client_id = str(data.get("client_id") or "")
+            client_secret = str(data.get("client_secret") or "")
+            if not all((node_id, client_id, client_secret)):
+                return {"success": False, "message": "Cloud 激活响应不完整"}
+            protected = protect_credentials({"client_id": client_id, "client_secret": client_secret})
+            staged = dict(self.config)
+            staged.update({"base_url": base_url, "credential_blob": protected, "node_id": node_id, "profile_pending": True})
+            self.stop()
+            self.config = staged
+            self.node_id = node_id
+            self.registered = True
+            self.node_missing_remote = False
+            if self.printer_manager and hasattr(self.printer_manager, "config"):
+                self.printer_manager.config.config.setdefault("cloud", {}).update(staged)
+                self.printer_manager.config.save_config()
+            self.auth_client = self.api_client = self.websocket_client = None
+            self.heartbeat_service = self.print_job_handler = self.status_reporter = None
+            return self.start()
+        except Exception as exc:
+            logger.exception("Edge activation failed")
+            return {"success": False, "message": str(exc)}
+
+    def unbind(self) -> Dict[str, Any]:
+        """Remove this Edge's local node binding so it can be activated again."""
+        self.stop()
+        for key in ("node_id", "credential_blob", "profile_pending"):
+            self.config.pop(key, None)
+        self.node_id = None
+        self.registered = False
+        self.node_missing_remote = False
+        self.last_error = None
+        self.auth_client = None
+        self.api_client = None
+        self.websocket_client = None
+        self.heartbeat_service = None
+        self.print_job_handler = None
+        self.status_reporter = None
+        if self.printer_manager and hasattr(self.printer_manager, "config"):
+            cloud_config = self.printer_manager.config.config.setdefault("cloud", {})
+            for key in ("node_id", "credential_blob", "profile_pending"):
+                cloud_config.pop(key, None)
+            self.printer_manager.config.clear_cloud_registration()
+        return {"success": True, "message": "已解除本机绑定，请重新激活终端"}
 
 
 class PrinterStatusReporter:
