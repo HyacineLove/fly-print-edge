@@ -1,5 +1,13 @@
 # FlyPrint Edge 开发约定
 
+## Cloud terminal-result protocol (2026-07-21)
+
+- Cloud print work is addressed only by `printer_id`; display names are never a fallback printing target.
+- `job_delivery_store.py` is the authoritative SQLite delivery state under `runtime/edge_job_delivery.sqlite3`. It owns both the inbound receipt inbox and the terminal-result outbox; in-memory job maps are acceleration caches only.
+- Edge writes the IPP terminal result and one stable UUID `event_id` to SQLite in the same transaction. `completed`, `failed`, `canceled`, and `unconfirmed` remain queued until Cloud sends `job_update_ack/accepted`.
+- Reconnection and an unacknowledged result use exponential retry capped at 60 seconds with no expiry. `job_update_ack/rejected` stops retries and remains visible in local Cloud status; it must not be represented as a successful print.
+- Restart recovery resumes `received` jobs. A job interrupted while printing becomes `unconfirmed` with `edge_restart_result_unknown`; it is reported but never physically reprinted.
+
 ## 生产打印架构
 
 唯一生产链路为：

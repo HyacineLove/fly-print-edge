@@ -424,7 +424,8 @@ class CloudService:
                 ws_url,
                 self.auth_client,
                 node_missing_handler=self._mark_remote_node_missing,
-                inbox_path=self._job_inbox_path(),
+                inbox_path=self._job_delivery_store_path(),
+                node_id=self.node_id,
             )
             
             # 注册核心业务处理器（由 PrintJobHandler 处理云端下行指令）
@@ -457,10 +458,10 @@ class CloudService:
         except Exception as e:
             logger.exception("WebSocket client start failed")
 
-    def _job_inbox_path(self) -> str:
-        """Keep durable task de-duplication data under the removable runtime directory."""
+    def _job_delivery_store_path(self) -> str:
+        """Keep the durable inbound and outbound delivery state under runtime."""
         config_file = getattr(getattr(self.printer_manager, "config", None), "config_file", "config.json")
-        return str(Path(str(config_file)).parent / "runtime" / "edge_job_inbox.sqlite3")
+        return str(Path(str(config_file)).parent / "runtime" / "edge_job_delivery.sqlite3")
     
     def add_message_listener(self, message_type: str, handler):
         """添加消息监听器"""
@@ -512,6 +513,7 @@ class CloudService:
                 "url": self.websocket_client.websocket_url,
                 "last_http_status": self.websocket_client.last_http_status,
                 "last_error_message": self.websocket_client.last_error_message,
+                "terminal_reports": self.websocket_client.terminal_report_summary(),
             }
 
         return status

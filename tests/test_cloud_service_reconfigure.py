@@ -46,15 +46,15 @@ class CloudServiceReconfigureTests(unittest.TestCase):
         self.assertTrue(result["success"])
         start_websocket.assert_called_once()
 
-    def test_job_inbox_is_stored_in_runtime_directory(self):
+    def test_job_delivery_store_is_stored_in_runtime_directory(self):
         config = Mock()
         config.config_file = r"C:\FlyPrint Edge\config.json"
         manager = Mock(config=config)
         service = CloudService({}, printer_manager=manager)
 
         self.assertEqual(
-            service._job_inbox_path(),
-            r"C:\FlyPrint Edge\runtime\edge_job_inbox.sqlite3",
+            service._job_delivery_store_path(),
+            r"C:\FlyPrint Edge\runtime\edge_job_delivery.sqlite3",
         )
 
     def test_unbind_clears_only_cloud_credentials_and_printer_mappings(self):

@@ -104,9 +104,9 @@ class InnoSetupScriptTests(unittest.TestCase):
         self.assertIn('RunOnceId: "StopFlyPrintEdge"', text)
         self.assertIn("CloseApplications=yes", text)
         self.assertIn("RestartApplications=no", text)
-        self.assertIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3"', text)
-        self.assertIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3-wal"', text)
-        self.assertIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3-shm"', text)
+        self.assertNotIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3"', text)
+        self.assertNotIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3-wal"', text)
+        self.assertNotIn('Name: "{app}\\runtime\\edge_job_inbox.sqlite3-shm"', text)
         self.assertIn('Name: "{localappdata}\\FlyPrint Edge"', text)
 
 

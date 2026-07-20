@@ -60,7 +60,6 @@ def build_print_request(
     *,
     job_id,
     printer_id,
-    printer_name,
     file_path,
     source_name,
     print_options,
@@ -71,13 +70,11 @@ def build_print_request(
 ) -> PrintRequest:
     printer = config_repo.get_printer_by_id(printer_id) if printer_id else None
     if not printer:
-        printer = config_repo.get_printer_by_name(printer_name)
-    if not printer:
-        raise ValueError(f"managed printer not found: {printer_name!r}")
+        raise ValueError(f"managed printer not found: {printer_id!r}")
     return PrintRequest(
         job_id=str(job_id),
         printer_id=str(printer.get("id") or printer_id or "") or None,
-        printer_name=str(printer.get("name") or printer_name),
+        printer_name=str(printer.get("name") or ""),
         printer_uuid=str(printer.get("printer_uuid") or ""),
         ipp_uri=str(printer.get("ipp_uri") or ""),
         source_path=Path(file_path) if file_path else None,

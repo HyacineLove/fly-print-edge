@@ -24,6 +24,18 @@ class DummyPrinterManager:
         self.config = DummyConfig()
 
 
+class TerminalReportRecorder:
+    def __init__(self):
+        self.reports = []
+
+    def queue_terminal_job_update(self, job_id, status, data):
+        self.reports.append((job_id, status, data))
+        return True
+
+    def dispatch_local_message(self, message_type, data):
+        return None
+
+
 class CloudPrintAdapterTests(unittest.TestCase):
     def make_handler(self):
         handler = PrintJobHandler(
@@ -50,6 +62,23 @@ class CloudPrintAdapterTests(unittest.TestCase):
             handler.handle_print_job(message)
         download.assert_not_called()
         failure.assert_called_once()
+
+    def test_invalid_hash_is_terminated_in_the_durable_report_path(self):
+        handler = PrintJobHandler(
+            api_client=Mock(node_id="node"),
+            printer_manager=DummyPrinterManager(),
+            websocket_client=TerminalReportRecorder(),
+        )
+        message = self.message()
+        message["data"]["content_hash"] = "invalid"
+
+        handler.handle_print_job(message)
+
+        self.assertEqual(1, len(handler.websocket_client.reports))
+        job_id, status, report = handler.websocket_client.reports[0]
+        self.assertEqual("job-1", job_id)
+        self.assertEqual("failed", status)
+        self.assertEqual("invalid_content_hash", report["error_code"])
 
     def test_valid_job_enters_only_direct_ipp_service_adapter(self):
         handler = self.make_handler()

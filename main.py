@@ -706,7 +706,6 @@ async def get_qr_code():
         status_synced = await asyncio.to_thread(
             status_reporter.force_report_printer,
             printer_id=cloud_printer_id,
-            printer_name=default_printer.get("name"),
             wait=True,
             timeout=8.0,
         )
@@ -1548,7 +1547,6 @@ async def start_printer_test(printer_id: str):
                 printer_manager.config,
                 job_id=task_id,
                 printer_id=printer_id,
-                printer_name=printer.get("name"),
                 file_path=str(test_source),
                 source_name=test_source.name,
                 content_hash=hashlib.sha256(test_source.read_bytes()).hexdigest(),

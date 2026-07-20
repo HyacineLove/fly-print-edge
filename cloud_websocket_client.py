@@ -19,7 +19,7 @@ from typing import Dict, Any, Callable, Optional, List
 from cloud_auth import CloudAuthClient
 from file_manager import get_file_manager, is_valid_content_hash
 from print_options import normalize_print_options
-from job_inbox import JobInbox
+from job_delivery_store import JobDeliveryStore
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,11 @@ _CLOUD_OPERATIONAL_ERROR_CODES = {
 class CloudWebSocketClient:
     """云端WebSocket客户端"""
     
-    def __init__(self, websocket_url: str, auth_client: CloudAuthClient, node_missing_handler: Optional[Callable[[str], None]] = None, inbox_path: Optional[str] = None):
+    def __init__(self, websocket_url: str, auth_client: CloudAuthClient, node_missing_handler: Optional[Callable[[str], None]] = None, inbox_path: Optional[str] = None, node_id: Optional[str] = None):
         self.websocket_url = websocket_url
         self.auth_client = auth_client
         self.node_missing_handler = node_missing_handler
+        self.node_id = str(node_id or "")
         self.websocket = None
         self.running = False
         self.connected = False  # 实际连接状态（握手成功才为True）
@@ -49,7 +50,8 @@ class CloudWebSocketClient:
         self.last_error_message = None
         self.node_missing = False
         self.reconnect_interval = 5  # 重连间隔秒数
-        self.job_inbox = JobInbox(inbox_path) if inbox_path else None
+        self.job_delivery_store = JobDeliveryStore(inbox_path) if inbox_path else None
+        self._terminal_report_flush_lock = threading.Lock()
         
         # 仅作运行期加速；跨重启去重以 SQLite 收件箱为准。
         self.completed_jobs = {}  # {job_id: completion_timestamp}
@@ -181,14 +183,12 @@ class CloudWebSocketClient:
                 len(expired_processing),
             )
     
-    def _mark_job_completed(self, job_id: str):
-        """标记任务为已完成"""
+    def _mark_job_terminal_local(self, job_id: str):
+        """Keep only a runtime acceleration cache; SQLite is authoritative."""
         with self._job_tracking_lock:
             self.processing_jobs.pop(job_id, None)
             self.completed_jobs[job_id] = time.time()
-        if self.job_inbox:
-            self.job_inbox.mark_terminal(job_id, "completed")
-        logger.debug(f"任务已标记为完成: {job_id} (缓存中共 {len(self.completed_jobs)} 个)")
+        logger.debug("任务已标记为本地终态: %s", job_id)
     
     def _is_job_completed(self, job_id: str) -> bool:
         """检查任务是否已完成"""
@@ -214,9 +214,18 @@ class CloudWebSocketClient:
         with self._job_tracking_lock:
             self.processing_jobs.pop(job_id, None)
 
-    def mark_job_terminal(self, job_id: str, status: str):
-        if self.job_inbox and job_id:
-            self.job_inbox.mark_terminal(job_id, status)
+    def queue_terminal_job_update(self, job_id: str, status: str, job_data: Dict[str, Any]) -> bool:
+        """Persist one terminal report before attempting WebSocket delivery."""
+        if not job_id or not self.job_delivery_store:
+            return False
+        payload = self.job_delivery_store.record_terminal_report(job_id, status, job_data)
+        self._mark_job_terminal_local(job_id)
+        self._finish_job_processing(job_id)
+        self._schedule_terminal_report_flush()
+        return bool(payload.get("event_id"))
+
+    def terminal_report_summary(self) -> Dict[str, Any]:
+        return self.job_delivery_store.report_summary() if self.job_delivery_store else {"pending": 0, "rejected": 0, "last_rejected": None}
 
     async def _ack(self, data: Dict[str, Any]) -> None:
         if "msg_id" not in data:
@@ -228,19 +237,65 @@ class CloudWebSocketClient:
         })
 
     async def _recover_inbox_jobs(self) -> None:
-        if not self.job_inbox:
+        if not self.job_delivery_store:
             return
-        received, interrupted = self.job_inbox.recovery()
+        received, interrupted = self.job_delivery_store.recovery()
         for job_id in interrupted:
-            self.job_inbox.mark_terminal(job_id, "unconfirmed")
-            await self._send_message({"type": "job_update", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "data": {"job_id": job_id, "status": "unconfirmed", "error_code": "edge_restart_result_unknown", "error_message": "Edge 重启后无法确认 IPP 结果，任务不会自动重打"}})
+            self.queue_terminal_job_update(job_id, "unconfirmed", {"job_id": job_id, "status": "unconfirmed", "error_code": "edge_restart_result_unknown", "error_message": "Edge 重启后无法确认 IPP 结果，任务不会自动重打"})
         loop = asyncio.get_running_loop()
         for payload in received:
             job_id = str((payload.get("data") or {}).get("job_id") or "")
-            if not job_id or not self.job_inbox.mark_processing(job_id):
+            if not job_id or not self.job_delivery_store.mark_processing(job_id):
                 continue
             for handler in self.message_handlers.get("print_job", []):
                 await loop.run_in_executor(None, handler, payload)
+        await self._flush_terminal_reports()
+
+    def _schedule_terminal_report_flush(self) -> None:
+        if not self.loop or not self.loop.is_running():
+            return
+        future = asyncio.run_coroutine_threadsafe(self._flush_terminal_reports(), self.loop)
+        future.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+
+    async def _flush_terminal_reports(self) -> None:
+        if not self.job_delivery_store or not self._terminal_report_flush_lock.acquire(blocking=False):
+            return
+        try:
+            for report in self.job_delivery_store.due_terminal_reports():
+                event_id = str(report.get("event_id") or "")
+                if not event_id:
+                    continue
+                sent = await self._send_message({
+                    "type": "job_update",
+                    "node_id": self.node_id,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "data": report,
+                })
+                self.job_delivery_store.schedule_terminal_report_retry(event_id, "websocket_unavailable" if not sent else "awaiting_cloud_ack")
+        finally:
+            self._terminal_report_flush_lock.release()
+
+    async def _terminal_report_retry_loop(self) -> None:
+        while self.running and self.connected:
+            await self._flush_terminal_reports()
+            await asyncio.sleep(1)
+
+    def _handle_job_update_ack(self, data: Dict[str, Any]) -> None:
+        if not self.job_delivery_store:
+            return
+        event_id = str(data.get("event_id") or "")
+        status = str(data.get("status") or "")
+        if not event_id:
+            return
+        if status == "accepted":
+            self.job_delivery_store.acknowledge_terminal_report(event_id)
+            logger.info("Cloud confirmed terminal job update: event_id=%s", event_id)
+            return
+        if status == "rejected":
+            reason = str(data.get("reason") or "job_update_rejected")
+            self.job_delivery_store.reject_terminal_report(event_id, reason)
+            logger.error("Cloud rejected terminal job update: event_id=%s reason=%s", event_id, reason)
+            self.dispatch_local_message("cloud_error", {"type": "cloud_error", "data": {"code": "job_update_rejected", "message": f"Cloud 拒绝任务终态上报：{reason}", "event_id": event_id}})
 
     def _run_async_loop(self):
         """在单独线程中运行异步循环"""
@@ -288,13 +343,20 @@ class CloudWebSocketClient:
                     self.node_missing = False
                     logger.info("WebSocket连接成功")
                     await self._recover_inbox_jobs()
-                    
-                    # 监听消息
-                    async for message in websocket:
+                    retry_task = asyncio.create_task(self._terminal_report_retry_loop())
+                    try:
+                        # 监听消息
+                        async for message in websocket:
+                            try:
+                                await self._handle_message(message)
+                            except Exception as e:
+                                logger.error(f"处理WebSocket消息异常: {e}")
+                    finally:
+                        retry_task.cancel()
                         try:
-                            await self._handle_message(message)
-                        except Exception as e:
-                            logger.error(f"处理WebSocket消息异常: {e}")
+                            await retry_task
+                        except asyncio.CancelledError:
+                            pass
                     self.websocket = None
                     self.connected = False
                             
@@ -322,17 +384,21 @@ class CloudWebSocketClient:
             data = json.loads(message)
             message_type = data.get("type", "unknown")
             
-            if message_type == "print_job" and self.job_inbox:
+            if message_type == "job_update_ack":
+                self._handle_job_update_ack(data.get("data") or {})
+                return
+
+            if message_type == "print_job" and self.job_delivery_store:
                 job_id = str((data.get("data") or {}).get("job_id") or data.get("command_id") or "")
                 if not job_id:
                     logger.warning("Rejecting print job without job_id")
                     return
-                first_delivery, current_state = self.job_inbox.receive(job_id, str(data.get("msg_id") or ""), data)
+                first_delivery, current_state = self.job_delivery_store.receive(job_id, str(data.get("msg_id") or ""), data)
                 await self._ack(data)
                 if not first_delivery:
                     logger.info("Duplicate print delivery acknowledged without reprinting: job_id=%s state=%s", job_id, current_state)
                     return
-                if not self.job_inbox.mark_processing(job_id):
+                if not self.job_delivery_store.mark_processing(job_id):
                     return
             else:
                 await self._ack(data)
@@ -684,12 +750,10 @@ class PrintJobHandler:
 
     def handle_print_job(self, message: Dict[str, Any]):
         """处理打印任务消息"""
+        data = message.get("data", {}) if isinstance(message, dict) else {}
         try:
             # 从WebSocket消息中提取实际的打印任务数据
-            data = message.get("data", {})
-            
             job_id = data.get("job_id")
-            printer_name = data.get("printer_name")
             printer_id = data.get("printer_id")
             file_url = data.get("file_url")
             content_hash = data.get("content_hash")
@@ -701,8 +765,9 @@ class PrintJobHandler:
             
             logger.info(f"处理云端打印任务: {job_name} (ID: {job_id})")
             
-            if not all([job_id, printer_name, file_url]):
-                logger.warning("打印任务参数不完整")
+            if not all([job_id, printer_id, file_url]):
+                logger.warning("打印任务参数不完整: job_id、printer_id 和 file_url 均为必填")
+                self._report_job_failure(job_id, "Cloud 下发的打印任务缺少必填字段", "invalid_print_job")
                 return
             terminal_context = {
                 key: data.get(key)
@@ -711,7 +776,7 @@ class PrintJobHandler:
             }
             if not is_valid_content_hash(content_hash):
                 logger.warning("打印任务缺少有效 content_hash: job_id=%s", job_id)
-                self._report_job_failure(job_id, "content_hash missing or invalid")
+                self._report_job_failure(job_id, "content_hash missing or invalid", "invalid_content_hash")
                 return
 
             interactive_options = None
@@ -727,9 +792,12 @@ class PrintJobHandler:
                         logger.debug(f"已将云端任务绑定到当前交互会话: {bound_session_id}")
                     elif data.get("terminal_ticket_hash"):
                         logger.warning("拒绝未绑定到当前终端会话的集成任务: %s", job_id)
+                        self._report_job_failure(job_id, "终端会话关联不匹配", "terminal_context_mismatch")
                         return
             except Exception as bind_error:
                 logger.warning(f"绑定交互会话失败: {bind_error}")
+                self._report_job_failure(job_id, "终端会话绑定失败", "terminal_context_mismatch")
+                return
             if terminal_context:
                 self.job_terminal_contexts[job_id] = terminal_context
             
@@ -773,7 +841,7 @@ class PrintJobHandler:
             logger.info(
                 "Cloud print options normalized: job_id=%s printer=%r options=%r",
                 job_id,
-                printer_name,
+                printer_id,
                 print_options,
             )
 
@@ -795,7 +863,6 @@ class PrintJobHandler:
             self._start_ipp_print_service(
                 job_id=job_id,
                 printer_id=printer_id,
-                printer_name=printer_name,
                 file_path=None,
                 job_name=job_name,
                 print_options=print_options,
@@ -816,7 +883,6 @@ class PrintJobHandler:
         *,
         job_id,
         printer_id,
-        printer_name,
         file_path,
         job_name,
         print_options,
@@ -829,17 +895,14 @@ class PrintJobHandler:
         from printing.domain import PrintState
 
         printer = self.printer_manager.config.get_printer_by_id(printer_id) if printer_id else None
-        if not printer:
-            printer = self.printer_manager.config.get_printer_by_name(printer_name)
         if not printer or not printer.get("enabled", True):
-            self._report_job_failure(job_id, "打印服务尚未配置完成，请联系工作人员。", "service_not_ready")
+            self._report_job_failure(job_id, "Cloud 指定的打印机不存在或未启用。", "printer_not_managed")
             return
         service = build_print_service(self.printer_manager.config, logger)
         request = build_print_request(
             self.printer_manager.config,
             job_id=job_id,
             printer_id=printer_id,
-            printer_name=printer_name,
             file_path=file_path,
             source_name=job_name,
             print_options=print_options,
@@ -877,7 +940,7 @@ class PrintJobHandler:
                 last_status_refresh_state = event.state
                 self.status_reporter.force_report_printer(
                     printer_id=printer_id,
-                    printer_name=printer_name,
+                    printer_name=printer.get("name"),
                 )
 
         last_status_refresh_state = None
@@ -1036,25 +1099,6 @@ class PrintJobHandler:
             if job_dir and not registered:
                 shutil.rmtree(job_dir, ignore_errors=True)
     
-    def _refresh_printer_status(self, printer_id: str = None, printer_name: str = None):
-        if self.status_reporter and printer_id:
-            self.status_reporter.force_report_printer(
-                printer_id=printer_id,
-                printer_name=printer_name,
-            )
-
-    def _get_managed_printer_record(self, printer_id: str = None, printer_name: str = None):
-        config = getattr(self.printer_manager, "config", None)
-        if not config:
-            return None
-        if printer_id and hasattr(config, "get_printer_by_id"):
-            printer = config.get_printer_by_id(printer_id)
-            if printer:
-                return printer
-        if printer_name and hasattr(config, "get_printer_by_name"):
-            return config.get_printer_by_name(printer_name)
-        return None
-
     def _report_job_status(
         self,
         job_id: str,
@@ -1117,8 +1161,6 @@ class PrintJobHandler:
         """
         if job_id:
             try:
-                from datetime import datetime, timezone
-                
                 # 构造消息数据
                 job_data = {
                     "job_id": job_id,
@@ -1128,25 +1170,13 @@ class PrintJobHandler:
                 }
                 job_data.update(self.job_terminal_contexts.pop(job_id, {}))
                 
-                message = {
-                    "type": "job_update",
-                    "node_id": self.api_client.node_id if self.api_client else "unknown",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": job_data
-                }
-                
-                # 1. 通过WebSocket发送给Cloud
+                # Cloud confirmation is required before the persisted report is
+                # removed. A successful socket write alone is not enough.
                 if self.websocket_client:
-                    sent = self.websocket_client.send_message_sync(message)
-                    if sent:
-                        logger.info(f"任务成功状态已通过WebSocket上报: {job_id}")
-                    else:
-                        logger.error(f"任务成功状态WebSocket上报失败: {job_id}")
-                    
-                    # 【关键】标记任务为已完成，防止重复执行
-                    self.websocket_client._mark_job_completed(job_id)
+                    if not self.websocket_client.queue_terminal_job_update(job_id, "completed", job_data):
+                        logger.error("任务成功终态未能写入本地投递队列: %s", job_id)
                 else:
-                    logger.warning(f"WebSocket连接不可用，无法上报任务状态: {job_id}")
+                    logger.error("WebSocket客户端不可用，无法持久化任务终态: %s", job_id)
                 
                 # 2. 分发本地消息给前端 (SSE)
                 if self.websocket_client:
@@ -1175,7 +1205,6 @@ class PrintJobHandler:
         """通过WebSocket报告任务失败"""
         if job_id:
             try:
-                from datetime import datetime, timezone
                 cloud_status = status if status in {"failed", "canceled", "unconfirmed"} else "failed"
                 cloud_error_code = (
                     _CLOUD_OPERATIONAL_ERROR_CODES.get(error_code, error_code)
@@ -1195,22 +1224,13 @@ class PrintJobHandler:
                 if local_extra:
                     local_job_data.update(local_extra)
                 
-                message = {
-                    "type": "job_update",
-                    "node_id": self.api_client.node_id if self.api_client else "unknown",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": job_data
-                }
-                
-                # 1. 通过WebSocket发送给Cloud
+                # The local terminal result and its Cloud report are one durable
+                # operation. Rejection remains visible instead of being retried.
                 if self.websocket_client:
-                    sent = self.websocket_client.send_message_sync(message)
-                    if sent:
-                        logger.info(f"任务失败状态已通过WebSocket上报: {job_id}")
-                    else:
-                        logger.error(f"任务失败状态WebSocket上报失败: {job_id}")
+                    if not self.websocket_client.queue_terminal_job_update(job_id, cloud_status, job_data):
+                        logger.error("任务失败终态未能写入本地投递队列: %s", job_id)
                 else:
-                    logger.warning(f"WebSocket连接不可用，无法上报任务状态: {job_id}")
+                    logger.error("WebSocket客户端不可用，无法持久化任务终态: %s", job_id)
                 
                 # 2. 分发本地消息给前端 (SSE)
                 if self.websocket_client:
@@ -1221,7 +1241,6 @@ class PrintJobHandler:
                     self.websocket_client.dispatch_local_message("job_status", local_msg)
                     if hasattr(self.websocket_client, "_finish_job_processing"):
                         self.websocket_client._finish_job_processing(job_id)
-                    self.websocket_client.mark_job_terminal(job_id, cloud_status)
                     logger.debug(f"任务失败状态已分发到本地处理器 (SSE)")
 
             except Exception as e:

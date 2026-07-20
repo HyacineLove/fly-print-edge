@@ -10,6 +10,7 @@ class _FakeWebSocket:
     def __init__(self):
         self.cloud_messages = []
         self.local_messages = []
+        self.terminal_reports = []
 
     def send_message_sync(self, message):
         self.cloud_messages.append(message)
@@ -18,8 +19,9 @@ class _FakeWebSocket:
     def dispatch_local_message(self, message_type, message):
         self.local_messages.append((message_type, message))
 
-    def mark_job_terminal(self, job_id, status):
-        return None
+    def queue_terminal_job_update(self, job_id, status, data):
+        self.terminal_reports.append((job_id, status, data))
+        return True
 
 
 class _FakeApiClient:
@@ -62,7 +64,8 @@ class PrintJobStatusReportingTests(unittest.TestCase):
             status="unconfirmed",
         )
 
-        cloud_data = handler.websocket_client.cloud_messages[0]["data"]
+        _, status, cloud_data = handler.websocket_client.terminal_reports[0]
+        self.assertEqual("unconfirmed", status)
         self.assertEqual("unconfirmed", cloud_data["status"])
         self.assertEqual("submission_unconfirmed", cloud_data["error_code"])
 
@@ -76,7 +79,8 @@ class PrintJobStatusReportingTests(unittest.TestCase):
             status="failed",
         )
 
-        cloud_data = handler.websocket_client.cloud_messages[0]["data"]
+        _, status, cloud_data = handler.websocket_client.terminal_reports[0]
+        self.assertEqual("failed", status)
         self.assertEqual("failed", cloud_data["status"])
         self.assertEqual("print_timeout", cloud_data["error_code"])
 
