@@ -121,6 +121,9 @@ class InteractiveSessionManager:
             current_file_id = self._active_session.get("file_id")
             if current_file_id and current_file_id != file_id:
                 return None
+            # Same file already bound: keep user-tuned options; suppress SSE remount.
+            if current_file_id and current_file_id == file_id:
+                return None
 
             self._active_session["file_id"] = file_id
             self._active_session["file_url"] = file_url

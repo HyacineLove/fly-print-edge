@@ -212,9 +212,21 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
 
     if message_type == "preview_file":
         accepted = interactive_session_manager.accept_preview_event(payload)
+        active = interactive_session_manager.get_active_session() or {}
         if not accepted:
-            logger.debug(" 丢弃未绑定到当前会话的 preview_file 事件")
+            # Duplicate same-file integration preview must still refresh Cloud bind
+            # so TerminalDispatcher stops reclaiming every ~5s.
+            if (
+                active
+                and payload.get("integration_request_id")
+                and active.get("integration_request_id") == payload.get("integration_request_id")
+                and active.get("file_id") == payload.get("file_id")
+            ):
+                _report_terminal_session_state(active)
+            else:
+                logger.debug(" 丢弃未绑定到当前会话的 preview_file 事件")
             return None
+        _report_terminal_session_state(active if active else interactive_session_manager.get_active_session())
         enriched = dict(message)
         enriched["data"] = accepted
         return enriched

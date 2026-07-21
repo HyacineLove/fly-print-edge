@@ -32,6 +32,33 @@ class InteractiveSessionManagerTests(unittest.TestCase):
 
         self.assertIsNone(rejected)
 
+    def test_same_file_preview_is_idempotent_and_preserves_options(self):
+        session = self.manager.start_session(upload_token="token-1")
+        ticket_hash = "b" * 64
+        first = self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": "https://example.com/file-1.pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": ticket_hash,
+            "integration_request_id": "request-1",
+            "print_options": {"copies": 2, "color_mode": "grayscale"},
+        })
+        self.assertIsNotNone(first)
+        self.assertEqual({"copies": 2, "color_mode": "grayscale"}, self.manager.get_active_session()["initial_print_options"])
+
+        duplicate = self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": "https://example.com/file-1.pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": ticket_hash,
+            "integration_request_id": "request-1",
+            "print_options": {"copies": 1, "color_mode": "color"},
+        })
+        self.assertIsNone(duplicate)
+        active = self.manager.get_active_session()
+        self.assertEqual({"copies": 2, "color_mode": "grayscale"}, active["initial_print_options"])
+        self.assertEqual("request-1", active["integration_request_id"])
+
     def test_print_submission_is_idempotent_per_session(self):
         session = self.manager.start_session(upload_token="token-1")
         self.manager.accept_preview_event({
