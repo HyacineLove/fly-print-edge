@@ -1,5 +1,7 @@
 # FlyPrint Edge 直接 IPP 打印架构
 
+> 人工/深度参考。Agent 日常以 `docs/agent/architecture-and-protocols.md` 为准。
+
 ## 数据流
 
 ```text

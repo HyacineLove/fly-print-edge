@@ -1,5 +1,7 @@
 # FlyPrint Edge 直接 IPP 部署与运维
 
+> 人工运维参考。Agent 构建/测试见 `docs/agent/development-and-verification.md`。
+
 ## 环境要求
 
 - Windows 主机与打印机网络可达；网线直连时两端使用同一网段静态 IPv4。
