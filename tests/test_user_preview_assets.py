@@ -85,6 +85,7 @@ class UserPreviewAssetTests(unittest.TestCase):
         api = read_source(BASE_DIR / "modules/shared/api.js")
 
         self.assertIn("printerAvailability", api)
+        self.assertIn('qr: "/api/qr_code"', api)
         self.assertIn("printer_fault", runtime)
         self.assertNotIn("media-needed-error", runtime)
         self.assertIn("isPrinterFaultResult", done_view)
@@ -93,6 +94,26 @@ class UserPreviewAssetTests(unittest.TestCase):
         self.assertIn("availabilityPollTimer", done_view)
         self.assertIn("printerAvailability", login_view)
         self.assertIn("setPrinterFaultLocked", login_view)
+
+    def test_cloud_availability_errors_use_the_countdown_without_retry_toast_text(self):
+        login_view = read_source(BASE_DIR / "modules/views/login-view.js")
+        runtime = read_source(BASE_DIR / "modules/shared/runtime.js")
+        api = read_source(BASE_DIR / "modules/shared/api.js")
+
+        self.assertIn("cloudAccessLocked", login_view)
+        self.assertIn("terminalActivationRequired", login_view)
+        self.assertIn("refreshQrCode({ automatic: true })", login_view)
+        self.assertNotIn("loginQrRetrySuffix", login_view)
+        self.assertNotIn("loginQrRetrySuffix", runtime)
+        self.assertIn('error.code = json?.error_code || json?.code || ""', api)
+        self.assertIn("cloud_response_timeout", runtime)
+
+    def test_print_error_mapping_covers_cloud_availability_errors(self):
+        runtime = read_source(BASE_DIR / "modules/shared/runtime.js")
+
+        for error_code in ("node_disabled", "node_not_found", "printer_disabled", "printer_not_found"):
+            with self.subTest(error_code=error_code):
+                self.assertIn(f"{error_code}:", runtime)
 
     def test_printer_fault_done_view_does_not_auto_restart_until_recovered(self):
         done_view = read_source(BASE_DIR / "modules/views/done-view.js")

@@ -171,27 +171,6 @@ class CloudAPIClient:
             logger.exception("Edge profile report failed")
             return {"success": False, "error": str(exc)}
 
-    def issue_terminal_ticket(self, printer_id: str, terminal_session_id: str) -> Dict[str, Any]:
-        """Ask Cloud to bind one short-lived entry ticket to this Edge node."""
-        if not printer_id or not terminal_session_id:
-            return {"success": False, "error": "printer_id and terminal_session_id are required"}
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/v1/edge/self/terminal-tickets",
-                json={"printer_id": printer_id, "terminal_session_id": terminal_session_id},
-                headers=self.auth_client.get_auth_headers(),
-                timeout=10,
-            )
-            if response.status_code in (200, 201):
-                data = response.json()
-                # Never log the response: it contains the one-time opaque ticket.
-                return {"success": True, **data}
-            logger.warning("Terminal ticket request failed: status=%s", response.status_code)
-            return {"success": False, "error": "cloud rejected terminal ticket"}
-        except Exception as exc:
-            logger.exception("Terminal ticket request failed")
-            return {"success": False, "error": str(exc)}
-    
     def get_websocket_url(self) -> str:
         """获取WebSocket连接URL"""
         if not self.node_id:

@@ -95,7 +95,14 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
     return { destroy() {} };
   }
 
-  session.options = createDefaultOptions();
+  const initial = session.file?.print_options || {};
+  session.options = {
+    ...createDefaultOptions(),
+    copies: initial.copies ?? 1,
+    paper_size: initial.paper_size || defaultPaperSize,
+    color_mode: initial.color_mode === "grayscale" ? "mono" : (initial.color_mode || "color"),
+    duplex: initial.duplex_mode === "duplex" ? "longedge" : "simplex",
+  };
   session.runtimeSettings = normalizeRuntimeSettings(session.runtimeSettings);
   session.capabilityState = createDefaultCapabilityState();
   clearPendingPrintRequest();
@@ -286,7 +293,7 @@ export function bindPreviewViewEvents({ appState, queuePrintRequest, restartCycl
       updatePreviewPageButtons();
       return true;
     } catch (error) {
-      enterPreviewFailureMode(mapPreviewErrorMessage("", error?.message || "预览加载失败"));
+      enterPreviewFailureMode(mapPreviewErrorMessage(error?.code, error?.message || "预览加载失败"));
       setPreviewLoadingPlaceholder(true);
       if (blockUi) {
         setPreviewControlsLocked(true, true);

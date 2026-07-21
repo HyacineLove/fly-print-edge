@@ -84,6 +84,7 @@ export function createAppController({ mountNode }) {
         job_id: data.job_id || null,
         page_count: 1,
         page_index: 0,
+        print_options: data.print_options || {},
       };
       state.session.doneResult = null;
       state.printing = {};
@@ -108,7 +109,7 @@ export function createAppController({ mountNode }) {
     const message = data?.message || "";
 
     if (state.currentView === "login") {
-      currentViewApi?.setLoginErrorCountdown?.(mapQrErrorMessage(errorCode, message));
+      currentViewApi?.setLoginErrorCountdown?.(mapQrErrorMessage(errorCode, message), errorCode);
       return;
     }
     if (state.currentView === "preview") {
@@ -186,6 +187,7 @@ export function createAppController({ mountNode }) {
           job_id: normalized.job_id || null,
           page_count: sessionState.file?.page_count || 1,
           page_index: sessionState.file?.page_index || 0,
+          print_options: normalized.initial_print_options || {},
         }
       : {};
     sessionState.doneResult = null;

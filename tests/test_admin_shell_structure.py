@@ -113,6 +113,13 @@ class AdminShellStructureTests(unittest.TestCase):
         self.assertIn("<th>型号</th>", render_script)
         self.assertIn('item.make_model || "-"', render_script)
 
+    def test_managed_printer_table_displays_cloud_id_but_keeps_local_action_id(self):
+        render_script = read_source("static/admin/modules/render-sections.js")
+        self.assertIn("<th>Cloud ID</th>", render_script)
+        self.assertIn('const cloudId = item.cloud_id || "";', render_script)
+        self.assertIn('escapeHtml(cloudId || "未注册")', render_script)
+        self.assertIn('data-id="${escapeHtml(localId)}"', render_script)
+
     def test_discovered_printer_table_displays_device_model(self):
         render_script = read_source("static/admin/modules/render-sections.js")
         discovered_start = render_script.index("function renderDiscoveredTable")

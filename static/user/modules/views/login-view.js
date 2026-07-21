@@ -9,7 +9,6 @@ import { hideUserToast, showUserToast } from "../shared/toast.js";
 import {
   loginQrRetryCountdownSeconds,
   loginQrRetryIntervalMs,
-  loginQrRetrySuffix,
   mapQrErrorMessage,
   setQrCenterVisible,
 } from "../shared/runtime.js";
@@ -58,6 +57,8 @@ export function bindLoginViewEvents({ appState }) {
   let loginQrRetryTimer = null;
   let loginQrAutoRefreshTimer = null;
   let printerFaultLocked = false;
+  let cloudAccessLocked = false;
+  let terminalActivationRequired = false;
   let availabilityPollTimer = null;
 
   function setManualRefreshDisabled(disabled) {
@@ -65,6 +66,10 @@ export function bindLoginViewEvents({ appState }) {
     if (!btn) return;
     btn.classList.toggle("manual-refresh-disabled", !!disabled);
     btn.style.cursor = disabled ? "not-allowed" : "pointer";
+  }
+
+  function updateManualRefreshState() {
+    setManualRefreshDisabled(printerFaultLocked || cloudAccessLocked || terminalActivationRequired);
   }
 
   function clearRetryTimer() {
@@ -85,7 +90,7 @@ export function bindLoginViewEvents({ appState }) {
       clearRetryTimer();
       clearBg("3_37");
       setQrCenterVisible(false);
-      setManualRefreshDisabled(true);
+      updateManualRefreshState();
       loginCountdownActive = false;
       loginCountdownValue = 0;
       setText(["77_56"], "0");
@@ -95,7 +100,7 @@ export function bindLoginViewEvents({ appState }) {
       }
     } else {
       clearAvailabilityPollTimer();
-      setManualRefreshDisabled(false);
+      updateManualRefreshState();
     }
   }
 
@@ -117,20 +122,30 @@ export function bindLoginViewEvents({ appState }) {
     }
   }
 
-  function setLoginErrorCountdown(message) {
-    showUserToast(`${message}${loginQrRetrySuffix}`, "error");
+  function setLoginErrorCountdown(message, errorCode = "") {
+    const code = String(errorCode || "").toLowerCase();
+    terminalActivationRequired = code === "node_not_found";
+    cloudAccessLocked = code === "node_disabled" || code === "printer_disabled";
+    updateManualRefreshState();
+    showUserToast(message, "error");
+    if (terminalActivationRequired) {
+      clearRetryTimer();
+      loginCountdownActive = false;
+      loginCountdownValue = 0;
+      setText(["77_56"], "0");
+      return;
+    }
     loginCountdownValue = loginQrRetryCountdownSeconds;
     loginCountdownActive = true;
     setText(["77_56"], String(loginCountdownValue));
   }
 
   function setQrRefreshLoading() {
-    showUserToast("获取二维码中", "info");
     setQrCenterVisible(false);
   }
 
-  async function refreshQrCode() {
-    if (loginQrRefreshing || printerFaultLocked) return false;
+  async function refreshQrCode({ automatic = false } = {}) {
+    if (loginQrRefreshing || printerFaultLocked || terminalActivationRequired || (cloudAccessLocked && !automatic)) return false;
     clearRetryTimer();
     const qrWrap = q("3_37");
     clearBg("3_37");
@@ -146,14 +161,14 @@ export function bindLoginViewEvents({ appState }) {
     try {
       const available = await checkPrinterAvailability();
       if (!available) return false;
-      const qr = await getJson("/api/qr_code");
+      const qr = await getJson(api.qr);
       if (qr?.error_code === "printer_fault") {
         setPrinterFaultLocked(qr.printer_fault || qr);
         return false;
       }
       if (qr?.standby || qr?.success === false) {
         session.session_id = null;
-        setLoginErrorCountdown(mapQrErrorMessage(qr?.error_code, qr?.message));
+        setLoginErrorCountdown(mapQrErrorMessage(qr?.error_code, qr?.message), qr?.error_code);
         return false;
       }
       if (qr?.success && qr.qr_url) {
@@ -169,6 +184,8 @@ export function bindLoginViewEvents({ appState }) {
         setBg("3_37", qr.qr_url);
         setQrCenterVisible(true);
         hideUserToast();
+        cloudAccessLocked = false;
+        terminalActivationRequired = false;
         loginCountdownValue = 60;
         loginCountdownActive = true;
         setText(["77_56"], String(loginCountdownValue));
@@ -178,12 +195,12 @@ export function bindLoginViewEvents({ appState }) {
       return false;
     } catch (error) {
       session.session_id = null;
-      setLoginErrorCountdown(mapQrErrorMessage("", error?.message || "二维码获取失败"));
+      setLoginErrorCountdown(mapQrErrorMessage(error?.code, error?.message || "二维码获取失败"), error?.code);
       return false;
     } finally {
       if (qrWrap) qrWrap.style.opacity = "1";
       loginQrRefreshing = false;
-      setManualRefreshDisabled(printerFaultLocked);
+      updateManualRefreshState();
       if (!loginCountdownActive) {
         setText(["77_56"], "0");
       }
@@ -203,26 +220,25 @@ export function bindLoginViewEvents({ appState }) {
     setText(["77_56"], String(loginCountdownValue));
     if (loginCountdownValue === 0) {
       loginCountdownActive = false;
-      void refreshQrCode();
+      void refreshQrCode({ automatic: true });
     }
   }, 1000);
 
   loginQrAutoRefreshTimer = window.setInterval(() => {
-    if (printerFaultLocked || loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
+    if (printerFaultLocked || cloudAccessLocked || terminalActivationRequired || loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
     loginQrRetryTimer = window.setTimeout(() => {
       loginQrRetryTimer = null;
       if (loginQrRefreshing || loginCountdownActive) return;
-      void refreshQrCode();
+      void refreshQrCode({ automatic: true });
     }, loginQrRetryIntervalMs);
   }, loginQrRetryIntervalMs);
 
   setText(["77_56"], "0");
   clearBg("3_37");
   setQrCenterVisible(false);
-  showUserToast("获取二维码中", "info");
 
   on("3_28", () => {
-    if (loginQrRefreshing || printerFaultLocked) return;
+    if (loginQrRefreshing || printerFaultLocked || cloudAccessLocked || terminalActivationRequired) return;
     void refreshQrCode();
   });
 

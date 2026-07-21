@@ -152,6 +152,47 @@ class UserPreviewPrintApiTests(unittest.TestCase):
         self.assertTrue(response["success"])
         self.assertEqual(1, self.cloud_service.websocket_client.sent_messages[0]["data"]["options"]["copies"])
 
+    def test_integration_submit_carries_terminal_context(self):
+        manager = main.InteractiveSessionManager()
+        session = manager.start_session(upload_token="upload-token")
+        manager.accept_preview_event({
+            "file_id": "file-1", "file_url": "https://example.com/file.pdf", "content_hash": self.CONTENT_HASH,
+            "terminal_session_id": session["session_id"], "terminal_ticket_hash": "d" * 64,
+            "integration_request_id": "request-1",
+        })
+        self.session_manager = manager
+        self.session_id = session["session_id"]
+        response = self._submit(self._print_request(1))
+        self.assertTrue(response["success"])
+        data = self.cloud_service.websocket_client.sent_messages[0]["data"]
+        self.assertEqual(session["session_id"], data["terminal_session_id"])
+        self.assertEqual("d" * 64, data["terminal_ticket_hash"])
+        self.assertEqual("request-1", data["integration_request_id"])
+
+    def test_bind_interactive_cloud_job_reports_context_once(self):
+        manager = main.InteractiveSessionManager()
+        session = manager.start_session(upload_token="upload-token")
+        context = {
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "e" * 64,
+            "integration_request_id": "request-1",
+        }
+        manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": "https://example.com/file.pdf",
+            "content_hash": self.CONTENT_HASH,
+            **context,
+        })
+        manager.mark_print_submitted(session["session_id"], "file-1", {"copies": 1})
+
+        with patch.object(main, "interactive_session_manager", manager), \
+             patch.object(main, "_report_terminal_session_state") as report_state:
+            bound = main.bind_interactive_cloud_job("https://example.com/file.pdf", "job-1", context)
+
+        self.assertIsNotNone(bound)
+        report_state.assert_called_once()
+        self.assertEqual("request-1", manager.get_active_session()["integration_request_id"])
+
     def test_submit_print_requires_cloud_registration(self):
         self.printer_manager.config.config["managed_printers"][0]["cloud_id"] = None
         response = self._submit(self._print_request(1))

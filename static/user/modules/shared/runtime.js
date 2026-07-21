@@ -11,7 +11,6 @@ import {
 
 export const loginQrRetryIntervalMs = 10000;
 export const loginQrRetryCountdownSeconds = 10;
-export const loginQrRetrySuffix = "，10 秒后将自动重试";
 export const previewFailureFallbackSeconds = 10;
 
 export function showError(message) {
@@ -108,7 +107,11 @@ export function mapQrErrorMessage(errorCode, message) {
   if (code === "printer_disabled") return "打印机已被禁用，请联系管理员";
   if (code === "printer_not_found") return "打印机已被删除或不存在，请联系管理员";
   if (code === "node_disabled") return "节点已被禁用，请联系管理员";
-  if (code === "node_not_found") return "节点已被删除或不存在，请联系管理员";
+  if (code === "node_not_found") return "终端已被云端删除，请联系工作人员处理";
+  if (code === "cloud_response_timeout") return "云端服务响应超时，请稍后重试";
+  if (code === "terminal_ticket_unavailable") return "终端入口暂不可用，请联系工作人员处理";
+  if (code === "printer_cloud_registration_incomplete") return "打印机尚未完成云端登记，请联系工作人员处理";
+  if (code === "terminal_session_replaced") return "终端会话已更新，请重新扫码";
   if (code === "printer_not_belong_to_node") return "打印机与节点绑定异常，请联系管理员";
 
   if (msg.includes("打印机已被管理员禁用")) return "打印机已被禁用，请联系管理员";
@@ -142,6 +145,10 @@ export function mapPrintErrorMessage(errorCode, message) {
     printer_offline: "打印机连接已断开，请联系工作人员。",
     printer_user_intervention: "打印机需要处理，请联系工作人员。",
     printer_rejected_document: "打印机无法处理该文档，请联系工作人员。",
+    node_disabled: "节点已被禁用，请联系工作人员。",
+    node_not_found: "终端已被云端删除，请联系工作人员处理。",
+    printer_disabled: "打印机已被禁用，请联系工作人员。",
+    printer_not_found: "打印机已被删除或不存在，请联系工作人员。",
     print_canceled: "打印任务已取消。",
     ipp_submission_unconfirmed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",
     ipp_job_query_failed: "无法确认本次打印结果，请勿重复提交，请联系工作人员。",

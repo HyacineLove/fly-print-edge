@@ -1,6 +1,7 @@
 import { postJson } from "../shared/api.js";
 import { q } from "../shared/dom.js";
 import { clearPendingPrintRequest, saveSessionState } from "../shared/session-state.js";
+import { mapPrintErrorMessage } from "../shared/runtime.js";
 
 export function renderPrintingView() {
   return `
@@ -77,7 +78,7 @@ export function bindPrintingViewEvents({ appState, finishWithResult }) {
     clearPendingPrintRequest();
     void postJson("/api/print", pendingPrintRequest).catch((error) => {
       saveSessionState();
-      finishWithResult("error", error?.message || "提交打印失败");
+      finishWithResult("error", mapPrintErrorMessage(error?.code, error?.message));
     });
   }
 

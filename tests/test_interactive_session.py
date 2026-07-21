@@ -80,6 +80,32 @@ class InteractiveSessionManagerTests(unittest.TestCase):
 
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
 
+    def test_integration_request_binds_cloud_ticket_to_matching_session(self):
+        session = self.manager.start_session(upload_token="upload-token")
+        ticket_hash = "a" * 64
+
+        self.assertTrue(self.manager.bind_integration_request({
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": ticket_hash,
+            "integration_request_id": "request-1",
+        }))
+
+        active = self.manager.get_active_session()
+        self.assertEqual(ticket_hash, active["terminal_ticket_hash"])
+        self.assertEqual("request-1", active["integration_request_id"])
+
+    def test_integration_request_rejects_wrong_session_or_invalid_ticket_hash(self):
+        session = self.manager.start_session(upload_token="upload-token")
+        base = {
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "b" * 64,
+            "integration_request_id": "request-1",
+        }
+
+        self.assertFalse(self.manager.bind_integration_request({**base, "terminal_session_id": "other-session"}))
+        self.assertFalse(self.manager.bind_integration_request({**base, "terminal_ticket_hash": "not-a-hash"}))
+        self.assertIsNone(self.manager.get_active_session()["integration_request_id"])
+
     def test_bound_cloud_job_keeps_authoritative_interactive_print_options(self):
         session = self.manager.start_session(upload_token="token-1")
         file_url = "https://example.com/file-1.png"
@@ -144,6 +170,22 @@ class InteractiveSessionManagerTests(unittest.TestCase):
             },
             self.manager.build_snapshot(),
         )
+
+    def test_integration_preview_binds_context_and_initial_options(self):
+        session = self.manager.start_session(upload_token="upload-token")
+        payload = {
+            "file_id": "file-1",
+            "file_url": "/api/v1/files/file-1",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "c" * 64,
+            "integration_request_id": "request-1",
+            "print_options": {"copies": 2, "color_mode": "grayscale"},
+        }
+        accepted = self.manager.accept_preview_event(payload)
+        self.assertIsNotNone(accepted)
+        snapshot = self.manager.build_snapshot()
+        self.assertEqual("request-1", self.manager.get_active_session()["integration_request_id"])
+        self.assertEqual(payload["print_options"], snapshot["initial_print_options"])
 
     def test_snapshot_preserves_live_ipp_stage_and_page_counts(self):
         session = self.manager.start_session(upload_token="token-1")

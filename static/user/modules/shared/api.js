@@ -8,10 +8,16 @@ export const api = {
   cleanup: "/api/cleanup",
 };
 
+function requestError(json, status) {
+  const error = new Error(json?.message || `HTTP ${status}`);
+  error.code = json?.error_code || json?.code || "";
+  return error;
+}
+
 export async function getJson(url) {
   const res = await fetch(url, { cache: "no-store" });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
+  if (!res.ok) throw requestError(json, res.status);
   return json;
 }
 
@@ -23,7 +29,7 @@ export async function postJson(url, data) {
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.success === false) {
-    throw new Error(json.message || `HTTP ${res.status}`);
+    throw requestError(json, res.status);
   }
   return json;
 }

@@ -34,6 +34,7 @@ class InteractiveSessionManager:
                 "content_hash": None,
                 "job_id": None,
                 "print_options": None,
+                "initial_print_options": None,
                 "submitted": False,
                 "error_code": None,
                 "error_message": None,
@@ -60,29 +61,27 @@ class InteractiveSessionManager:
             self._active_session["updated_at"] = time.time()
             return True
 
-    def bind_terminal_ticket(self, session_id: str, terminal_ticket: str, entry_type: str = "entry") -> bool:
-        """Persist only the ticket digest for a session created before Cloud responds."""
-        if not terminal_ticket:
-            return False
-        with self._lock:
-            if not self._active_session or self._active_session["session_id"] != session_id:
-                return False
-            self._active_session["terminal_ticket_hash"] = hashlib.sha256(terminal_ticket.encode("utf-8")).hexdigest()
-            self._active_session["entry_type"] = entry_type
-            self._active_session["updated_at"] = time.time()
-            return True
-
     def _matches_terminal_context(self, data: Dict[str, Any]) -> bool:
         """Integration events must prove they belong to the active kiosk session."""
-        ticket_hash = self._active_session.get("terminal_ticket_hash") if self._active_session else None
-        if not ticket_hash:
-            return True
+        if not self._active_session:
+            return False
+        incoming_session_id = data.get("terminal_session_id")
+        incoming_ticket_hash = data.get("terminal_ticket_hash")
+        incoming_request_id = data.get("integration_request_id")
+        if not any((incoming_session_id, incoming_ticket_hash, incoming_request_id)):
+            return not self._active_session.get("integration_request_id")
+        if incoming_session_id != self._active_session.get("session_id"):
+            return False
+        if not isinstance(incoming_ticket_hash, str) or len(incoming_ticket_hash) != 64:
+            return False
+        if any(char not in "0123456789abcdef" for char in incoming_ticket_hash):
+            return False
+        ticket_hash = self._active_session.get("terminal_ticket_hash")
         return (
-            data.get("terminal_session_id") == self._active_session.get("session_id")
-            and data.get("terminal_ticket_hash") == ticket_hash
+            (not ticket_hash or incoming_ticket_hash == ticket_hash)
             and (
                 not self._active_session.get("integration_request_id")
-                or data.get("integration_request_id") == self._active_session.get("integration_request_id")
+                or incoming_request_id == self._active_session.get("integration_request_id")
             )
         )
 
@@ -97,6 +96,9 @@ class InteractiveSessionManager:
             current = self._active_session.get("integration_request_id")
             if current and current != request_id:
                 return False
+            if not self._active_session.get("terminal_ticket_hash"):
+                self._active_session["terminal_ticket_hash"] = data["terminal_ticket_hash"]
+                self._active_session["entry_type"] = "integration"
             self._active_session["integration_request_id"] = request_id
             self._active_session["updated_at"] = time.time()
             return True
@@ -105,6 +107,9 @@ class InteractiveSessionManager:
         file_id = data.get("file_id")
         file_url = data.get("file_url")
         if not file_id or not file_url:
+            return None
+
+        if data.get("integration_request_id") and not self.bind_integration_request(data):
             return None
 
         with self._lock:
@@ -122,6 +127,7 @@ class InteractiveSessionManager:
             self._active_session["file_name"] = data.get("file_name")
             self._active_session["file_type"] = data.get("file_type")
             self._active_session["content_hash"] = data.get("content_hash")
+            self._active_session["initial_print_options"] = deepcopy(data.get("print_options") or {})
             self._active_session["state"] = "preview_ready"
             self._active_session["error_code"] = None
             self._active_session["error_message"] = None
@@ -305,6 +311,8 @@ class InteractiveSessionManager:
             }
             if self._active_session.get("content_hash"):
                 snapshot["content_hash"] = self._active_session.get("content_hash")
+            if self._active_session.get("initial_print_options"):
+                snapshot["initial_print_options"] = deepcopy(self._active_session["initial_print_options"])
             return snapshot
 
     def clear_session(self, session_id: Optional[str] = None) -> bool:

@@ -217,32 +217,33 @@ function renderManagedTable(state) {
   }
 
   return state.managed.map((item) => {
-    const id = item.id || "";
-    const isDefaultPrinter = id && id === state.defaultPrinterId;
-    const test = state.printerTests?.[id];
-    const testRunning = test?.status === "running" || isActionPending(state, "test", id);
+    const localId = item.id || "";
+    const cloudId = item.cloud_id || "";
+    const isDefaultPrinter = localId && localId === state.defaultPrinterId;
+    const test = state.printerTests?.[localId];
+    const testRunning = test?.status === "running" || isActionPending(state, "test", localId);
     const currentPage = Number(test?.current?.current_page);
     const totalPages = Number(test?.current?.total_pages);
     const hasPages = Number.isInteger(currentPage) && currentPage > 0 && Number.isInteger(totalPages) && totalPages > 0;
     const testMessage = testRunning && hasPages
       ? `正在打印，第 ${Math.min(currentPage, totalPages)} / ${totalPages} 页……`
       : test?.current?.message || test?.result?.message || "";
-    const rowLocked = state.printersRefreshing || state.ippProbing || testRunning || isPrinterActionPending(state, id);
+    const rowLocked = state.printersRefreshing || state.ippProbing || testRunning || isPrinterActionPending(state, localId);
     return `
       <tr>
         <td>${escapeHtml(printerName(item))}${isDefaultPrinter ? '<span class="default-tag">默认</span>' : ""}</td>
         <td>${escapeHtml(item.make_model || "-")}</td>
-        <td class="muted">${escapeHtml(id || "-")}</td>
+        <td class="muted">${escapeHtml(cloudId || "未注册")}</td>
         <td class="muted">${escapeHtml(printerAddr(item))}</td>
         <td>${escapeHtml(printerStatusLabel(item))}</td>
         <td class="capability-cell">${escapeHtml(printerCapabilitySummary(item))}</td>
         <td>
           <div class="ops">
-            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(id)}" ${rowLocked || isDefaultPrinter ? "disabled" : ""}>设为默认</button>
-            <button type="button" class="btn" data-action="test-printer" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>${testRunning ? "测试中…" : "测试打印"}</button>
-            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>重新注册云端</button>
-            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>删除</button>
-            ${item.uncertain ? `<button type="button" class="btn" data-action="clear-unconfirmed" data-id="${escapeHtml(id)}" ${rowLocked ? "disabled" : ""}>解除结果未知锁定</button>` : ""}
+            <button type="button" class="btn" data-action="default" data-id="${escapeHtml(localId)}" ${rowLocked || isDefaultPrinter ? "disabled" : ""}>设为默认</button>
+            <button type="button" class="btn" data-action="test-printer" data-id="${escapeHtml(localId)}" ${rowLocked ? "disabled" : ""}>${testRunning ? "测试中…" : "测试打印"}</button>
+            <button type="button" class="btn" data-action="reregister-printer" data-id="${escapeHtml(localId)}" ${rowLocked ? "disabled" : ""}>重新注册云端</button>
+            <button type="button" class="btn btn-danger" data-action="delete" data-id="${escapeHtml(localId)}" ${rowLocked ? "disabled" : ""}>删除</button>
+            ${item.uncertain ? `<button type="button" class="btn" data-action="clear-unconfirmed" data-id="${escapeHtml(localId)}" ${rowLocked ? "disabled" : ""}>解除结果未知锁定</button>` : ""}
           </div>
           ${testMessage ? `<p class="muted">${escapeHtml(testMessage)}</p>` : ""}
         </td>
@@ -303,7 +304,7 @@ function renderPrintersSection(state) {
             <tr>
               <th>名称</th>
               <th>型号</th>
-              <th>ID</th>
+              <th>Cloud ID</th>
               <th>地址/端口</th>
               <th>状态</th>
               <th>能力</th>

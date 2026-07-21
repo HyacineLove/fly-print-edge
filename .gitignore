@@ -53,3 +53,6 @@ demo_pjl/
 
 # Portable 临时文件目录
 temp/
+
+# 运行时本地状态（SQLite 投递库、缓存等）
+runtime/

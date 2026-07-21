@@ -774,7 +774,11 @@ async def get_qr_code():
         try:
             token_data = await asyncio.wait_for(upload_token_future, timeout=10.0)
         except asyncio.TimeoutError:
-            return JSONResponse(status_code=504, content={"success": False, "message": "获取上传凭证超时"})
+            return JSONResponse(status_code=504, content={
+                "success": False,
+                "error_code": "cloud_response_timeout",
+                "message": "云端服务响应超时，请稍后重试",
+            })
         finally:
             # 清除回调
             if (
@@ -881,46 +885,6 @@ async def get_qr_code():
         },
         "session_id": session["session_id"],
     }
-
-@app.get("/api/integration/terminal-ticket")
-async def get_terminal_ticket_qr():
-    """Return the single Cloud entry QR for the kiosk's default printer."""
-    if not node_id or not printer_manager or not cloud_service or not cloud_service.api_client:
-        return JSONResponse(status_code=503, content={"success": False, "error_code": "service_not_ready"})
-    default_printer_id = _ensure_default_printer()
-    default_printer = _get_printer_by_id(default_printer_id) if default_printer_id else None
-    cloud_printer_id = _get_cloud_printer_id(default_printer)
-    if not cloud_printer_id:
-        return {"success": False, "standby": True, "error_code": "printer_cloud_registration_incomplete"}
-    availability = await asyncio.to_thread(_get_default_printer_availability_state)
-    if availability.get("faulted"):
-        return {"success": False, "standby": True, "error_code": "printer_fault", "printer_fault": availability}
-
-    session = interactive_session_manager.start_session(entry_type="entry")
-    _report_terminal_session_state(session)
-    result = await asyncio.to_thread(
-        cloud_service.api_client.issue_terminal_ticket,
-        cloud_printer_id,
-        session["session_id"],
-    )
-    entry_url = str(result.get("entry_url") or "")
-    raw_ticket = str(result.get("terminal_ticket") or "")
-    if not result.get("success") or not entry_url or not raw_ticket:
-        interactive_session_manager.clear_session(session["session_id"])
-        return JSONResponse(status_code=503, content={"success": False, "error_code": "terminal_ticket_unavailable"})
-    # Raw ticket is held only long enough to hash it; never expose it through
-    # local APIs, SSE, or logs.
-    if not interactive_session_manager.bind_terminal_ticket(session["session_id"], raw_ticket):
-        return JSONResponse(status_code=409, content={"success": False, "error_code": "terminal_session_replaced"})
-    _report_terminal_session_state(interactive_session_manager.get_active_session())
-    return {
-        "success": True,
-        "qr_url": build_qr_data_url(entry_url),
-        "text_url": entry_url,
-        "expires_at": result.get("expires_at"),
-        "session_id": session["session_id"],
-    }
-
 
 @app.get("/api/events")
 async def events(request: Request):
@@ -1140,7 +1104,10 @@ async def submit_print(request: Request):
                 "data": {
                     "file_id": file_id,
                     "printer_id": cloud_printer_id,
-                    "options": options
+                    "options": options,
+                    "terminal_session_id": (interactive_session_manager.get_active_session() or {}).get("session_id") or "",
+                    "terminal_ticket_hash": (interactive_session_manager.get_active_session() or {}).get("terminal_ticket_hash") or "",
+                    "integration_request_id": (interactive_session_manager.get_active_session() or {}).get("integration_request_id") or "",
                 }
             }
             # 使用异步发送方法
