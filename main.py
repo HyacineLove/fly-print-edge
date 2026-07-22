@@ -168,6 +168,7 @@ async def startup_event():
 
     if cloud_service:
         cloud_service.add_message_listener("preview_file", handle_cloud_message)
+        cloud_service.add_message_listener("terminal_occupied", handle_cloud_message)
         cloud_service.add_message_listener("error", handle_cloud_message)
         cloud_service.add_message_listener("cloud_error", handle_cloud_message)
         cloud_service.add_message_listener("job_status", handle_cloud_message)
@@ -230,6 +231,32 @@ def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, 
         enriched = dict(message)
         enriched["data"] = accepted
         return enriched
+
+    if message_type == "terminal_occupied":
+        # Command payload may be nested under data; normalize flat fields.
+        occupied_payload = payload if isinstance(payload, dict) else {}
+        if interactive_session_manager.apply_occupied(occupied_payload):
+            active = interactive_session_manager.get_active_session() or {}
+            _report_terminal_session_state(active)
+            enriched = dict(message)
+            enriched["type"] = "terminal_occupied"
+            enriched["data"] = {
+                "session_id": active.get("session_id"),
+                "terminal_session_id": occupied_payload.get("terminal_session_id"),
+                "terminal_ticket_hash": occupied_payload.get("terminal_ticket_hash"),
+                "expires_at": occupied_payload.get("expires_at"),
+            }
+            return enriched
+        active = interactive_session_manager.get_active_session() or {}
+        if (
+            active.get("occupied")
+            and active.get("session_id") == occupied_payload.get("terminal_session_id")
+            and active.get("terminal_ticket_hash") == occupied_payload.get("terminal_ticket_hash")
+        ):
+            logger.debug(" 忽略重复的 terminal_occupied（会话已绑定）")
+            return None
+        logger.debug(" 丢弃与当前会话不匹配的 terminal_occupied")
+        return None
 
     if message_type == "job_status":
         accepted = interactive_session_manager.accept_job_status_event(payload)

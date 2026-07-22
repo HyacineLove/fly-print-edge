@@ -206,6 +206,7 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   position: absolute;
   left: 107px;
   top: 1700px;
+  z-index: 5;
 }
 
 .Pixso-rectangle-97_455 {
@@ -243,6 +244,7 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   left: -9.980871413050929e-15px;
   top: 1757px;
   transform: rotateY(180deg)rotateX(180deg);
+  pointer-events: none;
   background-repeat: no-repeat;
   background-size: 100% 100%;
   background-position: center;
@@ -276,6 +278,7 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   position: absolute;
   left: 556px;
   top: 1699px;
+  z-index: 5;
 }
 
 .Pixso-rectangle-97_461 {

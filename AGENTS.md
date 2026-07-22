@@ -20,3 +20,4 @@
 - 保持模块职责清晰，避免继续堆 `main.py`、Cloud 适配层或单一模块。
 - 保留工作区已有改动；提交前检查 `git status --short`，并同步更新受影响说明。
 - **完成态**：`[x]` 仅表示已合入（及该项验收所要求的打包/预演）；「代码/单测通过」最多 `[~]`。细则见根目录 `FlyPrint任务清单.md`「用法」第 4 条；勾选须与 `docs/agent/release-plan.md` 同步。
+- **交付收口**：本轮 Edge 有改动时，全部改完后 bump 版本并重新 build 安装包（`release/build_installer.py`）。Cloud 侧改动用 `docker compose up --build -d`，不打 Edge 包。详见工作区 `.cursor/rules/delivery-artifacts.mdc`。

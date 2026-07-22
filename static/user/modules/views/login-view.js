@@ -32,6 +32,7 @@ export function renderLoginView() {
           <div id="3_37" class="Pixso-rectangle-3_37"></div>
           <div id="3_39" class="Pixso-rectangle-3_39"></div>
           <div id="3_26" class="Pixso-rectangle-3_26"></div>
+          <div id="qrCenterStatus" class="qr-center-status is-hidden" aria-live="polite"></div>
         </div>
         <p id="3_46" class="Pixso-paragraph-3_46"></p>
       </div>
@@ -61,6 +62,61 @@ export function bindLoginViewEvents({ appState }) {
   let terminalActivationRequired = false;
   let availabilityPollTimer = null;
 
+  let terminalOccupied = false;
+  let occupiedExpireTimer = null;
+
+  function clearOccupiedExpireTimer() {
+    if (!occupiedExpireTimer) return;
+    window.clearTimeout(occupiedExpireTimer);
+    occupiedExpireTimer = null;
+  }
+
+  function setQrCenterStatus(message) {
+    const el = q("qrCenterStatus");
+    if (!el) return;
+    const text = String(message || "").trim();
+    if (!text) {
+      el.textContent = "";
+      el.classList.add("is-hidden");
+      return;
+    }
+    el.textContent = text;
+    el.classList.remove("is-hidden");
+  }
+
+  function setTerminalOccupied(occupied, { expiresAt = null, message = "终端使用中\n请稍候或点击刷新" } = {}) {
+    terminalOccupied = Boolean(occupied);
+    clearOccupiedExpireTimer();
+    if (terminalOccupied) {
+      clearRetryTimer();
+      clearBg("3_37");
+      setQrCenterVisible(false);
+      loginCountdownActive = false;
+      loginCountdownValue = 0;
+      setText(["77_56"], "0");
+      hideUserToast();
+      setQrCenterStatus(message);
+      updateManualRefreshState();
+      if (expiresAt) {
+        const expiryMs = Date.parse(expiresAt);
+        if (!Number.isNaN(expiryMs)) {
+          const delay = Math.max(1000, expiryMs - Date.now());
+          occupiedExpireTimer = window.setTimeout(() => {
+            occupiedExpireTimer = null;
+            if (!terminalOccupied) return;
+            terminalOccupied = false;
+            setQrCenterStatus("");
+            void refreshQrCode({ automatic: true });
+          }, delay);
+        }
+      }
+      return;
+    }
+    setQrCenterStatus("");
+    hideUserToast();
+    updateManualRefreshState();
+  }
+
   function setManualRefreshDisabled(disabled) {
     const btn = q("3_28");
     if (!btn) return;
@@ -69,7 +125,9 @@ export function bindLoginViewEvents({ appState }) {
   }
 
   function updateManualRefreshState() {
-    setManualRefreshDisabled(printerFaultLocked || cloudAccessLocked || terminalActivationRequired);
+    setManualRefreshDisabled(
+      printerFaultLocked || cloudAccessLocked || terminalActivationRequired || loginQrRefreshing,
+    );
   }
 
   function clearRetryTimer() {
@@ -147,27 +205,36 @@ export function bindLoginViewEvents({ appState }) {
   async function refreshQrCode({ automatic = false } = {}) {
     if (loginQrRefreshing || printerFaultLocked || terminalActivationRequired || (cloudAccessLocked && !automatic)) return false;
     clearRetryTimer();
+    clearOccupiedExpireTimer();
+    terminalOccupied = false;
     const qrWrap = q("3_37");
     clearBg("3_37");
     loginQrRefreshing = true;
     loginCountdownActive = false;
     loginCountdownValue = 0;
     setText(["77_56"], "0");
-    setManualRefreshDisabled(true);
+    updateManualRefreshState();
     setQrRefreshLoading();
+    hideUserToast();
+    setQrCenterStatus("正在拉取二维码…");
 
     if (qrWrap) qrWrap.style.opacity = "0.6";
 
     try {
       const available = await checkPrinterAvailability();
-      if (!available) return false;
+      if (!available) {
+        setQrCenterStatus("");
+        return false;
+      }
       const qr = await getJson(api.qr);
       if (qr?.error_code === "printer_fault") {
+        setQrCenterStatus("");
         setPrinterFaultLocked(qr.printer_fault || qr);
         return false;
       }
       if (qr?.standby || qr?.success === false) {
         session.session_id = null;
+        setQrCenterStatus("");
         setLoginErrorCountdown(mapQrErrorMessage(qr?.error_code, qr?.message), qr?.error_code);
         return false;
       }
@@ -183,18 +250,22 @@ export function bindLoginViewEvents({ appState }) {
         saveSessionState();
         setBg("3_37", qr.qr_url);
         setQrCenterVisible(true);
+        setQrCenterStatus("");
         hideUserToast();
         cloudAccessLocked = false;
         terminalActivationRequired = false;
+        terminalOccupied = false;
         loginCountdownValue = 60;
         loginCountdownActive = true;
         setText(["77_56"], String(loginCountdownValue));
         return true;
       }
+      setQrCenterStatus("");
       setLoginErrorCountdown("二维码响应异常");
       return false;
     } catch (error) {
       session.session_id = null;
+      setQrCenterStatus("");
       setLoginErrorCountdown(mapQrErrorMessage(error?.code, error?.message || "二维码获取失败"), error?.code);
       return false;
     } finally {
@@ -208,7 +279,7 @@ export function bindLoginViewEvents({ appState }) {
   }
 
   loginCountdownTimer = window.setInterval(() => {
-    if (loginQrRefreshing) {
+    if (loginQrRefreshing || terminalOccupied) {
       setText(["77_56"], "0");
       return;
     }
@@ -225,10 +296,20 @@ export function bindLoginViewEvents({ appState }) {
   }, 1000);
 
   loginQrAutoRefreshTimer = window.setInterval(() => {
-    if (printerFaultLocked || cloudAccessLocked || terminalActivationRequired || loginQrRetryTimer || loginQrRefreshing || loginCountdownActive) return;
+    if (
+      printerFaultLocked ||
+      cloudAccessLocked ||
+      terminalActivationRequired ||
+      terminalOccupied ||
+      loginQrRetryTimer ||
+      loginQrRefreshing ||
+      loginCountdownActive
+    ) {
+      return;
+    }
     loginQrRetryTimer = window.setTimeout(() => {
       loginQrRetryTimer = null;
-      if (loginQrRefreshing || loginCountdownActive) return;
+      if (loginQrRefreshing || loginCountdownActive || terminalOccupied) return;
       void refreshQrCode({ automatic: true });
     }, loginQrRetryIntervalMs);
   }, loginQrRetryIntervalMs);
@@ -246,11 +327,13 @@ export function bindLoginViewEvents({ appState }) {
 
   return {
     setLoginErrorCountdown,
+    setTerminalOccupied,
     destroy() {
       if (loginCountdownTimer) window.clearInterval(loginCountdownTimer);
       if (loginQrAutoRefreshTimer) window.clearInterval(loginQrAutoRefreshTimer);
       clearAvailabilityPollTimer();
       clearRetryTimer();
+      clearOccupiedExpireTimer();
     },
   };
 }

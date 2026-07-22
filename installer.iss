@@ -1,4 +1,4 @@
-; Inno Setup script for FlyPrint Edge
+﻿; Inno Setup script for FlyPrint Edge
 
 #define MyAppName "FlyPrint Edge"
 #define MyAppPublisher "FlyPrint"
@@ -6,7 +6,7 @@
 #define MyLauncherExeName "flyprint-launcher.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.39"
+  #define MyAppVersion "1.0.42"
 #endif
 
 [Setup]

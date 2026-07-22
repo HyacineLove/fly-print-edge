@@ -118,6 +118,8 @@ class UserPreviewPrintApiTests(unittest.TestCase):
             "file_id": "file-1",
             "file_url": "https://example.com/file.pdf",
             "content_hash": self.CONTENT_HASH,
+            "terminal_session_id": self.session_id,
+            "terminal_ticket_hash": "a" * 64,
         })
         self.file_manager = FileManager(cleanup_interval=300, file_ttl=1800)
 

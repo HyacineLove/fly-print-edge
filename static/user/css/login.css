@@ -253,6 +253,29 @@ span {
   display: none;
 }
 
+.qr-center-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 36px;
+  box-sizing: border-box;
+  text-align: center;
+  font-family: "Microsoft YaHei-Regular";
+  font-size: 36px;
+  line-height: 1.45;
+  color: rgba(55, 65, 95, 1);
+  background: rgba(244, 247, 255, 0.96);
+  border-radius: 18px;
+  z-index: 2;
+  white-space: pre-line;
+}
+
+.qr-center-status.is-hidden {
+  display: none;
+}
+
 .Pixso-group-77_54 {
   width: 51px;
   height: 51px;

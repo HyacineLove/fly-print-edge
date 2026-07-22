@@ -148,6 +148,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_url": "/api/v1/files/file-1",
                 "file_name": "demo.pdf",
                 "file_type": "application/pdf",
+                "terminal_session_id": session["session_id"],
+                "terminal_ticket_hash": "a" * 64,
             }
         )
 
@@ -179,6 +181,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -211,6 +215,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -244,6 +250,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -278,6 +286,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -311,6 +321,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -345,6 +357,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
             "file_url": "/api/v1/files/file-1",
             "file_name": "demo.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "a" * 64,
         }
         self.manager.accept_preview_event(preview_payload)
         self.manager.mark_print_submitted(session["session_id"], "file-1")
@@ -400,6 +414,8 @@ class UserSessionSnapshotContractTests(unittest.TestCase):
                 "file_name": "demo.pdf",
                 "file_type": "application/pdf",
                 "content_hash": "a" * 64,
+                "terminal_session_id": session["session_id"],
+                "terminal_ticket_hash": "b" * 64,
             }
         )
 

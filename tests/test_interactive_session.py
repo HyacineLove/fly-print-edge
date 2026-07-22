@@ -8,29 +8,59 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from interactive_session import InteractiveSessionManager
 
 
+def _official_preview(session_id, file_id="file-1", ticket_hash=None, **extra):
+    payload = {
+        "file_id": file_id,
+        "file_url": f"https://example.com/{file_id}.pdf",
+        "file_name": "resume.pdf",
+        "terminal_session_id": session_id,
+        "terminal_ticket_hash": ticket_hash or ("a" * 64),
+    }
+    payload.update(extra)
+    return payload
+
+
 class InteractiveSessionManagerTests(unittest.TestCase):
     def setUp(self):
         self.manager = InteractiveSessionManager()
 
     def test_preview_event_binds_once_to_active_session(self):
         session = self.manager.start_session(upload_token="token-1")
+        ticket = "a" * 64
 
-        accepted = self.manager.accept_preview_event({
-            "file_id": "file-1",
-            "file_url": "https://example.com/file-1.pdf",
-            "file_name": "resume.pdf",
-        })
-
+        accepted = self.manager.accept_preview_event(_official_preview(session["session_id"], ticket_hash=ticket))
         self.assertIsNotNone(accepted)
         self.assertEqual(accepted["session_id"], session["session_id"])
 
-        rejected = self.manager.accept_preview_event({
-            "file_id": "file-2",
-            "file_url": "https://example.com/file-2.pdf",
-            "file_name": "other.pdf",
-        })
-
+        rejected = self.manager.accept_preview_event(_official_preview(session["session_id"], file_id="file-2", ticket_hash=ticket))
         self.assertIsNone(rejected)
+
+    def test_preview_without_session_proof_is_rejected(self):
+        self.manager.start_session(upload_token="token-1")
+        self.assertIsNone(self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": "https://example.com/file-1.pdf",
+        }))
+
+    def test_apply_occupied_binds_ticket_and_wrong_session_is_ignored(self):
+        session = self.manager.start_session(upload_token="token-1")
+        ticket = "d" * 64
+        self.assertTrue(self.manager.apply_occupied({
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": ticket,
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        self.assertEqual(ticket, self.manager.get_active_session()["terminal_ticket_hash"])
+        self.assertTrue(self.manager.get_active_session()["occupied"])
+        self.assertFalse(self.manager.apply_occupied({
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": ticket,
+            "expires_at": "2099-01-01T00:00:00Z",
+        }), "duplicate occupy for same ticket must not re-report")
+        self.assertFalse(self.manager.apply_occupied({
+            "terminal_session_id": "other",
+            "terminal_ticket_hash": ticket,
+        }))
 
     def test_same_file_preview_is_idempotent_and_preserves_options(self):
         session = self.manager.start_session(upload_token="token-1")
@@ -61,10 +91,7 @@ class InteractiveSessionManagerTests(unittest.TestCase):
 
     def test_print_submission_is_idempotent_per_session(self):
         session = self.manager.start_session(upload_token="token-1")
-        self.manager.accept_preview_event({
-            "file_id": "file-1",
-            "file_url": "https://example.com/file-1.pdf",
-        })
+        self.manager.accept_preview_event(_official_preview(session["session_id"]))
 
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
         self.assertTrue(self.manager.revert_print_submission(session["session_id"], "file-1"))
@@ -73,10 +100,7 @@ class InteractiveSessionManagerTests(unittest.TestCase):
 
     def test_job_status_only_passes_for_bound_cloud_job(self):
         session = self.manager.start_session(upload_token="token-1")
-        self.manager.accept_preview_event({
-            "file_id": "file-1",
-            "file_url": "https://example.com/file-1.pdf",
-        })
+        self.manager.accept_preview_event(_official_preview(session["session_id"]))
         self.manager.mark_print_submitted(session["session_id"], "file-1")
 
         bound = self.manager.attach_cloud_job("https://example.com/file-1.pdf", "job-1")
@@ -100,11 +124,7 @@ class InteractiveSessionManagerTests(unittest.TestCase):
 
     def test_failed_submission_can_reopen_session(self):
         session = self.manager.start_session(upload_token="token-1")
-        self.manager.accept_preview_event({
-            "file_id": "file-1",
-            "file_url": "https://example.com/file-1.pdf",
-        })
-
+        self.manager.accept_preview_event(_official_preview(session["session_id"]))
         self.assertTrue(self.manager.mark_print_submitted(session["session_id"], "file-1"))
 
     def test_integration_request_binds_cloud_ticket_to_matching_session(self):
@@ -136,7 +156,12 @@ class InteractiveSessionManagerTests(unittest.TestCase):
     def test_bound_cloud_job_keeps_authoritative_interactive_print_options(self):
         session = self.manager.start_session(upload_token="token-1")
         file_url = "https://example.com/file-1.png"
-        self.manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+        self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": file_url,
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "e" * 64,
+        })
         options = {"paper_size": "A4", "scale_mode": "actual", "color_mode": "mono"}
         self.manager.mark_print_submitted(session["session_id"], "file-1", options)
 
@@ -174,6 +199,8 @@ class InteractiveSessionManagerTests(unittest.TestCase):
             "file_url": "https://example.com/file-1.pdf",
             "file_name": "resume.pdf",
             "file_type": "application/pdf",
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "f" * 64,
         })
 
         self.assertEqual(
@@ -217,7 +244,12 @@ class InteractiveSessionManagerTests(unittest.TestCase):
     def test_snapshot_preserves_live_ipp_stage_and_page_counts(self):
         session = self.manager.start_session(upload_token="token-1")
         file_url = "https://example.com/file-1.pdf"
-        self.manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+        self.manager.accept_preview_event({
+            "file_id": "file-1",
+            "file_url": file_url,
+            "terminal_session_id": session["session_id"],
+            "terminal_ticket_hash": "1" * 64,
+        })
         self.manager.mark_print_submitted(session["session_id"], "file-1")
         self.manager.attach_cloud_job(file_url, "job-1")
 
@@ -241,7 +273,12 @@ class InteractiveSessionManagerTests(unittest.TestCase):
                 manager = InteractiveSessionManager()
                 session = manager.start_session(upload_token="token-1")
                 file_url = "https://example.com/file-1.pdf"
-                manager.accept_preview_event({"file_id": "file-1", "file_url": file_url})
+                manager.accept_preview_event({
+                    "file_id": "file-1",
+                    "file_url": file_url,
+                    "terminal_session_id": session["session_id"],
+                    "terminal_ticket_hash": "2" * 64,
+                })
                 manager.mark_print_submitted(session["session_id"], "file-1")
                 manager.attach_cloud_job(file_url, "job-1")
                 manager.accept_job_status_event({"job_id": "job-1", "status": status})

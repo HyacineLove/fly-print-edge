@@ -94,6 +94,16 @@ export function createAppController({ mountNode }) {
       return;
     }
 
+    if (type === "terminal_occupied") {
+      if (state.currentView === "login") {
+        currentViewApi?.setTerminalOccupied?.(true, {
+          expiresAt: data?.expires_at || null,
+          message: "终端使用中\n请稍候或点击刷新",
+        });
+      }
+      return;
+    }
+
     if (type === "error" || type === "cloud_error") {
       handleCloudError(data);
       return;
@@ -265,6 +275,9 @@ export function createAppController({ mountNode }) {
 
   async function restartCycle() {
     if (restartInFlight) return;
+    if (state.sessionPhase === "printing" || state.currentView === "printing") {
+      return;
+    }
     restartInFlight = true;
     try {
       await cleanupSessionResources();
