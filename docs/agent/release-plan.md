@@ -20,7 +20,7 @@
 
 - [x] `_recover_inbox_jobs` 对 `processing` 中断上报带回 `terminal_session_id` / `terminal_ticket_hash` / `integration_request_id`
 - [x] 单测：集成中断恢复后 Cloud 不因 `terminal_context_mismatch` 拒绝
-- [ ] 合入后打安装包（建议 bump 版本）
+- [x] 合入后打安装包（建议 bump 版本）→ `dist/flyprint-edge-setup-1.0.38.exe`（产物不入库）
 
 **完成：** 第三方打印中 Edge 重启后终态可被 Cloud 接受；Demo 不永久卡 dispatched/printing。  
 **文件：** `cloud_websocket_client.py`、`job_delivery_store.py`、相关 tests。
@@ -51,7 +51,7 @@
 ### P0-4 产物与预演
 
 - [ ] Compose up，Demo 健康
-- [ ] P0-1 后出 Edge 安装包
+- [x] P0-1 后出 Edge 安装包（`1.0.38`，本地 `dist/`）
 - [ ] 官方扫码打印 1 次
 - [ ] Demo 全流程到完成 1 次
 - [ ] 交付：Compose 说明 + exe + Guide + 本文件勾选结果
