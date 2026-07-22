@@ -80,7 +80,7 @@ export function startClockLoop() {
 }
 
 export function renderCommonText(page) {
-  setText(["97_158"], "简历打印服务");
+  setText(["97_158"], "飞印打印");
   setText(["3_45"], "扫描二维码上传");
   setText(["3_30"], "刷新二维码");
   setText(["97_456"], "返回");

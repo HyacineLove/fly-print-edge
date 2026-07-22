@@ -27,13 +27,13 @@
 
 ## 二维码与第三方预览
 
-- 二维码仅 `/api/qr_code`。Cloud 回相对 `/entry?token=...`；Edge 用 `cloud.base_url` 拼接，并把 `localhost`/`127.0.0.1` 改写为本机局域网 IP（**仅适合 http 演示**；HTTPS 请直接配证书域名，禁止 `https://localhost` + 改写）。禁止第二套二维码接口。
+- 出码时若 `cloud.base_url` 含 `localhost`/`127.0.0.1`，Edge 会改写为本机局域网 IP（**代码不区分 http/https**）；HTTPS 请直接配证书域名，禁止 `https://localhost` + 改写。禁止第二套二维码接口。
 - `cloud.base_url` 支持 **http 与 https**；WebSocket 由 `url_scheme.py` 映射为 **ws / wss**（受信证书，无自签）。REST 与下载跟随同一 base_url。
 - **一机占用：** 用户扫码进门签发 `terminal_ticket` 后，Cloud 下行 `terminal_occupied`（带 `msg_id`，Edge ACK）。登录页遮挡二维码，刷新仍可用；占用态暂停 60s 自动换码。不轮询 HTTP。断线时 Cloud 记 pending，Edge 重连上报 `terminal_session_state` 后补发。
 - 刷新二维码 / 新会话上报会作废 Cloud 侧未完成 ticket；手机旧票点入口或上传返回明确错误。
 - `preview_file`（官方与第三方）均须带 `terminal_session_id` + `terminal_ticket_hash`（第三方另加 `integration_request_id`），与当前会话一致才绑定。
 - 会话尚无 ticket hash 时，`terminal_occupied` 或首次有效预览可绑定 hash；用户确认参数后 Cloud 才建标准任务。
-- 预览页取消回登录须二次确认；打印中禁止中断回扫码。
+- 预览页「返回」直接回登录扫码页；打印中禁止中断回扫码。
 - 用户确认后 `/api/print` → `submit_print_params` 回传完整上下文；后续只接受内部文件 URL + Cloud `printer_id`。禁止第三方直打或跳过确认。
 - `tests/ipp_completed_simulator.py` 仅测试，不进生产路径。
 

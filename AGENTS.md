@@ -7,6 +7,8 @@
 | **开发计划 / 任务清单** | 工作区根目录 `FlyPrint开发计划.md`、`FlyPrint任务清单.md`（先读） |
 | **全量归档（防上下文丢失）** | 工作区根目录 `FlyPrint总开发计划.md` |
 | 协议 / 打印链路 / 部署边界 | `docs/agent/architecture-and-protocols.md` |
+| 现场部署与验证 | 对仓 Cloud `docs/部署与验证.md` |
+| 产品与行为全貌 | 对仓 Cloud `docs/系统说明.md` |
 | 构建 / 测试 / 安装包 | `docs/agent/development-and-verification.md` |
 | 发版 P0/P1 待办（M0） | `docs/agent/release-plan.md`（与 Cloud 同名文件保持同步） |
 | http(s)/ws(s) 双兼容 | `url_scheme.py`；`cloud_api_client.get_websocket_url`；激活/配置校验；见 `architecture-and-protocols.md`「二维码与第三方预览」 |

@@ -113,7 +113,7 @@ export function bindDoneViewEvents({ appState, restartCycle }) {
   } else {
     setCountdownAccessoryVisible(true);
     setText(["77_18"], "打印完成");
-    setText(["77_21"], "请尽快取走您的简历");
+    setText(["77_21"], "请尽快取走您的文件");
   }
 
   let countdownValue = 10;
