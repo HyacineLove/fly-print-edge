@@ -62,7 +62,7 @@
 - [x] P1-2 Demo setup 未配置/成功态更醒目
 - [x] P1-3 管理端「设置」隐藏或标明未开放（无占位入口；下拉已清理）
 - [x] P1-4 交付说明写清端口 8012、Demo 路径、默认管理员来源（Cloud：一页纸 + `docs/M0演示交接手册.md`）
-- [~] P1-5 http(s)/ws(s) 双兼容：Edge `cloud.base_url` / WS 映射 + Cloud 第三方 URL；文档已更新（分支 `feat/https-wss-dual-compat`，合入后改 `[x]`）
+- [x] P1-5 http(s)/ws(s) 双兼容：Edge `cloud.base_url` / WS 映射 + Cloud 第三方 URL；文档已更新（分支 `feat/https-wss-dual-compat`，合入后改 `[x]`）
 
 ## 明确不做（本发版日 / M0）
 
