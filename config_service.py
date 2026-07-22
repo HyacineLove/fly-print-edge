@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, Dict, List
-from urllib.parse import urlparse
 
 import requests
 
 from logging_utils import VALID_LOG_LEVELS
+from url_scheme import is_http_or_https_url
 
 
 class ConfigService:
@@ -246,8 +246,7 @@ class ConfigService:
         return current
 
     def _is_valid_url(self, value: str) -> bool:
-        parsed = urlparse(value)
-        return bool(parsed.scheme == "http" and parsed.netloc)
+        return is_http_or_https_url(value)
 
     def _normalize_bool(self, value: Any) -> bool:
         if isinstance(value, bool):

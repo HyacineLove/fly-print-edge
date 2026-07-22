@@ -12,12 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
-from urllib.parse import urlparse
 from cloud_auth import CloudAuthClient
 from cloud_api_client import CloudAPIClient
 from cloud_websocket_client import CloudWebSocketClient, PrintJobHandler
 from cloud_heartbeat_service import HeartbeatService
 from edge_node_info import EdgeNodeInfo
+from url_scheme import is_http_or_https_url
 from secure_credentials import protect_credentials, unprotect_credentials
 
 logger = logging.getLogger(__name__)
@@ -645,9 +645,8 @@ class CloudService:
         """Consume one Cloud-issued activation code and persist only DPAPI data."""
         base_url = str(base_url or "").strip().rstrip("/")
         activation_code = str(activation_code or "").strip()
-        parsed = urlparse(base_url)
-        if parsed.scheme != "http" or not parsed.netloc:
-            return {"success": False, "message": "Cloud 地址必须是有效的 HTTP 地址"}
+        if not is_http_or_https_url(base_url):
+            return {"success": False, "message": "Cloud 地址必须是有效的 HTTP(S) 地址"}
         if not activation_code:
             return {"success": False, "message": "请输入激活码"}
         try:

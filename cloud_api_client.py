@@ -9,6 +9,7 @@ import time
 from typing import Dict, Any, List, Optional
 from cloud_auth import CloudAuthClient
 from edge_node_info import EdgeNodeInfo
+from url_scheme import http_url_to_websocket_url
 
 logger = logging.getLogger(__name__)
 
@@ -172,11 +173,10 @@ class CloudAPIClient:
             return {"success": False, "error": str(exc)}
 
     def get_websocket_url(self) -> str:
-        """获取WebSocket连接URL"""
+        """获取WebSocket连接URL（http→ws，https→wss）。"""
         if not self.node_id:
             return None
-        
-        # 本部署仅使用 HTTP，因此 WebSocket 固定使用 ws://。
-        ws_base = self.base_url.replace('http://', 'ws://', 1)
+
+        ws_base = http_url_to_websocket_url(self.base_url).rstrip("/")
         return f"{ws_base}/api/v1/edge/ws?node_id={self.node_id}"
 

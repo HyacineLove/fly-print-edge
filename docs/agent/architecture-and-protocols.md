@@ -27,7 +27,8 @@
 
 ## 二维码与第三方预览
 
-- 二维码仅 `/api/qr_code`。Cloud 回相对 `/entry?token=...`；Edge 用 `cloud.base_url` 拼接，并把 `localhost`/`127.0.0.1` 改写为本机局域网 IP。禁止第二套二维码接口。
+- 二维码仅 `/api/qr_code`。Cloud 回相对 `/entry?token=...`；Edge 用 `cloud.base_url` 拼接，并把 `localhost`/`127.0.0.1` 改写为本机局域网 IP（**仅适合 http 演示**；HTTPS 请直接配证书域名，禁止 `https://localhost` + 改写）。禁止第二套二维码接口。
+- `cloud.base_url` 支持 **http 与 https**；WebSocket 由 `url_scheme.py` 映射为 **ws / wss**（受信证书，无自签）。REST 与下载跟随同一 base_url。
 - `preview_file` 第三方可选：`terminal_session_id`、`terminal_ticket_hash`、`integration_request_id`、建议 `print_options`。三项与当前会话一致才绑定；官方预览不要求。
 - 会话尚无 ticket hash 时，首次有效预览绑定 hash 与 `integration_request_id`，并上报一次 `terminal_session_state`；用户确认参数后 Cloud 才建标准任务。
 - 用户确认后 `/api/print` → `submit_print_params` 回传完整上下文；后续只接受内部文件 URL + Cloud `printer_id`。禁止第三方直打或跳过确认。
