@@ -82,10 +82,13 @@ class JobDeliveryStore:
                 VALUES(?,?,?,?, 'pending',?,?,?)""", (event_id, job_id, status, encoded, now, now, now))
             return report
 
-    def recovery(self) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def recovery(self) -> Tuple[List[Dict[str, Any]], List[Tuple[str, Dict[str, Any]]]]:
         with self._transaction() as db:
             received = [json.loads(row[0]) for row in db.execute("SELECT payload FROM print_job_inbox WHERE state='received' ORDER BY received_at")]
-            interrupted = [str(row[0]) for row in db.execute("SELECT job_id FROM print_job_inbox WHERE state='processing'")]
+            interrupted = [
+                (str(row[0]), json.loads(row[1]))
+                for row in db.execute("SELECT job_id, payload FROM print_job_inbox WHERE state='processing'")
+            ]
             return received, interrupted
 
     def due_terminal_reports(self, now: Optional[float] = None, limit: int = 100) -> List[Dict[str, Any]]:

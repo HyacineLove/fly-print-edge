@@ -23,6 +23,17 @@ from job_delivery_store import JobDeliveryStore
 
 logger = logging.getLogger(__name__)
 
+_TERMINAL_CONTEXT_KEYS = ("terminal_session_id", "terminal_ticket_hash", "integration_request_id")
+
+
+def _terminal_context_from_print_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract integration terminal fields from a persisted print_job message."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    return {key: data.get(key) for key in _TERMINAL_CONTEXT_KEYS if data.get(key)}
+
+
 _CLOUD_OPERATIONAL_ERROR_CODES = {
     "ipp_submission_unconfirmed": "submission_unconfirmed",
     "ipp_job_query_failed": "job_query_failed",
@@ -240,8 +251,15 @@ class CloudWebSocketClient:
         if not self.job_delivery_store:
             return
         received, interrupted = self.job_delivery_store.recovery()
-        for job_id in interrupted:
-            self.queue_terminal_job_update(job_id, "unconfirmed", {"job_id": job_id, "status": "unconfirmed", "error_code": "edge_restart_result_unknown", "error_message": "Edge 重启后无法确认 IPP 结果，任务不会自动重打"})
+        for job_id, payload in interrupted:
+            report = {
+                "job_id": job_id,
+                "status": "unconfirmed",
+                "error_code": "edge_restart_result_unknown",
+                "error_message": "Edge 重启后无法确认 IPP 结果，任务不会自动重打",
+            }
+            report.update(_terminal_context_from_print_payload(payload))
+            self.queue_terminal_job_update(job_id, "unconfirmed", report)
         loop = asyncio.get_running_loop()
         for payload in received:
             job_id = str((payload.get("data") or {}).get("job_id") or "")
@@ -769,11 +787,7 @@ class PrintJobHandler:
                 logger.warning("打印任务参数不完整: job_id、printer_id 和 file_url 均为必填")
                 self._report_job_failure(job_id, "Cloud 下发的打印任务缺少必填字段", "invalid_print_job")
                 return
-            terminal_context = {
-                key: data.get(key)
-                for key in ("terminal_session_id", "terminal_ticket_hash", "integration_request_id")
-                if data.get(key)
-            }
+            terminal_context = _terminal_context_from_print_payload(message)
             if not is_valid_content_hash(content_hash):
                 logger.warning("打印任务缺少有效 content_hash: job_id=%s", job_id)
                 self._report_job_failure(job_id, "content_hash missing or invalid", "invalid_content_hash")

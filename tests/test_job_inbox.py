@@ -1,6 +1,8 @@
+import asyncio
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -23,11 +25,12 @@ class JobDeliveryStoreTests(unittest.TestCase):
     def test_processing_job_is_not_recovered_for_a_second_print(self):
         with tempfile.TemporaryDirectory() as directory:
             inbox = JobDeliveryStore(os.path.join(directory, "inbox.sqlite3"))
-            inbox.receive("job-1", "message-1", {"data": {"job_id": "job-1"}})
+            payload = {"data": {"job_id": "job-1"}}
+            inbox.receive("job-1", "message-1", payload)
             self.assertTrue(inbox.mark_processing("job-1"))
             received, interrupted = inbox.recovery()
             self.assertEqual(received, [])
-            self.assertEqual(interrupted, ["job-1"])
+            self.assertEqual(interrupted, [("job-1", payload)])
 
     def test_terminal_report_is_stable_until_cloud_accepts_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,6 +71,64 @@ class JobDeliveryStoreTests(unittest.TestCase):
                 report = client.job_delivery_store.due_terminal_reports()[0]
                 client._handle_job_update_ack({"event_id": report["event_id"], "status": "accepted"})
                 self.assertEqual(client.terminal_report_summary()["pending"], 0)
+            finally:
+                client.stop()
+
+    def _pending_terminal_report(self, store):
+        reports = store.due_terminal_reports(now=time.time() + 120)
+        self.assertEqual(len(reports), 1)
+        return reports[0]
+
+    def test_recover_interrupted_integration_job_keeps_terminal_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = CloudWebSocketClient(
+                "ws://example.invalid",
+                Mock(),
+                inbox_path=os.path.join(directory, "delivery.sqlite3"),
+                node_id="node-1",
+            )
+            try:
+                payload = {
+                    "type": "print_job",
+                    "data": {
+                        "job_id": "job-int-1",
+                        "terminal_session_id": "session-1",
+                        "terminal_ticket_hash": "a" * 64,
+                        "integration_request_id": "request-1",
+                    },
+                }
+                client.job_delivery_store.receive("job-int-1", "message-1", payload)
+                self.assertTrue(client.job_delivery_store.mark_processing("job-int-1"))
+                asyncio.run(client._recover_inbox_jobs())
+                report = self._pending_terminal_report(client.job_delivery_store)
+                self.assertEqual(report["status"], "unconfirmed")
+                self.assertEqual(report["error_code"], "edge_restart_result_unknown")
+                self.assertEqual(report["terminal_session_id"], "session-1")
+                self.assertEqual(report["terminal_ticket_hash"], "a" * 64)
+                self.assertEqual(report["integration_request_id"], "request-1")
+                self.assertTrue(report.get("event_id"))
+            finally:
+                client.stop()
+
+    def test_recover_interrupted_official_job_omits_terminal_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = CloudWebSocketClient(
+                "ws://example.invalid",
+                Mock(),
+                inbox_path=os.path.join(directory, "delivery.sqlite3"),
+                node_id="node-1",
+            )
+            try:
+                payload = {"type": "print_job", "data": {"job_id": "job-official-1"}}
+                client.job_delivery_store.receive("job-official-1", "message-1", payload)
+                self.assertTrue(client.job_delivery_store.mark_processing("job-official-1"))
+                asyncio.run(client._recover_inbox_jobs())
+                report = self._pending_terminal_report(client.job_delivery_store)
+                self.assertEqual(report["status"], "unconfirmed")
+                self.assertEqual(report["error_code"], "edge_restart_result_unknown")
+                self.assertNotIn("terminal_session_id", report)
+                self.assertNotIn("terminal_ticket_hash", report)
+                self.assertNotIn("integration_request_id", report)
             finally:
                 client.stop()
 

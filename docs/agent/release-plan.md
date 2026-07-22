@@ -1,5 +1,6 @@
 # 发版计划 P0/P1
 
+> **全局计划：** 工作区根目录 `FlyPrint开发计划.md` + `FlyPrint任务清单.md`；全量归档 `FlyPrint总开发计划.md`  
 > 目标：2026-07-22 下午 · plan→execute 权威待办 · 与 `fly-print-cloud/docs/agent/release-plan.md` 同步  
 > 交付：Compose（含 Demo）+ Edge 安装包 + 第三方简要 Guide
 
@@ -11,14 +12,14 @@
 | Demo 流 | 扫码→SSO→提交→终端确认→打印→Demo `completed` |
 
 工作方式：选未完成 P0（无则 P1）→ 对话复述完成定义 → 实现+测试 → 勾选 → 新风险写入「明确不做」或升为 P0/P1。  
-状态：`[ ]` 未做 · `[~]` 进行中 · `[x]` 完成
+状态：`[ ]` 未做 · `[~]` 进行中 · `[x]` 完成（`[x]` 细则见根目录 `FlyPrint任务清单.md`「用法」第 4 条：单测通过 ≠ 已合入 ≠ 已打包/已预演）
 
 ## P0
 
 ### P0-1 Edge：重启 unconfirmed 补终端上下文
 
-- [ ] `_recover_inbox_jobs` 对 `processing` 中断上报带回 `terminal_session_id` / `terminal_ticket_hash` / `integration_request_id`
-- [ ] 单测：集成中断恢复后 Cloud 不因 `terminal_context_mismatch` 拒绝
+- [~] `_recover_inbox_jobs` 对 `processing` 中断上报带回 `terminal_session_id` / `terminal_ticket_hash` / `integration_request_id`（工作区已改，**待合入**）
+- [~] 单测：集成中断恢复后 Cloud 不因 `terminal_context_mismatch` 拒绝（工作区已有，**待合入**）
 - [ ] 合入后打安装包（建议 bump 版本）
 
 **完成：** 第三方打印中 Edge 重启后终态可被 Cloud 接受；Demo 不永久卡 dispatched/printing。  
@@ -62,6 +63,8 @@
 - [ ] P1-3 管理端「设置」隐藏或标明未开放
 - [ ] P1-4 交付说明写清端口 8012、Demo 路径、默认管理员来源
 
-## 明确不做（发版后）
+## 明确不做（本发版日 / M0）
 
-CI；版本化 DB 迁移；钉死 MinIO 非 latest；`content_hash` 端到端复算；Users/Settings 完整页；UNCONFIRMED 自动解锁（运维 `clear-unconfirmed`）；生产 HTTPS/Keycloak（演示用 builtin）。
+以下 **M0 当天不做**；长期归属见根目录 `FlyPrint开发计划.md`：CI→M3；MinIO 钉版本→M3；`content_hash` 重算→M5；Users/Settings→M2；UNCONFIRMED 静默重打→禁止（策略产品化→M5）；生产 HTTPS/Keycloak→M2。
+
+CI；版本化 DB 迁移（文档或已过时，以 Cloud migrations 为准）；钉死 MinIO 非 latest；`content_hash` 端到端复算；Users/Settings 完整页；UNCONFIRMED 自动解锁（运维 `clear-unconfirmed`）；生产 HTTPS/Keycloak（演示用 builtin）。
