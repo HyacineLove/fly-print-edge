@@ -18,8 +18,8 @@
 
 ### P0-1 Edge：重启 unconfirmed 补终端上下文
 
-- [~] `_recover_inbox_jobs` 对 `processing` 中断上报带回 `terminal_session_id` / `terminal_ticket_hash` / `integration_request_id`（工作区已改，**待合入**）
-- [~] 单测：集成中断恢复后 Cloud 不因 `terminal_context_mismatch` 拒绝（工作区已有，**待合入**）
+- [x] `_recover_inbox_jobs` 对 `processing` 中断上报带回 `terminal_session_id` / `terminal_ticket_hash` / `integration_request_id`
+- [x] 单测：集成中断恢复后 Cloud 不因 `terminal_context_mismatch` 拒绝
 - [ ] 合入后打安装包（建议 bump 版本）
 
 **完成：** 第三方打印中 Edge 重启后终态可被 Cloud 接受；Demo 不永久卡 dispatched/printing。  
