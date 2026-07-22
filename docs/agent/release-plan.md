@@ -8,7 +8,7 @@
 |------|----------|
 | Compose | `docker compose up --build -d` 后 `:8012` 管理端 + `/integration-demo/` |
 | Edge exe | 激活、连 Cloud、默认 IPP、官方扫码可打 |
-| Guide | `fly-print-cloud/docs/第三方接入简要指南.md`（待建）能配 Demo 跑通一轮 |
+| Guide | `fly-print-cloud/docs/第三方接入简要指南.md` 能配 Demo 跑通一轮 |
 | Demo 流 | 扫码→SSO→提交→终端确认→打印→Demo `completed` |
 
 工作方式：选未完成 P0（无则 P1）→ 对话复述完成定义 → 实现+测试 → 勾选 → 新风险写入「明确不做」或升为 P0/P1。  
@@ -27,26 +27,26 @@
 
 ### P0-2 演示环境就绪清单（写入 Guide）
 
-- [ ] `.env` 密钥替换说明
-- [ ] Compose 健康检查 `/health`、`/api/v1/health`
-- [ ] 管理端确认 `livacloud-demo`（entry/callback/CIDR/file host/`allow_private_file_hosts`）
-- [ ] HMAC 密钥粘贴 `/integration-demo/setup`
-- [ ] Edge `cloud.base_url` = 手机可达局域网 IP（禁 localhost）
-- [ ] Edge 激活 + 默认 IPP
+- [x] `.env` 密钥替换说明
+- [x] Compose 健康检查 `/health`、`/api/v1/health`
+- [x] 管理端确认 `livacloud-demo`（entry/callback/CIDR/file host/`allow_private_file_hosts`）
+- [x] HMAC 密钥粘贴 `/integration-demo/setup`
+- [x] Edge `cloud.base_url` = 手机可达局域网 IP（禁 localhost）
+- [x] Edge 激活 + 默认 IPP
 
-**完成：** 干净环境按清单可到 Demo 提交页。
+**完成：** 干净环境按清单可到 Demo 提交页（清单见 Guide；现场实跑属 P0-4）。
 
 ### P0-3 第三方接入简要 Guide
 
-- [ ] 边界：第三方不直连打印机；须终端确认
-- [ ] 入口：扫码→`/entry`→ticket→provider `entry_url`
-- [ ] `POST /api/v1/integrations/{code}/print-requests` + HMAC
-- [ ] 文件主机白名单与私网精确主机
-- [ ] 状态机与 callback
-- [ ] Demo 逐步操作（密钥、局域网扫码）
-- [ ] 票据约 5min 等时效；README/AGENTS 链到 Guide
+- [x] 边界：第三方不直连打印机；须终端确认
+- [x] 入口：扫码→`/entry`→ticket→provider `entry_url`
+- [x] `POST /api/v1/integrations/{code}/print-requests` + HMAC
+- [x] 文件主机白名单与私网精确主机
+- [x] 状态机与 callback
+- [x] Demo 逐步操作（密钥、局域网扫码）
+- [x] 票据约 5min 等时效；README/AGENTS 链到 Guide
 
-**完成：** 陌生人仅凭 Guide+Compose+exe 能完成一次第三方演示。
+**完成：** Guide 已发布；陌生人可凭 Guide+Compose+exe 完成第三方演示（exe/实跑属 P0-4）。
 
 ### P0-4 产物与预演
 
