@@ -45,6 +45,19 @@ export function normalizeMaxUpscale(value) {
   return Number.isFinite(num) && num > 0 ? num : defaultMaxUpscale;
 }
 
+export function normalizeOpsContacts(rawContacts) {
+  if (!Array.isArray(rawContacts)) return [];
+  return rawContacts
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const name = String(item.name || "").trim();
+      const phone = String(item.phone || "").trim();
+      if (!name || !phone) return null;
+      return { name, phone };
+    })
+    .filter(Boolean);
+}
+
 export function normalizeRuntimeSettings(rawSettings) {
   const settings = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
   const copiesMin = Math.max(1, Number.parseInt(settings.copies_min, 10) || 1);
@@ -53,6 +66,7 @@ export function normalizeRuntimeSettings(rawSettings) {
   return {
     copies_min: copiesMin,
     copies_max: copiesMax,
+    ops_contacts: normalizeOpsContacts(settings.ops_contacts),
   };
 }
 
@@ -65,10 +79,16 @@ export function createDefaultCapabilityState() {
 
 export const state = loadState();
 state.runtimeSettings = normalizeRuntimeSettings(state.runtimeSettings);
+state.opsContacts = normalizeOpsContacts(state.opsContacts || state.runtimeSettings?.ops_contacts);
 state.capabilityState =
   state.capabilityState && typeof state.capabilityState === "object"
     ? state.capabilityState
     : createDefaultCapabilityState();
+
+export function setOpsContacts(contacts) {
+  state.opsContacts = normalizeOpsContacts(contacts);
+  return state.opsContacts;
+}
 
 export function getCopyLimitState() {
   const normalized = normalizeRuntimeSettings(state.runtimeSettings);

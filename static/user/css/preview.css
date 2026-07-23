@@ -267,9 +267,14 @@ background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAY
   flex-grow: 0;
 }
 
-.Pixso-rectangle-97_446,
-.Pixso-paragraph-97_459 {
+.Pixso-rectangle-97_446 {
   display: none;
+}
+
+.Pixso-paragraph-97_459 {
+  white-space: pre-line;
+  text-align: center;
+  line-height: 1.35;
 }
 
 .Pixso-group-97_460 {

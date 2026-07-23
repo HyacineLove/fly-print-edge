@@ -4,12 +4,14 @@ import {
   createDefaultCapabilityState,
   normalizeRuntimeSettings,
   saveSessionState,
+  setOpsContacts,
 } from "../shared/session-state.js";
 import { hideUserToast, showUserToast } from "../shared/toast.js";
 import {
   loginQrRetryCountdownSeconds,
   loginQrRetryIntervalMs,
   mapQrErrorMessage,
+  renderCommonText,
   setQrCenterVisible,
 } from "../shared/runtime.js";
 
@@ -242,12 +244,15 @@ export function bindLoginViewEvents({ appState }) {
         session.session_id = qr.session_id || null;
         session.file = {};
         session.runtimeSettings = normalizeRuntimeSettings(qr.settings);
+        setOpsContacts(session.runtimeSettings.ops_contacts);
+        session.opsContacts = session.runtimeSettings.ops_contacts || [];
         session.defaultPrinterCapabilities =
           qr.default_printer_capabilities && typeof qr.default_printer_capabilities === "object"
             ? qr.default_printer_capabilities
             : null;
         session.capabilityState = createDefaultCapabilityState();
         saveSessionState();
+        renderCommonText("login");
         setBg("3_37", qr.qr_url);
         setQrCenterVisible(true);
         setQrCenterStatus("");

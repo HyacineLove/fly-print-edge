@@ -2,6 +2,7 @@ import {
   createDefaultCapabilityState,
   ensureStateOptions,
   normalizeRuntimeSettings,
+  setOpsContacts,
   saveSessionState,
   state as sessionState,
 } from "../shared/session-state.js";
@@ -9,6 +10,7 @@ import {
 export function createAppState() {
   ensureStateOptions();
   sessionState.runtimeSettings = normalizeRuntimeSettings(sessionState.runtimeSettings);
+  setOpsContacts(sessionState.runtimeSettings.ops_contacts);
   sessionState.capabilityState =
     sessionState.capabilityState && typeof sessionState.capabilityState === "object"
       ? sessionState.capabilityState

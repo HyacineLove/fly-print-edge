@@ -13,6 +13,24 @@ export const loginQrRetryIntervalMs = 10000;
 export const loginQrRetryCountdownSeconds = 10;
 export const previewFailureFallbackSeconds = 10;
 
+export function formatOpsContactsFooter(contacts) {
+  if (!Array.isArray(contacts) || contacts.length === 0) return "";
+  return contacts
+    .map((item) => {
+      const name = String(item?.name || "").trim();
+      const phone = String(item?.phone || "").trim();
+      if (!name || !phone) return "";
+      return `${name} ${phone}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function renderOpsContactsFooter(contacts) {
+  const text = formatOpsContactsFooter(contacts);
+  setText(["97_162", "97_459", "115_26"], text);
+}
+
 export function showError(message) {
   if (!message) return;
   window.alert(message);
@@ -95,7 +113,7 @@ export function renderCommonText(page) {
   setText(["133_39"], "彩色");
   setText(["133_38"], "黑白");
   setText(["77_18"], page === "done" ? "打印完成" : "打印中");
-  setText(["115_539", "115_26", "97_459", "97_162"], "");
+  renderOpsContactsFooter(state.opsContacts || state.runtimeSettings?.ops_contacts || []);
 }
 
 export function mapQrErrorMessage(errorCode, message) {

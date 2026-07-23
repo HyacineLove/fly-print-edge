@@ -172,6 +172,25 @@ class CloudAPIClient:
             logger.exception("Edge profile report failed")
             return {"success": False, "error": str(exc)}
 
+    def get_self_contacts(self) -> Dict[str, Any]:
+        """Fetch enabled ops contacts bound to this Edge node."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/v1/edge/self/contacts",
+                headers=self.auth_client.get_auth_headers(),
+                timeout=10,
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                data = payload.get("data", [])
+                if not isinstance(data, list):
+                    data = []
+                return {"success": True, "data": data}
+            return {"success": False, "error": response.text}
+        except Exception as exc:
+            logger.exception("Edge ops contacts fetch failed")
+            return {"success": False, "error": str(exc)}
+
     def get_websocket_url(self) -> str:
         """获取WebSocket连接URL（http→ws，https→wss）。"""
         if not self.node_id:

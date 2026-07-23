@@ -433,9 +433,14 @@ span {
   flex-grow: 0;
 }
 
-.Pixso-rectangle-3_33,
-.Pixso-paragraph-97_162 {
+.Pixso-rectangle-3_33 {
   display: none;
+}
+
+.Pixso-paragraph-97_162 {
+  white-space: pre-line;
+  text-align: center;
+  line-height: 1.35;
 }
 
 .container {

@@ -48,6 +48,9 @@ class CloudService:
         self.node_id = self.config.get("node_id")
         self.registered = bool(self.node_id)
         self.heartbeat_interval = self.config.get("heartbeat_interval", 30)
+        self._ops_contacts_thread = None
+        self._ops_contacts_stop = threading.Event()
+        self._ops_contacts_on_change = None
         self.pending_listeners = []
 
     @staticmethod
@@ -247,6 +250,9 @@ class CloudService:
                         self.print_job_handler.status_reporter = self.status_reporter
                     logger.debug("Printer status reporter started")
 
+            self.sync_ops_contacts()
+            self._start_ops_contacts_sync()
+
             self.last_error = None
             return {
                 "success": True,
@@ -263,6 +269,7 @@ class CloudService:
     def stop(self):
         """Stop active cloud runtime components."""
         logger.debug("Stopping cloud service")
+        self._stop_ops_contacts_sync()
 
         if self.heartbeat_service:
             self.heartbeat_service.stop()
@@ -466,6 +473,71 @@ class CloudService:
         config_file = getattr(getattr(self.printer_manager, "config", None), "config_file", "config.json")
         return str(Path(str(config_file)).parent / "runtime" / "edge_job_delivery.sqlite3")
     
+    def set_ops_contacts_change_handler(self, handler):
+        """Register a callback invoked when cached ops contacts change."""
+        self._ops_contacts_on_change = handler
+
+    def _normalize_ops_contacts(self, raw) -> list:
+        contacts = []
+        if not isinstance(raw, list):
+            return contacts
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            phone = str(item.get("phone") or "").strip()
+            if not name or not phone:
+                continue
+            contacts.append({"name": name, "phone": phone})
+        return contacts
+
+    def get_cached_ops_contacts(self) -> list:
+        settings = {}
+        if self.printer_manager and hasattr(self.printer_manager, "config"):
+            settings = self.printer_manager.config.config.get("settings") or {}
+        return self._normalize_ops_contacts(settings.get("ops_contacts"))
+
+    def sync_ops_contacts(self) -> Dict[str, Any]:
+        """Pull ops contacts from Cloud and cache them locally for the kiosk UI."""
+        if not self.api_client or not self.node_id:
+            return {"success": False, "error": "cloud api unavailable"}
+        result = self.api_client.get_self_contacts()
+        if not result.get("success"):
+            return result
+        contacts = self._normalize_ops_contacts(result.get("data"))
+        previous = self.get_cached_ops_contacts()
+        if self.printer_manager and hasattr(self.printer_manager, "config"):
+            settings = self.printer_manager.config.config.setdefault("settings", {})
+            settings["ops_contacts"] = contacts
+            self.printer_manager.config.save_config()
+        if contacts != previous and callable(self._ops_contacts_on_change):
+            try:
+                self._ops_contacts_on_change(contacts)
+            except Exception:
+                logger.exception("Ops contacts change handler failed")
+        return {"success": True, "data": contacts}
+
+    def _start_ops_contacts_sync(self):
+        self._stop_ops_contacts_sync()
+        self._ops_contacts_stop.clear()
+
+        def _loop():
+            while not self._ops_contacts_stop.wait(max(10, int(self.heartbeat_interval or 30))):
+                try:
+                    self.sync_ops_contacts()
+                except Exception:
+                    logger.exception("Periodic ops contacts sync failed")
+
+        self._ops_contacts_thread = threading.Thread(target=_loop, daemon=True, name="ops-contacts-sync")
+        self._ops_contacts_thread.start()
+
+    def _stop_ops_contacts_sync(self):
+        self._ops_contacts_stop.set()
+        thread = self._ops_contacts_thread
+        self._ops_contacts_thread = None
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
     def add_message_listener(self, message_type: str, handler):
         """添加消息监听器"""
         logger.debug("Registering cloud message listener: %s", message_type)

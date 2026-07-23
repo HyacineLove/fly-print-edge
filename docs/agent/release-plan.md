@@ -1,14 +1,21 @@
 ﻿# 发版计划 P0/P1
 
 > **全局计划：** 工作区根目录 `FlyPrint开发计划.md` + `FlyPrint任务清单.md`；全量归档 `FlyPrint总开发计划.md`  
-> 目标：2026-07-22 下午 · plan→execute 权威待办 · 与 `fly-print-cloud/docs/agent/release-plan.md` 同步  
-> 交付：Compose（含 Demo）+ Edge 安装包 + 第三方简要 Guide
+> 目标：2026-07-22 演示收口 · 更新：2026-07-23 · 与 `fly-print-cloud/docs/agent/release-plan.md` 同步  
+> **M0 已归档（07-22 verify 通过）。** 当前焦点 **M1**（联系人档案等）；本文件仅保留 M0 勾选历史。  
+> 交付：Compose（含 Demo）+ Edge 安装包 + 第三方简要 Guide；**P0 预演已于 07-22 verify 通过**
+
+### M1 进度（摘要）
+
+- [x] M1-1c：Edge 页脚运维联系人（姓名+电话）；已合入 `main`；安装包 **1.0.44**
+- [ ] M1-2 / M1-3：横竖打 orientation；触屏加固 + 手册步骤
+- Cloud 侧 M1-1a/b/d/e 见对仓 `fly-print-cloud/docs/agent/release-plan.md`
 
 | 产出 | 通过标准 |
 |------|----------|
 | Compose | `docker compose up --build -d` 后 `:8012` 管理端 + `/integration-demo/` |
 | Edge exe | 激活、连 Cloud、默认 IPP、官方扫码可打 |
-| Guide | Cloud `docs/系统说明.md` + `docs/部署与验证.md` + `docs/第三方接入指南.md` |
+| Guide | Cloud 系统说明 / 部署与验证 / 第三方接入指南（正式技术文档语气） |
 | Demo 流 | 扫码→SSO→提交→终端确认→打印→Demo `completed` |
 
 工作方式：选未完成 P0（无则 P1）→ 对话复述完成定义 → 实现+测试 → 勾选 → 新风险写入「明确不做」或升为 P0/P1。  
@@ -50,11 +57,11 @@
 
 ### P0-4 产物与预演
 
-- [ ] Compose up，Demo 健康
+- [x] Compose up，Demo 健康
 - [x] P0-1 后出 Edge 安装包（历史 `1.0.38`；dual-compat `1.0.39`；一机占用 `1.0.40`；占用 UX 收口 `1.0.43`，本地 `dist/`）
-- [ ] 官方扫码打印 1 次
-- [ ] Demo 全流程到完成 1 次
-- [ ] 交付：Compose 说明 + exe + Guide + 本文件勾选结果
+- [x] 官方扫码打印 1 次（2026-07-22 verify）
+- [x] Demo 全流程到完成 1 次（2026-07-22 verify）
+- [x] 交付：Compose 说明 + exe + Guide + 本文件勾选结果
 
 ## P1（有时间再做）
 
@@ -63,7 +70,7 @@
 - [x] P1-3 管理端「设置」隐藏或标明未开放（无占位入口；下拉已清理）
 - [x] P1-4 交付说明写清端口 8012、Demo 路径、默认管理员来源（Cloud：`docs/部署与验证.md` / `docs/系统说明.md`）
 - [x] P1-5 http(s)/ws(s) 双兼容：Edge `cloud.base_url` / WS 映射 + Cloud 第三方 URL；已合入 `main`（安装包 **1.0.39**）
-- [~] P1-6 一机占用：进门遮挡二维码 + 刷新回收 + 官方/三方上传会话校验（WS `terminal_occupied` + ACK；无 HTTP 轮询）
+- [x] P1-6 一机占用：进门遮挡二维码 + 刷新回收 + 官方/三方上传会话校验（WS `terminal_occupied` + ACK；已合入 `main`；安装包 **1.0.43**）
 
 ## 明确不做（本发版日 / M0）
 

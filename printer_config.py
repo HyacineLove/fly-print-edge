@@ -80,6 +80,9 @@ class PrinterConfig:
                 if "debug_logging" not in settings:
                     settings["debug_logging"] = False
                     config_updated = True
+                if "ops_contacts" not in settings:
+                    settings["ops_contacts"] = []
+                    config_updated = True
                 for printer in config.get("managed_printers", []):
                     if "enabled" not in printer:
                         printer["enabled"] = True
@@ -106,6 +109,7 @@ class PrinterConfig:
                     "copies_max": 3,
                     "log_level": "INFO",
                     "debug_logging": False,
+                    "ops_contacts": [],
                 },
                 "network": {
                     "bind_address": "127.0.0.1",

@@ -17,7 +17,7 @@ class EdgeNodeInfo:
     def __init__(self, node_name: str = None, location: str = None):
         self.node_name = node_name or self._generate_default_name()
         self.location = location or "未指定位置"
-        self.version = "1.0.43"  # 边缘节点版本
+        self.version = "1.0.44"  # 边缘节点版本
     
     def _generate_default_name(self) -> str:
         """生成默认节点名称"""

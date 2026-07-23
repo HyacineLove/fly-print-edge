@@ -172,6 +172,7 @@ async def startup_event():
         cloud_service.add_message_listener("error", handle_cloud_message)
         cloud_service.add_message_listener("cloud_error", handle_cloud_message)
         cloud_service.add_message_listener("job_status", handle_cloud_message)
+        cloud_service.set_ops_contacts_change_handler(_notify_ops_contacts_updated)
 
     start_result = cloud_service.start()
     if start_result.get("success"):
@@ -187,7 +188,7 @@ async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
     """广播SSE事件给所有连接的客户端"""
     if not sse_clients:
         return
-        
+
     try:
         from datetime import datetime, timezone
         message = {
@@ -195,14 +196,50 @@ async def broadcast_sse_event(event_type: str, data: Dict[str, Any]):
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
+
         client_count = len(sse_clients)
         logger.debug(f" 广播SSE事件: {event_type} -> {client_count} 客户端")
-        
+
         for q in sse_clients:
             _enqueue_sse_latest(q, message)
     except Exception as e:
         logger.error(f" 广播SSE事件失败: {e}")
+
+
+def _normalize_ops_contacts_payload(raw) -> list:
+    contacts = []
+    if not isinstance(raw, list):
+        return contacts
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        phone = str(item.get("phone") or "").strip()
+        if name and phone:
+            contacts.append({"name": name, "phone": phone})
+    return contacts
+
+
+def _get_ops_contacts() -> list:
+    if cloud_service and hasattr(cloud_service, "get_cached_ops_contacts"):
+        return cloud_service.get_cached_ops_contacts()
+    settings = _get_settings() if printer_manager else {}
+    return _normalize_ops_contacts_payload((settings or {}).get("ops_contacts"))
+
+
+def _notify_ops_contacts_updated(contacts):
+    payload = {"contacts": _normalize_ops_contacts_payload(contacts)}
+
+    def push():
+        message = {"type": "ops_contacts_updated", "data": payload}
+        for queue in list(sse_clients):
+            _enqueue_sse_latest(queue, message)
+
+    if main_loop:
+        main_loop.call_soon_threadsafe(push)
+    else:
+        push()
+
 
 def _enrich_message_with_session(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     message_type = message.get("type", "")
@@ -921,6 +958,7 @@ async def get_qr_code():
         "settings": {
             "copies_min": copies_min,
             "copies_max": copies_max,
+            "ops_contacts": _get_ops_contacts(),
         },
         "session_id": session["session_id"],
     }

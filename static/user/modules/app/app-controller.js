@@ -16,7 +16,7 @@ import {
   startClockLoop,
 } from "../shared/runtime.js";
 import { api, getJson } from "../shared/api.js";
-import { currentSessionId, saveSessionState, setDoneResult, setPendingPrintRequest } from "../shared/session-state.js";
+import { currentSessionId, saveSessionState, setDoneResult, setOpsContacts, setPendingPrintRequest } from "../shared/session-state.js";
 
 const viewRegistry = {
   login: { render: renderLoginView, bind: bindLoginViewEvents },
@@ -101,6 +101,14 @@ export function createAppController({ mountNode }) {
           message: "终端使用中\n请稍候或点击刷新",
         });
       }
+      return;
+    }
+
+    if (type === "ops_contacts_updated") {
+      setOpsContacts(data?.contacts);
+      state.opsContacts = data?.contacts || [];
+      saveSessionState();
+      renderCommonText(state.currentView);
       return;
     }
 
